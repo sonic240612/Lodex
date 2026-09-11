@@ -1,17 +1,19 @@
 # Lodex
 
-로컬 LLM과 OpenRouter를 위한 데스크톱 AI 작업 공간.
+[English](README.md) · [한국어](README.ko.md)
 
-개발 중 · Windows x64 실행 확인 · macOS/Linux 준비 중
+A desktop agent harness for local LLMs and OpenRouter.
 
-- llama-server·OpenRouter 연결, Tailscale 지원
-- 프로젝트 파일 탐색, 변경 검토·적용·되돌리기
-- 마크다운 채팅, 접을 수 있는 thinking·도구 기록
-- Goal·TODO 편집, 생성 설정과 속도 표시
+- Connect to llama-server over localhost, LAN, or Tailscale.
+- Read project files, review changes, apply them, and undo them.
+- Edit goals and tasks alongside chat, with collapsible thinking and tool logs.
+- Adjust generation settings and see token usage, generation speed, and prefill speed.
 
-## 시작하기
+Early development. Windows x64 tested; macOS and Linux support is in progress.
 
-필요한 환경: Node 24.11.1 · pnpm 12.3.4 · Rust 1.98.0 · [Tauri 개발 도구](https://v2.tauri.app/start/prerequisites/)
+## Quick start
+
+Requires Node 24.11.1, pnpm 12.3.4, Rust 1.98.0, and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/).
 
 ```sh
 git clone https://github.com/sonic240612/Lodex.git
@@ -20,14 +22,28 @@ pnpm install --frozen-lockfile
 pnpm dev
 ```
 
-## 모델 연결
+## Models
 
-**llama-server** — 서버를 실행한 뒤 앱 설정에 API 주소를 입력하세요. 기본값은 `http://127.0.0.1:8080/v1`입니다.
+- **llama-server:** Start your server and enter its API URL in settings. Default: `http://127.0.0.1:8080/v1`.
+- **OpenRouter:** Copy [`.env.example`](.env.example) to `.env`, set `OPENROUTER_API_KEY`, and restart the app. You can also save a key through the app's OS keychain integration.
 
-**OpenRouter** — `.env.example`을 `.env`로 복사하고 키를 입력한 뒤 앱을 다시 실행하세요.
+`.env` stays out of Git. Local model servers are managed separately.
 
-```dotenv
-OPENROUTER_API_KEY=
+## Packages
+
+| Package                         | Description                             |
+| ------------------------------- | --------------------------------------- |
+| [desktop](apps/desktop)         | Tauri app and React interface           |
+| [daemon](apps/daemon)           | Local API and agent loop                |
+| [providers](packages/providers) | llama-server and OpenRouter adapters    |
+| [tools](packages/tools)         | Project file tools and reviewed changes |
+| [context](packages/context)     | Request assembly and context budgets    |
+| [storage](packages/storage)     | SQLite persistence and recovery         |
+| [contracts](packages/contracts) | Shared types and validation             |
+
+## Development
+
+```sh
+pnpm check    # Type checks, tests, and build
+pnpm dev:web  # Browser UI preview with demo data
 ```
-
-`.env`는 Git 업로드에서 제외됩니다.
