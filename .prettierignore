@@ -1,0 +1,11 @@
+node_modules
+**/dist
+**/target
+**/gen
+**/icons
+.runtime
+.local
+pnpm-lock.yaml
+docs/LODEX_PRODUCT_PLAN.ko.md
+docs/DEVELOPMENT_PLAN.ko.md
+docs/development-backlog.json

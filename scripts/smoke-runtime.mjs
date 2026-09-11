@@ -1,0 +1,207 @@
+import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { randomBytes, randomUUID } from 'node:crypto';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { createInterface } from 'node:readline';
+
+const resourceRoot = process.argv[2] ? resolve(process.argv[2]) : null;
+const runtime = resourceRoot
+  ? join(resourceRoot, 'runtime', process.platform === 'win32' ? 'node.exe' : 'node')
+  : resolve('.runtime', process.platform === 'win32' ? 'node.exe' : 'node');
+const script = resourceRoot
+  ? join(resourceRoot, 'daemon/main.cjs')
+  : resolve('apps/daemon/dist/main.cjs');
+const dataDir = await mkdtemp(join(tmpdir(), 'lodex-런타임 검증 '));
+const token = randomBytes(32).toString('hex');
+const children = new Set();
+const dotenvFixture = 'fixture-only-no-real-provider-call';
+await writeFile(join(dataDir, '.env'), 'OPENROUTER_API_KEY=' + dotenvFixture + '\n', {
+  mode: 0o600,
+});
+async function boot() {
+  const child = spawn(runtime, [script], {
+    cwd: dataDir,
+    windowsHide: true,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: {
+      ...process.env,
+      NODE_OPTIONS: '',
+      NODE_PATH: '',
+      OPENROUTER_API_KEY: '',
+      LODEX_ENV_FILE: '',
+    },
+  });
+  children.add(child);
+  child.exited = new Promise((resolve) => {
+    const finish = (code, signal) => {
+      children.delete(child);
+      resolve({ code, signal });
+    };
+    child.once('exit', finish);
+    child.once('error', () => finish(null, 'spawn-error'));
+  });
+  child.stderr.resume();
+  const lines = createInterface({ input: child.stdout });
+  const ready = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Daemon startup timed out')), 10000);
+    lines.once('line', (line) => {
+      clearTimeout(timer);
+      try {
+        resolve(JSON.parse(line));
+      } catch (error) {
+        reject(error);
+      }
+    });
+    child.once('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once('exit', (code) => {
+      clearTimeout(timer);
+      reject(new Error('Daemon exited before ready: ' + code));
+    });
+  });
+  child.stdin.write(JSON.stringify({ token, dataDir, parentPid: process.pid }) + '\n');
+  const handshake = await ready;
+  assert.equal(handshake.protocolVersion, 1);
+  const base = 'http://127.0.0.1:' + handshake.port;
+  const request = (path, init = {}) =>
+    fetch(base + path, {
+      ...init,
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer ' + token,
+        ...init.headers,
+      },
+    });
+  const command = async (value) => {
+    const response = await request('/v1/commands', {
+      method: 'POST',
+      body: JSON.stringify({
+        protocolVersion: 1,
+        policyVersion: 1,
+        actor: 'desktop',
+        commandId: randomUUID(),
+        ...value,
+      }),
+    });
+    const result = await response.json();
+    assert.equal(response.status, 200, JSON.stringify(result));
+    return result.session;
+  };
+  const state = () => request('/v1/state').then((r) => r.json());
+  const secretState = await state();
+  assert.equal(secretState.openrouterKeySource, 'env_file');
+  assert.equal(secretState.openrouterConfigured, true);
+  assert.equal(JSON.stringify(secretState).includes(dotenvFixture), false);
+  return { child, base, command, state, request };
+}
+async function stop(app) {
+  app.child.stdin.end();
+  let timeout;
+  const exit = await Promise.race([
+    app.child.exited,
+    new Promise((_, reject) => {
+      timeout = setTimeout(
+        () => reject(new Error('Daemon did not stop on private pipe close')),
+        10000,
+      );
+    }),
+  ]).finally(() => clearTimeout(timeout));
+  assert.equal(exit.code, 0);
+}
+try {
+  let app = await boot();
+  if (process.argv[3]) {
+    const response = await app.request(
+      '/v1/models?' + new URLSearchParams({ provider: 'llama-server', baseUrl: process.argv[3] }),
+    );
+    const catalog = await response.json();
+    assert.equal(response.status, 200, JSON.stringify(catalog));
+    assert.ok(Array.isArray(catalog.models));
+    console.log(
+      'PASS: requested model server catalog through bundled daemon (' +
+        catalog.models.length +
+        ' models; no inference).',
+    );
+  }
+  assert.equal((await fetch(app.base + '/v1/state')).status, 401);
+  const registered = await app.request('/v1/projects', {
+    method: 'POST',
+    body: JSON.stringify({ path: dataDir }),
+  });
+  assert.equal(registered.status, 200);
+  const { project } = await registered.json();
+  let session = await app.command({
+    type: 'create_session',
+    sessionId: randomUUID(),
+    title: '패키지 검증',
+    config: { provider: 'demo', model: 'demo' },
+    projectId: project.id,
+  });
+  session = await app.command({
+    type: 'save_plan',
+    sessionId: session.id,
+    expectedVersion: session.version,
+    plan: {
+      goal: '번들 런타임 복구 검증',
+      tasks: [{ id: randomUUID(), title: '한글 경로에서 실행', done: true }],
+    },
+  });
+  session = await app.command({
+    type: 'send_message',
+    sessionId: session.id,
+    expectedVersion: session.version,
+    content: '첫 실행',
+  });
+  session = await app.command({ type: 'cancel_run', sessionId: session.id, runId: session.run.id });
+  assert.equal(session.run.status, 'cancelled');
+  await stop(app);
+  app = await boot();
+  session = (await app.state()).sessions[0];
+  assert.equal((await app.state()).projects[0].id, project.id);
+  assert.equal(session.projectId, project.id);
+  assert.equal(session.plan.goal, '번들 런타임 복구 검증');
+  assert.equal(session.plan.tasks[0].done, true);
+  session = await app.command({
+    type: 'send_message',
+    sessionId: session.id,
+    expectedVersion: session.version,
+    content: '충돌 복구',
+  });
+  app.child.kill('SIGKILL');
+  await app.child.exited;
+  app = await boot();
+  session = (await app.state()).sessions[0];
+  assert.equal(session.run.status, 'interrupted');
+  assert.equal(session.messages.at(-1).status, 'interrupted');
+  const deletion = await app.request('/v1/sessions/delete', {
+    method: 'POST',
+    body: JSON.stringify({
+      protocolVersion: 1,
+      commandId: randomUUID(),
+      actor: 'desktop',
+      policyVersion: 1,
+      type: 'delete_sessions',
+      targets: [{ sessionId: session.id, expectedVersion: session.version }],
+    }),
+  });
+  assert.equal(deletion.status, 200);
+  await stop(app);
+  app = await boot();
+  assert.equal((await app.state()).sessions.length, 0);
+  assert.equal((await app.state()).projects[0].id, project.id);
+  await stop(app);
+  console.log(
+    'PASS: dotenv loading without key exposure / bundled Node / Korean-space paths / auth / projects / chat / cancel / plan persistence / pipe shutdown / crash recovery / durable deletion.',
+  );
+} finally {
+  for (const child of children) {
+    child.kill('SIGKILL');
+    await child.exited;
+  }
+  if (dirname(resolve(dataDir)) !== resolve(tmpdir())) throw new Error('Unsafe smoke test path');
+  await rm(dataDir, { recursive: true, force: true });
+}

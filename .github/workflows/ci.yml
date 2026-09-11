@@ -1,0 +1,47 @@
+name: Desktop foundation
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, macos-15, macos-15-intel, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 12.3.4
+          run_install: false
+      - name: Linux native dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev
+      - name: Install pinned Rust
+        run: rustup show
+      - name: Install locked packages
+        run: pnpm install --frozen-lockfile
+      - name: TypeScript and state/provider tests
+        run: pnpm check
+      - name: Bundled runtime smoke test
+        run: node scripts/smoke-runtime.mjs
+      - name: Rust formatting
+        run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
+      - name: Rust bridge tests
+        run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
+      - name: Rust static analysis
+        run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --locked -- -D warnings
+      - name: Native desktop compilation
+        run: pnpm --filter @lodex/desktop tauri build --debug --no-bundle
+      # Native window E2E, installers, signing and release artifacts are gated in M7.

@@ -1,0 +1,9 @@
+packages:
+  - apps/*
+  - packages/*
+packageImportMethod: copy
+allowBuilds:
+  esbuild: true
+minimumReleaseAgeExclude:
+  - vite@8.3.0
+  - zod@4.6.2

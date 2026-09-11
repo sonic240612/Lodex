@@ -1,0 +1,160 @@
+import { describe, expect, it } from 'vitest';
+import { defaultModelConfig, defaultPlan, type Message, type Session } from '@lodex/contracts';
+import { compileContext, estimateInputTokens } from './index';
+
+function session(): Session {
+  return {
+    id: crypto.randomUUID(),
+    title: 'context',
+    version: 7,
+    createdAt: '',
+    updatedAt: '',
+    config: defaultModelConfig(),
+    plan: defaultPlan(),
+    messages: [],
+    run: null,
+  };
+}
+function message(
+  role: Message['role'],
+  content: string,
+  status: Message['status'] = 'complete',
+): Message {
+  return {
+    id: crypto.randomUUID(),
+    role,
+    content,
+    status,
+    createdAt: '',
+    error: null,
+    usage: null,
+  };
+}
+describe('context compiler', () => {
+  it('includes edit outcome without adding mid-conversation system roles or claiming tests passed', () => {
+    const source = session();
+    const answer = message('assistant', '제안했습니다.');
+    answer.activities = [
+      {
+        id: crypto.randomUUID(),
+        kind: 'tool',
+        label: 'propose_edit',
+        status: 'completed',
+        text: 'proposal',
+        edit: {
+          path: 'file.ts',
+          beforeHash: '0'.repeat(64),
+          afterHash: '1'.repeat(64),
+          oldText: 'private old source',
+          newText: 'private new source',
+          diff: 'private diff',
+          status: 'applied',
+        },
+      },
+    ];
+    source.messages = [message('user', '수정 제안'), answer];
+    const { request } = compileContext(source, '다음 작업');
+    expect(request.messages.map((m) => m.role)).toEqual(['system', 'user', 'assistant', 'user']);
+    expect(request.messages.at(-1)!.content).toContain('"status":"applied"');
+    expect(request.messages.at(-1)!.content).toContain('not passed tests');
+    expect(request.messages.at(-1)!.content.endsWith('다음 작업')).toBe(true);
+    expect(JSON.stringify(request)).not.toContain('private');
+  });
+  it('preserves complete history verbatim and keeps the current request last', () => {
+    const source = session();
+    source.messages = [
+      message('user', 'Do not change the API.'),
+      message('assistant', 'Understood.'),
+    ];
+    const before = structuredClone(source);
+    const result = compileContext(source, 'Fix the bug.');
+    expect(result.request.messages.slice(1)).toEqual([
+      { role: 'user', content: 'Do not change the API.' },
+      { role: 'assistant', content: 'Understood.' },
+      { role: 'user', content: 'Fix the bug.' },
+    ]);
+    expect(result.manifest.historyMessageIds).toEqual(source.messages.map((m) => m.id));
+    expect(source).toEqual(before);
+  });
+  it('does not share a saved private plan merely because cloud chat consent is enabled', () => {
+    const source = session();
+    source.config = { ...source.config, provider: 'openrouter', cloudConsent: true };
+    source.plan = {
+      ...defaultPlan(),
+      goal: 'PRIVATE_GOAL',
+      instructions: 'PRIVATE_INSTRUCTION',
+      tasks: [{ id: crypto.randomUUID(), title: 'PRIVATE_TASK', done: true }],
+    };
+    const result = compileContext(source, 'hello');
+    expect(JSON.stringify(result)).not.toContain('PRIVATE_');
+    expect(result.manifest.planIncluded).toBe(false);
+  });
+  it('includes an opted-in working brief as user content, with task state intact', () => {
+    const source = session();
+    source.plan = {
+      ...defaultPlan(),
+      goal: '한국어 UI',
+      instructions: '오프라인 지원',
+      includeInContext: true,
+      tasks: [{ id: crypto.randomUUID(), title: '설정', done: false }],
+    };
+    const result = compileContext(source, '다음 단계');
+    const user = result.request.messages.at(-1)!;
+    expect(user.role).toBe('user');
+    expect(user.content).toContain('오프라인 지원');
+    expect(user.content).toContain('"done":false');
+    expect(user.content.endsWith('Current request:\n다음 단계')).toBe(true);
+    expect(result.request.messages[0]?.content).not.toContain('한국어 UI');
+    expect(result.manifest.planIncluded).toBe(true);
+    source.plan.goal = 'later edit';
+    expect(user.content).not.toContain('later edit');
+  });
+  it('excludes all unfinished assistant responses without losing their user requests', () => {
+    const source = session();
+    source.messages = [
+      message('user', 'Keep this constraint.'),
+      ...(['streaming', 'failed', 'interrupted', 'cancelled'] as const).map((state) =>
+        message('assistant', 'UNFINISHED_' + state, state),
+      ),
+    ];
+    const result = compileContext(source, 'continue');
+    expect(JSON.stringify(result.request)).not.toContain('UNFINISHED_');
+    expect(result.request.messages[1]?.content).toBe('Keep this constraint.');
+    expect(result.manifest.excludedMessageIds).toHaveLength(4);
+  });
+  it('reserves output and template headroom, and rejects overflow without trimming', () => {
+    const source = session();
+    source.config = { ...source.config, contextBudgetTokens: 2048, maxTokens: 1024 };
+    source.messages = [message('user', 'x'.repeat(1100))];
+    const before = structuredClone(source);
+    expect(() => compileContext(source, 'hello')).toThrow('앱 컨텍스트 예산');
+    expect(source).toEqual(before);
+  });
+  it('counts Korean and emoji bytes, and labels the result as a heuristic', () => {
+    expect(estimateInputTokens([{ role: 'user', content: '한😀' }])).toBe(27);
+    const result = compileContext(session(), '한😀');
+    expect(result.manifest.estimateSource).toBe('utf8_bytes_v1');
+    expect(result.manifest.serializedBytes).toBe(
+      Buffer.byteLength(JSON.stringify(result.request.messages)),
+    );
+  });
+  it('includes Eco in the budget and fingerprints the compiled input deterministically', () => {
+    const source = session();
+    const normal = compileContext(source, 'hello');
+    expect(compileContext(source, 'hello').manifest.requestSha256).toBe(
+      normal.manifest.requestSha256,
+    );
+    source.config.eco = true;
+    const eco = compileContext(source, 'hello');
+    expect(eco.manifest.inputEstimateTokens).toBeGreaterThan(normal.manifest.inputEstimateTokens);
+    expect(eco.manifest.requestSha256).not.toBe(normal.manifest.requestSha256);
+    expect(eco.request.messages[0]?.content).toContain('Preserve constraints');
+  });
+  it('includes system and plan content in the independent byte cap', () => {
+    const source = session();
+    source.config.contextBudgetTokens = 2097152;
+    source.plan = { ...defaultPlan(), includeInContext: true, goal: '한'.repeat(4000) };
+    source.messages = [message('user', 'x'.repeat(251000))];
+    expect(() => compileContext(source, 'hello')).toThrow('256 KiB');
+  });
+});

@@ -1,0 +1,43 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Lodex",
+  "version": "0.1.0",
+  "identifier": "app.lodex.desktop",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Lodex",
+        "width": 1380,
+        "height": 900,
+        "minWidth": 860,
+        "minHeight": 620,
+        "backgroundColor": "#191919"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'self'; frame-src 'none'",
+      "capabilities": ["main"]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": ["icons/icon.png", "icons/icon.ico", "icons/icon.icns"],
+    "resources": {
+      "../../../.runtime/*": "runtime/",
+      "../../daemon/dist/*.cjs": "daemon/"
+    },
+    "shortDescription": "Local-first agent workspace",
+    "category": "DeveloperTool",
+    "macOS": {
+      "minimumSystemVersion": "12.0"
+    }
+  }
+}

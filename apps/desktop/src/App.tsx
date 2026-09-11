@@ -1,0 +1,1227 @@
+import { useEffect, useRef, useState, type FormEvent } from 'react';
+import {
+  modelConfigSchema,
+  defaultPlan,
+  type ModelConfig,
+  type ModelDescriptor,
+  type Plan,
+  type Session,
+} from '@lodex/contracts';
+import { models, nativeDesktop, saveKey, sendCommand, snapshot, subscribe } from './bridge';
+import { Icon, Logo } from './icons';
+import { useWorkspace } from './state';
+import { ActivityCards } from './ActivityCards';
+import { ProjectDialog } from './ProjectDialog';
+import { Markdown } from './Markdown';
+import { ConversationHistory } from './ConversationHistory';
+
+const providerName = (provider: string) =>
+  provider === 'openrouter' ? 'OpenRouter' : provider === 'demo' ? '데모' : 'llama-server';
+const messageError = (error: unknown) => (error instanceof Error ? error.message : String(error));
+
+export function App() {
+  const workspace = useWorkspace();
+  const session = workspace.sessions.find((s) => s.id === workspace.selectedId);
+  const [settings, setSettings] = useState(false);
+  const [projectDialog, setProjectDialog] = useState(false);
+  const [showActivities, setShowActivities] = useState(() => {
+    try {
+      return localStorage.getItem('lodex.showActivities') !== 'false';
+    } catch {
+      return true;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem('lodex.showActivities', String(showActivities));
+    } catch {
+      /* Display preference only. */
+    }
+  }, [showActivities]);
+  const [planOpen, setPlanOpen] = useState(window.innerWidth >= 1180);
+  const [sidebarOpen, setSidebarOpen] = useState(window.innerWidth > 760);
+  const [error, setError] = useState('');
+  const [text, setText] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [light, setLight] = useState(false);
+  const end = useRef<HTMLDivElement>(null);
+  const composer = useRef<HTMLTextAreaElement>(null);
+  const config = session?.config ?? workspace.config;
+  const running = session?.run?.status === 'running';
+  const project = workspace.projects.find((p) => p.id === workspace.selectedProjectId);
+  const visibleSessions = workspace.sessions.filter(
+    (s) => (s.projectId ?? null) === workspace.selectedProjectId,
+  );
+
+  useEffect(() => {
+    const shortcut = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'n') {
+        event.preventDefault();
+        useWorkspace.getState().select(null);
+        setText('');
+        composer.current?.focus();
+      }
+    };
+    window.addEventListener('keydown', shortcut);
+    return () => window.removeEventListener('keydown', shortcut);
+  }, []);
+
+  useEffect(() => {
+    let disposed = false,
+      cleanup: (() => void) | undefined,
+      timer: ReturnType<typeof setTimeout> | undefined;
+    let retries = 0;
+    const connect = async () => {
+      try {
+        const state = await snapshot();
+        if (disposed) return;
+        useWorkspace.getState().replace(state);
+        retries = 0;
+        cleanup = await subscribe(
+          state.lastSeq,
+          (event) => {
+            if (!disposed) useWorkspace.getState().event(event);
+          },
+          retry,
+        );
+        if (disposed) cleanup();
+      } catch (failure) {
+        if (!disposed) {
+          setError(messageError(failure));
+          retry();
+        }
+      }
+    };
+    const retry = () => {
+      if (disposed) return;
+      useWorkspace.getState().setConnected(false);
+      clearTimeout(timer);
+      timer = setTimeout(
+        () => {
+          void connect();
+        },
+        Math.min(1000 * 2 ** retries++, 15000),
+      );
+    };
+    void connect();
+    return () => {
+      disposed = true;
+      cleanup?.();
+      clearTimeout(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    end.current?.scrollIntoView({ behavior: running ? 'instant' : 'smooth', block: 'end' });
+  }, [session?.id, session?.messages.at(-1)?.content, running]);
+  async function createSession(modelConfig = workspace.config): Promise<Session> {
+    const result = await sendCommand({
+      type: 'create_session',
+      sessionId: crypto.randomUUID(),
+      title: '새 대화',
+      config: modelConfig,
+      projectId: workspace.selectedProjectId,
+    });
+    workspace.upsert(result.session);
+    workspace.select(result.session.id);
+    return result.session;
+  }
+  async function submit(event?: FormEvent) {
+    event?.preventDefault();
+    if (!text.trim() || busy || running || !workspace.connected) return;
+    if (config.provider !== 'demo' && !config.model) {
+      setSettings(true);
+      return;
+    }
+    const content = text.trim();
+    setBusy(true);
+    setError('');
+    try {
+      const target = session ?? (await createSession());
+      const result = await sendCommand({
+        type: 'send_message',
+        sessionId: target.id,
+        expectedVersion: target.version,
+        content,
+      });
+      workspace.upsert(result.session);
+      setText('');
+    } catch (failure) {
+      setError(messageError(failure));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function cancel() {
+    if (!session?.run || busy) return;
+    setBusy(true);
+    try {
+      const result = await sendCommand({
+        type: 'cancel_run',
+        sessionId: session.id,
+        runId: session.run.id,
+      });
+      workspace.upsert(result.session);
+    } catch (failure) {
+      setError(messageError(failure));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function applyConfig(value: ModelConfig) {
+    workspace.setConfig(value);
+    if (session?.messages.length) await createSession(value);
+    else if (session) {
+      const result = await sendCommand({
+        type: 'configure_session',
+        sessionId: session.id,
+        expectedVersion: session.version,
+        config: value,
+      });
+      workspace.upsert(result.session);
+    }
+    setSettings(false);
+  }
+  const latestUsage = session?.messages.filter((m) => m.role === 'assistant').at(-1)?.usage;
+  return (
+    <div
+      className={`app ${light ? 'light' : ''} ${sidebarOpen ? '' : 'sidebar-closed'} ${planOpen ? '' : 'plan-closed'}`}
+    >
+      <aside className="sidebar" aria-label="대화 탐색">
+        <div className="brand">
+          <span className="brand-mark">
+            <Logo />
+          </span>
+          <strong>Lodex</strong>
+          <span className="version">0.1</span>
+          <button
+            className="icon-button collapse-sidebar"
+            aria-label="사이드바 접기"
+            onClick={() => setSidebarOpen(false)}
+          >
+            <Icon name="panel" size={18} />
+          </button>
+        </div>
+        <button
+          className="new-chat"
+          onClick={() => {
+            workspace.select(null);
+            setText('');
+            composer.current?.focus();
+          }}
+        >
+          <Icon name="plus" size={18} />새 대화<span>⌘ / Ctrl N</span>
+        </button>
+        <div className="nav-caption">워크스페이스</div>
+        <button
+          className={`nav-item ${!project ? 'active' : ''}`}
+          onClick={() => {
+            workspace.selectProject(null);
+            setText('');
+            composer.current?.focus();
+          }}
+        >
+          <Icon name="chat" size={18} />
+          일반 대화
+        </button>
+        <button className="nav-item" onClick={() => setPlanOpen((value) => !value)}>
+          <Icon name="goal" size={18} />
+          Goal과 할 일
+        </button>
+        <button className="nav-item" onClick={() => setSettings(true)}>
+          <Icon name="chip" size={18} />
+          모델 연결
+        </button>
+        <div className="history-caption">
+          <span>프로젝트</span>
+          <button
+            className="icon-button"
+            aria-label="프로젝트 추가"
+            onClick={() => setProjectDialog(true)}
+          >
+            <Icon name="plus" size={16} />
+          </button>
+        </div>
+        <div className="project-list">
+          {workspace.projects.map((item) => (
+            <button
+              key={item.id}
+              title={item.path}
+              className={`nav-item ${project?.id === item.id ? 'active' : ''}`}
+              onClick={() => {
+                workspace.selectProject(item.id);
+                setText('');
+              }}
+            >
+              <Icon name="folder" size={17} />
+              <span>{item.name}</span>
+            </button>
+          ))}
+          {!workspace.projects.length && (
+            <button className="project-empty" onClick={() => setProjectDialog(true)}>
+              로컬 폴더 연결
+            </button>
+          )}
+        </div>
+        <ConversationHistory
+          key={workspace.selectedProjectId ?? 'general'}
+          sessions={visibleSessions}
+          title={project ? project.name + ' 대화' : '최근 대화'}
+          onSelect={(id) => {
+            workspace.select(id);
+            setText('');
+          }}
+          onDeleted={() => setText('')}
+          onError={setError}
+        />
+        <div className="sidebar-bottom">
+          <div className="local-card">
+            <span className={`status-dot ${workspace.connected ? 'online' : ''}`} />
+            <div>
+              <strong>{workspace.connected ? '워크스페이스 준비됨' : '데몬에 연결하는 중'}</strong>
+              <small>
+                {nativeDesktop
+                  ? '대화는 이 기기에 저장됩니다'
+                  : '브라우저 UI 미리보기 · 임시 데이터'}
+              </small>
+            </div>
+          </div>
+          <button className="profile-button" onClick={() => setSettings(true)}>
+            <span className="avatar">L</span>
+            <span>
+              <strong>내 워크스페이스</strong>
+              <small>로컬 우선 · 개인 설정</small>
+            </span>
+            <Icon name="settings" size={18} />
+          </button>
+        </div>
+      </aside>
+
+      <main className="main">
+        <header className="topbar">
+          <div className="topbar-left">
+            {
+              <button
+                className={`icon-button ${sidebarOpen ? 'mobile-sidebar-toggle' : ''}`}
+                aria-label={sidebarOpen ? '사이드바 닫기' : '사이드바 열기'}
+                onClick={() => setSidebarOpen(!sidebarOpen)}
+              >
+                <Icon name="panel" />
+              </button>
+            }
+            <button className="model-picker" onClick={() => setSettings(true)}>
+              <span className="model-name">{config.model || '모델 연결'}</span>
+              <Icon name="down" size={15} />
+            </button>
+          </div>
+          <div className="topbar-right">
+            <span className="mode-badge" title={project?.path}>
+              {project ? project.name + ' · Plan / 변경 검토' : '대화 · Plan 편집'}
+            </span>
+            <button
+              className="activity-toggle"
+              aria-pressed={showActivities}
+              onClick={() => setShowActivities(!showActivities)}
+            >
+              {showActivities ? '활동 숨기기' : '활동 표시'}
+            </button>
+            <button
+              className="icon-button"
+              aria-label={light ? '어두운 테마' : '밝은 테마'}
+              onClick={() => setLight(!light)}
+            >
+              <Icon name="moon" size={18} />
+            </button>
+            <button
+              className={`icon-button ${planOpen ? 'is-active' : ''}`}
+              aria-label="Goal 패널 열기/닫기"
+              aria-expanded={planOpen}
+              onClick={() => setPlanOpen(!planOpen)}
+            >
+              <Icon name="panel" size={19} />
+            </button>
+          </div>
+        </header>
+        {!nativeDesktop && (
+          <div className="preview-banner">
+            UI 미리보기입니다. 실제 모델 연결과 영구 저장은 데스크톱 앱에서 사용할 수 있습니다.
+          </div>
+        )}
+        <div className={`conversation ${session?.messages.length ? 'has-messages' : ''}`}>
+          {!session?.messages.length ? (
+            <div className="welcome">
+              <div className="welcome-logo">
+                <Logo size={64} />
+              </div>
+              <div className="eyebrow">YOUR MODELS. YOUR WORKSPACE.</div>
+              <h1>무엇을 만들어 볼까요?</h1>
+              <p>
+                생각을 정리하고, 목표를 세우고.
+                <br />내 모델과 함께 시작하는 나만의 작업 공간.
+              </p>
+              <div className="suggestions">
+                <button
+                  onClick={() => {
+                    setText('만들고 싶은 프로그램의 개발 단계를 함께 정리해 줘.');
+                    composer.current?.focus();
+                  }}
+                >
+                  <Icon name="chat" />
+                  <strong>아이디어 구체화</strong>
+                  <span>생각을 실행 가능한 단계로</span>
+                </button>
+                <button onClick={() => setPlanOpen(true)}>
+                  <Icon name="goal" />
+                  <strong>목표와 할 일 작성</strong>
+                  <span>이번 작업의 방향 정하기</span>
+                </button>
+                <button onClick={() => setSettings(true)}>
+                  <Icon name="chip" />
+                  <strong>내 모델 연결</strong>
+                  <span>로컬 서버 또는 OpenRouter</span>
+                </button>
+              </div>
+              <span className="welcome-note">
+                <Icon name="info" size={14} />
+                {nativeDesktop
+                  ? 'llama-server는 설정한 서버로, OpenRouter는 전송 동의 후 연결합니다.'
+                  : '데모 화면에는 실제 모델 응답이나 성능 수치를 표시하지 않습니다.'}
+              </span>
+            </div>
+          ) : (
+            <div className="messages" aria-live="polite" aria-relevant="additions text">
+              {session.messages.map((message) => (
+                <article key={message.id} className={`message ${message.role}`}>
+                  {showActivities && message.activities?.length ? (
+                    <ActivityCards activities={message.activities} sessionId={session.id} />
+                  ) : null}
+                  {!showActivities &&
+                    message.activities?.some(
+                      (a) =>
+                        (a.changes || a.edit) &&
+                        !['applied', 'reverted'].includes((a.changes || a.edit)!.status),
+                    ) && (
+                      <button className="review-reveal" onClick={() => setShowActivities(true)}>
+                        파일 수정안 확인
+                      </button>
+                    )}
+                  <div className="message-body">
+                    {(message.content ? <Markdown text={message.content} /> : null) ||
+                      (message.status === 'streaming' ? (
+                        <span className="thinking">
+                          <i />
+                          <i />
+                          <i />
+                        </span>
+                      ) : (
+                        '응답 내용이 없습니다.'
+                      ))}
+                  </div>
+                  {message.error && (
+                    <p className="message-error">
+                      <Icon name="info" size={15} />
+                      {message.error}
+                    </p>
+                  )}
+                  {['cancelled', 'interrupted', 'failed'].includes(message.status) && (
+                    <span className="message-status">
+                      {message.status === 'cancelled'
+                        ? '중지됨'
+                        : message.status === 'interrupted'
+                          ? '이전 실행이 중단됨'
+                          : '응답 미완료'}
+                    </span>
+                  )}
+                  {message.usage?.costUsd !== null && message.usage?.costUsd !== undefined && (
+                    <span className="message-status">
+                      제공자 보고 비용 ${message.usage.costUsd.toFixed(6)}
+                    </span>
+                  )}
+                </article>
+              ))}
+              <div ref={end} />
+            </div>
+          )}
+        </div>
+        <div className="composer-area">
+          {error && (
+            <div className="error-banner" role="alert">
+              <Icon name="info" size={17} />
+              <span>{error}</span>
+              <button
+                className="icon-button"
+                aria-label="오류 알림 닫기"
+                onClick={() => setError('')}
+              >
+                <Icon name="close" size={15} />
+              </button>
+            </div>
+          )}
+          <form
+            className="composer"
+            onSubmit={(event) => {
+              void submit(event);
+            }}
+          >
+            <textarea
+              ref={composer}
+              aria-label="메시지"
+              placeholder={project ? project.name + '에서 작업 요청하기' : '메시지 보내기'}
+              value={text}
+              rows={2}
+              maxLength={64000}
+              onChange={(event) => setText(event.target.value)}
+              onKeyDown={(event) => {
+                if (
+                  event.key === 'Enter' &&
+                  !event.shiftKey &&
+                  !event.nativeEvent.isComposing &&
+                  event.keyCode !== 229
+                ) {
+                  event.preventDefault();
+                  void submit();
+                }
+              }}
+            />
+            <div className="composer-toolbar">
+              <button type="button" className="provider-tag" onClick={() => setSettings(true)}>
+                <Icon name={config.provider === 'openrouter' ? 'cloud' : 'chip'} size={15} />
+                {providerName(config.provider)}
+                <Icon name="down" size={12} />
+              </button>
+              {config.eco && (
+                <span className="eco-tag">
+                  <Icon name="leaf" size={14} />
+                  Eco
+                </span>
+              )}
+              <div className="composer-spacer" />
+              <span className="composer-hint">Shift + Enter 줄바꿈</span>
+              {running ? (
+                <button
+                  type="button"
+                  className="send-button stop-button"
+                  aria-label="응답 중지"
+                  disabled={busy}
+                  onClick={() => {
+                    void cancel();
+                  }}
+                >
+                  <Icon name="stop" size={16} />
+                </button>
+              ) : (
+                <button
+                  type="submit"
+                  className="send-button"
+                  aria-label="메시지 보내기"
+                  disabled={!text.trim() || busy || !workspace.connected}
+                >
+                  <Icon name="arrow" size={20} />
+                </button>
+              )}
+            </div>
+          </form>
+          <div className="composer-footer">
+            <span>
+              {running
+                ? '응답을 생성하는 중입니다.'
+                : project
+                  ? config.provider === 'openrouter' && !config.projectCloudConsent
+                    ? '프로젝트 파일 전송이 꺼져 있습니다. 설정에서 허용할 수 있습니다.'
+                    : '파일 목록·읽기·검색과 수정안 제안을 사용할 수 있습니다. 변경은 검토 후 적용합니다.'
+                  : '프로젝트를 연결하면 파일을 살펴보며 작업할 수 있습니다.'}
+            </span>
+            <span className="metrics-mini">
+              <Icon name="bolt" size={12} />
+              {latestUsage?.decodeTps
+                ? latestUsage.decodeTps.value.toFixed(1) + ' tok/s'
+                : '속도 미측정'}
+            </span>
+          </div>
+        </div>
+      </main>
+
+      {planOpen && (
+        <aside className="plan-panel" aria-label="Goal과 할 일">
+          <div className="plan-header">
+            <Icon name="goal" size={19} />
+            <strong>작업 계획</strong>
+            <span className="small-badge">편집</span>
+          </div>
+          <PlanEditor
+            key={session?.id ?? 'new'}
+            session={session}
+            ensureSession={createSession}
+            onError={setError}
+          />
+          <div className="run-panel">
+            <div className="section-label">현재 실행</div>
+            <div className="run-state">
+              <span className={`status-dot ${running ? 'pulsing' : ''}`} />
+              {running ? '모델 응답 생성 중' : '대기 중'}
+            </div>
+            <dl className="metrics-list">
+              <div>
+                <dt>생성 속도</dt>
+                <dd>
+                  {latestUsage?.decodeTps ? latestUsage.decodeTps.value.toFixed(1) + ' tok/s' : '—'}
+                </dd>
+              </div>
+              <div>
+                <dt>프리필 속도</dt>
+                <dd>
+                  {latestUsage?.prefillTps
+                    ? latestUsage.prefillTps.value.toFixed(1) + ' tok/s'
+                    : '—'}
+                </dd>
+              </div>
+              <div>
+                <dt>첫 토큰 지연</dt>
+                <dd>
+                  {latestUsage?.ttftMs ? (latestUsage.ttftMs.value / 1000).toFixed(2) + ' s' : '—'}
+                </dd>
+              </div>
+              <div>
+                <dt>출력 토큰</dt>
+                <dd>{latestUsage?.outputTokens ?? '—'}</dd>
+              </div>
+              <div>
+                <dt>비용</dt>
+                <dd>
+                  {latestUsage?.costUsd != null
+                    ? '$' + latestUsage.costUsd.toFixed(6)
+                    : config.provider === 'openrouter' && latestUsage
+                      ? '확인 대기'
+                      : '—'}
+                </dd>
+              </div>
+            </dl>
+            <p className="subtle-note">
+              속도는 엔진 보고값, 첫 토큰 지연은 앱 측정값입니다. 제공되지 않은 수치는 추정하지
+              않습니다.
+            </p>
+          </div>
+          {session?.run?.context && (
+            <details className="context-report">
+              <summary>
+                입력 구성 · 추정 {session.run.context.inputEstimateTokens.toLocaleString()} 토큰
+              </summary>
+              <dl className="metrics-list">
+                <div>
+                  <dt>앱 예산</dt>
+                  <dd>{session.run.context.contextBudgetTokens.toLocaleString()}</dd>
+                </div>
+                <div>
+                  <dt>출력 예약 / 여유</dt>
+                  <dd>
+                    {session.run.context.outputReserveTokens.toLocaleString()} /{' '}
+                    {session.run.context.safetyReserveTokens.toLocaleString()}
+                  </dd>
+                </div>
+                <div>
+                  <dt>대화 이력</dt>
+                  <dd>{session.run.context.historyMessageIds.length}개 메시지</dd>
+                </div>
+                <div>
+                  <dt>미완료 응답 제외</dt>
+                  <dd>{session.run.context.excludedMessageIds.length}개</dd>
+                </div>
+                <div>
+                  <dt>저장한 계획·지침</dt>
+                  <dd>{session.run.context.planIncluded ? '포함' : '제외'}</dd>
+                </div>
+              </dl>
+              <p className="subtle-note">
+                마지막 요청 기준입니다. UTF-8 바이트를 이용한 보수적 추정으로, 실제 토큰 수·엔진
+                한도와 다를 수 있습니다. 완료된 대화는 생략하지 않습니다.
+              </p>
+            </details>
+          )}
+          <div className="upcoming">
+            <Icon name="bolt" size={16} />
+            <div>
+              <strong>Autopilot</strong>
+              <p>목표 검증과 복구 기능을 구현한 뒤 연결합니다.</p>
+            </div>
+            <span className="small-badge">예정</span>
+          </div>
+        </aside>
+      )}
+      {projectDialog && (
+        <ProjectDialog
+          onClose={() => setProjectDialog(false)}
+          onAdded={(project) => {
+            workspace.upsertProject(project);
+            workspace.selectProject(project.id);
+            setText('');
+            setProjectDialog(false);
+          }}
+        />
+      )}
+      {settings && (
+        <Settings
+          config={config}
+          hasMessages={!!session?.messages.length}
+          running={!!running}
+          onClose={() => setSettings(false)}
+          onSave={applyConfig}
+        />
+      )}
+    </div>
+  );
+}
+
+function PlanEditor({
+  session,
+  ensureSession,
+  onError,
+}: {
+  session: Session | undefined;
+  ensureSession: () => Promise<Session>;
+  onError: (error: string) => void;
+}) {
+  const [draft, setDraft] = useState<Plan>(session?.plan ?? defaultPlan());
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [taskTitle, setTaskTitle] = useState('');
+  const connected = useWorkspace((state) => state.connected);
+  const storedPlan = JSON.stringify(session?.plan ?? defaultPlan());
+  useEffect(() => {
+    if (!dirty) setDraft(JSON.parse(storedPlan) as Plan);
+  }, [storedPlan, dirty]);
+  const completed = draft.tasks.filter((task) => task.done).length;
+  const update = (value: Plan) => {
+    setDraft(value);
+    setDirty(true);
+  };
+  async function save() {
+    setSaving(true);
+    try {
+      const target = session ?? (await ensureSession());
+      const result = await sendCommand({
+        type: 'save_plan',
+        sessionId: target.id,
+        expectedVersion: target.version,
+        plan: draft,
+      });
+      useWorkspace.getState().upsert(result.session);
+      setDirty(false);
+    } catch (failure) {
+      onError(messageError(failure));
+    } finally {
+      setSaving(false);
+    }
+  }
+  function addTask(event: FormEvent) {
+    event.preventDefault();
+    if (!taskTitle.trim()) return;
+    update({
+      ...draft,
+      tasks: [...draft.tasks, { id: crypto.randomUUID(), title: taskTitle.trim(), done: false }],
+    });
+    setTaskTitle('');
+  }
+  return (
+    <div className="plan-editor">
+      <label className="section-label" htmlFor="goal">
+        GOAL
+      </label>
+      <textarea
+        id="goal"
+        className="goal-input"
+        rows={3}
+        maxLength={4000}
+        placeholder="이번 작업에서 이루고 싶은 목표를 적어 보세요."
+        value={draft.goal}
+        onChange={(event) => update({ ...draft, goal: event.target.value })}
+      />
+      <label className="section-label" htmlFor="plan-instructions">
+        고정 지침
+      </label>
+      <textarea
+        id="plan-instructions"
+        className="goal-input"
+        rows={2}
+        maxLength={4000}
+        placeholder="계속 지킬 제약과 완료 기준을 적어 주세요."
+        value={draft.instructions}
+        onChange={(event) => update({ ...draft, instructions: event.target.value })}
+      />
+      <label className="check-field plan-context-choice">
+        <input
+          type="checkbox"
+          checked={draft.includeInContext}
+          onChange={(event) => update({ ...draft, includeInContext: event.target.checked })}
+        />
+        <span>저장한 목표·할 일·고정 지침을 다음 모델 요청에 포함</span>
+      </label>
+      <p className="subtle-note">
+        OpenRouter 대화에서는 포함한 내용이 외부 제공자에게 전송됩니다. 저장한 변경은 다음 요청부터
+        적용됩니다.
+      </p>
+      <div className="task-heading">
+        <span className="section-label">할 일</span>
+        <span>
+          {completed} / {draft.tasks.length}
+        </span>
+      </div>
+      <div className="progress-track">
+        <div
+          style={{
+            width: draft.tasks.length ? (completed / draft.tasks.length) * 100 + '%' : '0%',
+          }}
+        />
+      </div>
+      <div className="task-list">
+        {draft.tasks.length === 0 ? (
+          <div className="empty-tasks">
+            <Icon name="check" size={22} />
+            <p>
+              큰 목표를 작은 단계로
+              <br />
+              나누어 보세요.
+            </p>
+          </div>
+        ) : (
+          draft.tasks.map((task) => (
+            <div className={`task-row ${task.done ? 'done' : ''}`} key={task.id}>
+              <input
+                type="checkbox"
+                aria-label={task.title + ' 완료'}
+                checked={task.done}
+                onChange={(event) =>
+                  update({
+                    ...draft,
+                    tasks: draft.tasks.map((item) =>
+                      item.id === task.id ? { ...item, done: event.target.checked } : item,
+                    ),
+                  })
+                }
+              />
+              <input
+                className="task-title"
+                aria-label="할 일 제목"
+                value={task.title}
+                maxLength={500}
+                onChange={(event) =>
+                  update({
+                    ...draft,
+                    tasks: draft.tasks.map((item) =>
+                      item.id === task.id ? { ...item, title: event.target.value } : item,
+                    ),
+                  })
+                }
+              />
+              <button
+                className="icon-button"
+                aria-label={task.title + ' 삭제'}
+                onClick={() =>
+                  update({ ...draft, tasks: draft.tasks.filter((item) => item.id !== task.id) })
+                }
+              >
+                <Icon name="close" size={13} />
+              </button>
+            </div>
+          ))
+        )}
+      </div>
+      <form className="add-task" onSubmit={addTask}>
+        <Icon name="plus" size={15} />
+        <input
+          aria-label="새 할 일"
+          placeholder="할 일 추가"
+          maxLength={500}
+          value={taskTitle}
+          onChange={(event) => setTaskTitle(event.target.value)}
+        />
+        <button
+          type="submit"
+          aria-label="할 일 추가"
+          disabled={!taskTitle.trim() || draft.tasks.length >= 100}
+        >
+          <Icon name="arrow" size={14} />
+        </button>
+      </form>
+      <button
+        className="save-plan"
+        disabled={!dirty || saving || !connected}
+        onClick={() => {
+          void save();
+        }}
+      >
+        {saving ? '저장 중…' : dirty ? '계획 저장' : '저장됨'}
+      </button>
+      <p className="subtle-note">
+        완료 표시는 직접 관리합니다. 아직 에이전트가 목표를 자동 실행하거나 검증하지 않습니다.
+      </p>
+    </div>
+  );
+}
+
+function Settings({
+  config,
+  hasMessages,
+  running,
+  onClose,
+  onSave,
+}: {
+  config: ModelConfig;
+  hasMessages: boolean;
+  running: boolean;
+  onClose: () => void;
+  onSave: (config: ModelConfig) => Promise<void>;
+}) {
+  const [draft, setDraft] = useState(config);
+  const [key, setKey] = useState('');
+  const [catalog, setCatalog] = useState<ModelDescriptor[]>([]);
+  const [status, setStatus] = useState('');
+  const [failure, setFailure] = useState('');
+  const [busy, setBusy] = useState(false);
+  const configured = useWorkspace((s) => s.openrouterConfigured);
+  const keySource = useWorkspace((s) => s.openrouterKeySource);
+  const envFilePath = useWorkspace((s) => s.envFilePath);
+  const envManaged = keySource === 'env_file' || keySource === 'environment';
+  const dialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    dialog.current?.showModal();
+  }, []);
+  async function operation(work: () => Promise<void>) {
+    setBusy(true);
+    setFailure('');
+    setStatus('');
+    try {
+      await work();
+    } catch (error) {
+      setFailure(messageError(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <dialog
+      className="settings-dialog"
+      ref={dialog}
+      onCancel={onClose}
+      onClick={(event) => {
+        if (event.target === dialog.current) onClose();
+      }}
+    >
+      <div className="dialog-inner">
+        <div className="dialog-header">
+          <div>
+            <div className="eyebrow">WORKSPACE SETTINGS</div>
+            <h2>모델 연결과 생성 설정</h2>
+          </div>
+          <button className="icon-button" aria-label="설정 닫기" onClick={onClose}>
+            <Icon name="close" />
+          </button>
+        </div>
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            void operation(async () => {
+              const parsed = modelConfigSchema.safeParse(draft);
+              if (!parsed.success)
+                throw new Error(parsed.error.issues.map((issue) => issue.message).join('\n'));
+              await onSave(parsed.data);
+            });
+          }}
+        >
+          <div className="settings-body">
+            <div className="provider-options">
+              {(['llama-server', 'openrouter', 'demo'] as const).map((provider) => (
+                <button
+                  type="button"
+                  key={provider}
+                  className={draft.provider === provider ? 'chosen' : ''}
+                  onClick={() => {
+                    setDraft({
+                      ...draft,
+                      provider,
+                      model: provider === 'demo' ? 'demo' : '',
+                      cloudConsent: false,
+                      projectCloudConsent: false,
+                    });
+                    setCatalog([]);
+                  }}
+                >
+                  <Icon
+                    name={
+                      provider === 'openrouter' ? 'cloud' : provider === 'demo' ? 'chat' : 'chip'
+                    }
+                  />
+                  <span>{providerName(provider)}</span>
+                </button>
+              ))}
+            </div>
+            {draft.provider === 'llama-server' && (
+              <label className="field">
+                서버 API 주소
+                <input
+                  value={draft.baseUrl}
+                  onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value })}
+                  placeholder="http://127.0.0.1:8080/v1"
+                />
+                <small>
+                  localhost·사설 IP·Tailscale IP/MagicDNS를 지원합니다. 예:
+                  http://100.64.1.2:8080/v1 또는 https://gpu.tailnet.ts.net/v1. 서버를 Tailscale
+                  IP에 바인딩했다면 같은 IP를 입력하세요. 0.0.0.0은 접속 주소가 아닙니다. 대화와
+                  프로젝트 도구 결과는 선택한 서버로 전달됩니다.
+                </small>
+              </label>
+            )}
+            {draft.provider === 'openrouter' && (
+              <div className="key-section">
+                <label className="field">
+                  OpenRouter API 키{' '}
+                  <span className={configured ? 'key-ok' : ''}>
+                    {configured
+                      ? keySource === 'env_file'
+                        ? '.env에서 불러옴'
+                        : keySource === 'environment'
+                          ? '환경 변수에서 불러옴'
+                          : 'OS 저장소에 연결됨'
+                      : '등록 필요'}
+                  </span>
+                  <div className="input-action">
+                    <input
+                      type="password"
+                      aria-label="OpenRouter API 키"
+                      disabled={envManaged}
+                      autoComplete="off"
+                      spellCheck={false}
+                      value={key}
+                      placeholder={configured ? '새 키로 교체' : 'sk-or-…'}
+                      onChange={(event) => setKey(event.target.value)}
+                    />
+                    <button
+                      type="button"
+                      disabled={!nativeDesktop || !key.trim() || busy || envManaged}
+                      onClick={() => {
+                        void operation(async () => {
+                          await saveKey(key.trim());
+                          setKey('');
+                          useWorkspace.getState().setKeyConfigured(true);
+                          setStatus('키를 OS 키 저장소에 저장했습니다.');
+                        });
+                      }}
+                    >
+                      키 저장
+                    </button>
+                    {configured && (
+                      <button
+                        type="button"
+                        disabled={busy || envManaged}
+                        onClick={() => {
+                          void operation(async () => {
+                            await saveKey(null);
+                            useWorkspace.getState().setKeyConfigured(false);
+                            setStatus('키를 제거했습니다.');
+                          });
+                        }}
+                      >
+                        제거
+                      </button>
+                    )}
+                  </div>
+                  <small>키는 화면의 영구 저장소·대화 DB에 기록하지 않습니다.</small>
+                  <small>
+                    OPENROUTER_API_KEY를 .env에 설정하고 앱을 다시 시작해도 연결할 수 있습니다.
+                    우선순위: 환경 변수 → .env → OS 저장소.
+                  </small>
+                  {envFilePath && <small className="env-file-path">.env 경로: {envFilePath}</small>}
+                  {envManaged && (
+                    <small>
+                      현재 키는 해당 파일 또는 환경 변수에서 변경·제거한 뒤 앱을 다시 시작하세요.
+                    </small>
+                  )}
+                </label>
+                <label className="check-field">
+                  <input
+                    type="checkbox"
+                    checked={draft.cloudConsent}
+                    onChange={(event) => setDraft({ ...draft, cloudConsent: event.target.checked })}
+                  />
+                  <span>
+                    이 대화와 앱 지시문을 OpenRouter 및 선택된 모델 제공자에게 전송하는 데
+                    동의합니다. 사용량에 따라 비용이 발생합니다.
+                  </span>
+                </label>
+                <label className="check-field">
+                  <input
+                    type="checkbox"
+                    checked={draft.projectCloudConsent}
+                    onChange={(event) =>
+                      setDraft({ ...draft, projectCloudConsent: event.target.checked })
+                    }
+                  />
+                  <span>
+                    이 대화에서 프로젝트 파일 목록·읽기·검색을 허용하고, 도구가 읽은 파일 내용과
+                    상대 경로를 OpenRouter 및 모델 제공자에게 전송합니다.
+                  </span>
+                </label>
+                <p className="subtle-note">
+                  제공자 자동 대체와 데이터 수집 허용은 꺼져 있습니다. 앱 비용 한도·사후 비용 대사는
+                  아직 구현 전입니다.
+                </p>
+              </div>
+            )}
+            {draft.provider !== 'demo' ? (
+              <label className="field">
+                모델 ID
+                <div className="input-action">
+                  <input
+                    aria-label="모델 ID"
+                    list="model-catalog"
+                    value={draft.model}
+                    onChange={(event) => setDraft({ ...draft, model: event.target.value })}
+                    placeholder={
+                      draft.provider === 'openrouter'
+                        ? '목록에서 선택하거나 정확한 모델 ID 입력'
+                        : '서버에 로드한 모델 ID'
+                    }
+                  />
+                  <button
+                    type="button"
+                    disabled={busy || !nativeDesktop}
+                    onClick={() => {
+                      void operation(async () => {
+                        const result = await models(draft.provider, draft.baseUrl);
+                        setCatalog(result);
+                        if (result.length === 1 && result[0])
+                          setDraft((value) => ({ ...value, model: result[0]!.id }));
+                        setStatus(result.length + '개 모델을 불러왔습니다.');
+                      });
+                    }}
+                  >
+                    목록 조회
+                  </button>
+                </div>
+                <datalist id="model-catalog">
+                  {catalog.map((model) => (
+                    <option value={model.id} key={model.id}>
+                      {model.name}
+                    </option>
+                  ))}
+                </datalist>
+              </label>
+            ) : (
+              <div className="demo-notice">
+                <Icon name="info" size={17} />
+                UI와 저장·중지 흐름을 확인하는 고정 응답입니다. 실제 LLM을 호출하지 않습니다.
+              </div>
+            )}
+            <div className="settings-grid">
+              <label className="field">
+                Temperature
+                <input
+                  aria-label="Temperature"
+                  type="number"
+                  min="0"
+                  max="2"
+                  step="0.05"
+                  value={draft.temperature}
+                  onChange={(event) =>
+                    setDraft({ ...draft, temperature: Number(event.target.value) })
+                  }
+                />
+              </label>
+              <label className="field">
+                Top P
+                <input
+                  aria-label="Top P"
+                  type="number"
+                  min="0.01"
+                  max="1"
+                  step="0.01"
+                  value={draft.topP}
+                  onChange={(event) => setDraft({ ...draft, topP: Number(event.target.value) })}
+                />
+              </label>
+              <label className="field">
+                호출당 최대 출력 토큰
+                <input
+                  aria-label="최대 출력 토큰"
+                  type="number"
+                  min="1"
+                  max="32768"
+                  step="1"
+                  value={draft.maxTokens}
+                  onChange={(event) =>
+                    setDraft({ ...draft, maxTokens: Number(event.target.value) })
+                  }
+                />
+              </label>
+            </div>
+            <label className="field">
+              앱 컨텍스트 예산 (토큰)
+              <input
+                type="number"
+                min="1024"
+                max="2097152"
+                step="1"
+                value={draft.contextBudgetTokens}
+                onChange={(event) =>
+                  setDraft({ ...draft, contextBudgetTokens: Number(event.target.value) })
+                }
+              />
+              <small>
+                입력 추정량 + 최대 출력 + 여유분을 검사합니다. 엔진의 컨텍스트 길이를 바꾸지는
+                않습니다. 모델의 실제 한도에 맞춰 설정하세요.
+              </small>
+            </label>
+            <label className="eco-setting">
+              <div>
+                <span>
+                  <Icon name="leaf" size={18} />
+                  <strong>Eco</strong>
+                </span>
+                <p>
+                  반복과 군더더기를 줄이도록 모델에 요청합니다.
+                  <br />
+                  컨텍스트 압축과 토큰 절감 검증은 추후 추가합니다.
+                </p>
+              </div>
+              <input
+                type="checkbox"
+                aria-label="Eco 모드"
+                checked={draft.eco}
+                onChange={(event) => setDraft({ ...draft, eco: event.target.checked })}
+              />
+            </label>
+            {!nativeDesktop && (
+              <p className="subtle-note">
+                브라우저에서는 데모 미리보기만 동작합니다. 실제 연결 설정은 데스크톱 앱에서
+                적용하세요.
+              </p>
+            )}
+            {failure && (
+              <p className="form-error" role="alert">
+                {failure}
+              </p>
+            )}
+            {status && (
+              <p className="form-success" role="status">
+                {status}
+              </p>
+            )}
+          </div>
+          <div className="dialog-footer">
+            <span>
+              {hasMessages
+                ? '기존 대화의 설정은 유지하고 새 대화를 만듭니다.'
+                : '이 설정은 새 대화에 적용됩니다.'}
+            </span>
+            <button
+              type="submit"
+              className="primary-button"
+              disabled={busy || running || (!nativeDesktop && draft.provider !== 'demo')}
+            >
+              {busy ? '처리 중…' : hasMessages ? '새 대화로 적용' : '설정 적용'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </dialog>
+  );
+}

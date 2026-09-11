@@ -1,0 +1,13 @@
+{
+  "name": "@lodex/daemon",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "dependencies": {
+    "@lodex/contracts": "workspace:*",
+    "@lodex/storage": "workspace:*",
+    "@lodex/providers": "workspace:*",
+    "@lodex/context": "workspace:*",
+    "@lodex/tools": "workspace:*"
+  }
+}
