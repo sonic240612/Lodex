@@ -13,13 +13,13 @@
 
 ## 시작하기
 
-필요한 환경: Node 24.11.1 · pnpm 12.3.4 · Rust 1.98.0 · [Tauri 개발 도구](https://v2.tauri.app/start/prerequisites/)
+필요한 환경: Node 24.11.1 · npm 11.19.1 · Rust 1.98.0 · [Tauri 개발 도구](https://v2.tauri.app/start/prerequisites/)
 
 ```sh
 git clone https://github.com/sonic240612/Lodex.git
 cd Lodex
-pnpm install --frozen-lockfile
-pnpm dev
+npm ci
+npm run dev
 ```
 
 ## 모델 연결
@@ -44,6 +44,6 @@ pnpm dev
 ## 개발
 
 ```sh
-pnpm check    # 타입 검사, 테스트, 빌드
-pnpm dev:web  # 데모 데이터로 브라우저 UI 미리보기
+npm run check    # 타입 검사, 테스트, 빌드
+npm run dev:web  # 데모 데이터로 브라우저 UI 미리보기
 ```

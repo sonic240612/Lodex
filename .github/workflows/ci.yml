@@ -18,11 +18,10 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version-file: .node-version
-          package-manager-cache: false
-      - uses: pnpm/action-setup@v6
-        with:
-          version: 12.3.4
-          run_install: false
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Install pinned npm
+        run: npm install --global npm@11.19.1
       - name: Linux native dependencies
         if: runner.os == 'Linux'
         run: |
@@ -31,9 +30,9 @@ jobs:
       - name: Install pinned Rust
         run: rustup show
       - name: Install locked packages
-        run: pnpm install --frozen-lockfile
+        run: npm ci
       - name: TypeScript and state/provider tests
-        run: pnpm check
+        run: npm run check
       - name: Bundled runtime smoke test
         run: node scripts/smoke-runtime.mjs
       - name: Rust formatting
@@ -43,5 +42,5 @@ jobs:
       - name: Rust static analysis
         run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --locked -- -D warnings
       - name: Native desktop compilation
-        run: pnpm --filter @lodex/desktop tauri build --debug --no-bundle
+        run: npm run build:desktop -- --debug --no-bundle
       # Native window E2E, installers, signing and release artifacts are gated in M7.

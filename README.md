@@ -13,13 +13,13 @@ Early development. Windows x64 tested; macOS and Linux support is in progress.
 
 ## Quick start
 
-Requires Node 24.11.1, pnpm 12.3.4, Rust 1.98.0, and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/).
+Requires Node 24.11.1, npm 11.19.1, Rust 1.98.0, and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/).
 
 ```sh
 git clone https://github.com/sonic240612/Lodex.git
 cd Lodex
-pnpm install --frozen-lockfile
-pnpm dev
+npm ci
+npm run dev
 ```
 
 ## Models
@@ -44,6 +44,6 @@ pnpm dev
 ## Development
 
 ```sh
-pnpm check    # Type checks, tests, and build
-pnpm dev:web  # Browser UI preview with demo data
+npm run check    # Type checks, tests, and build
+npm run dev:web  # Browser UI preview with demo data
 ```

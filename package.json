@@ -3,20 +3,21 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@12.3.4",
+  "packageManager": "npm@11.19.1",
   "engines": {
-    "node": ">=24.11.1 <25"
+    "node": ">=24.11.1 <25",
+    "npm": ">=11.19.1 <12"
   },
   "scripts": {
-    "dev": "pnpm prepare:runtime && pnpm --filter @lodex/desktop tauri dev",
-    "dev:web": "pnpm --filter @lodex/desktop dev",
+    "dev": "npm run prepare:runtime && npm run tauri --workspace @lodex/desktop -- dev",
+    "dev:web": "npm run dev --workspace @lodex/desktop",
     "prepare:runtime": "node scripts/build-daemon.mjs && node scripts/prepare-runtime.mjs",
-    "build": "pnpm prepare:runtime && pnpm --filter @lodex/desktop build",
-    "build:desktop": "pnpm prepare:runtime && pnpm --filter @lodex/desktop tauri build",
+    "build": "npm run prepare:runtime && npm run build --workspace @lodex/desktop",
+    "build:desktop": "npm run prepare:runtime && npm run tauri --workspace @lodex/desktop -- build",
     "typecheck": "tsc --noEmit",
     "test": "node scripts/build-daemon.mjs && vitest run",
     "test:watch": "vitest",
-    "check": "pnpm typecheck && pnpm test && pnpm build"
+    "check": "npm run typecheck && npm test && npm run build"
   },
   "devDependencies": {
     "@types/node": "22.20.2",
@@ -27,5 +28,13 @@
     "tsx": "4.23.13",
     "typescript": "7.0.2",
     "vitest": "5.0.0"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "allowScripts": {
+    "esbuild": true,
+    "fsevents": false
   }
 }

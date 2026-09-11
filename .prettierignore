@@ -5,7 +5,7 @@ node_modules
 **/icons
 .runtime
 .local
-pnpm-lock.yaml
+package-lock.json
 docs/LODEX_PRODUCT_PLAN.ko.md
 docs/DEVELOPMENT_PLAN.ko.md
 docs/development-backlog.json
