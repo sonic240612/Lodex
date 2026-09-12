@@ -67,6 +67,7 @@ async function main() {
   const app = await startServer({
     token: config.token,
     store,
+    supervisorPath: join(__dirname, 'supervisor.cjs'),
     ...secrets,
   });
   process.stdout.write(JSON.stringify({ protocolVersion: 1, port: app.port }) + '\n');

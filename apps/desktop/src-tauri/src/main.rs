@@ -160,10 +160,14 @@ fn start_daemon(app: &tauri::App) -> Result<Daemon, Box<dyn std::error::Error>> 
 fn route_allowed(method: &str, path: &str) -> bool {
     match (method, path) {
         ("GET", "/v1/state")
+        | ("GET", "/v1/runtime")
         | ("POST", "/v1/commands")
         | ("POST", "/v1/projects")
         | ("POST", "/v1/sessions/delete")
         | ("POST", "/v1/execution/cleanup")
+        | ("POST", "/v1/runtime/profiles")
+        | ("POST", "/v1/runtime/settings")
+        | ("POST", "/v1/runtime/action")
         | ("POST", "/v1/edits") => true,
         ("GET", value)
             if value.starts_with("/v1/models?") || value.starts_with("/v1/execution/check?") =>
@@ -210,6 +214,32 @@ async fn pick_project_folder(app: tauri::AppHandle) -> Result<Option<String>, St
     .map_err(|_| "폴더 선택 창을 열지 못했습니다.".to_string())?
 }
 #[tauri::command]
+async fn pick_runtime_file(app: tauri::AppHandle, kind: String) -> Result<Option<String>, String> {
+    if kind != "engine" && kind != "model" {
+        return Err("지원하지 않는 파일 종류입니다.".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut picker = app.dialog().file().set_title(if kind == "model" {
+            "GGUF 모델 선택"
+        } else {
+            "llama-server 실행 파일 선택"
+        });
+        if kind == "model" {
+            picker = picker.add_filter("GGUF", &["gguf"]);
+        }
+        picker
+            .blocking_pick_file()
+            .map(|file| {
+                file.into_path()
+                    .map(|path| dunce::simplified(&path).to_string_lossy().into_owned())
+                    .map_err(|_| "로컬 파일 경로가 필요합니다.".to_string())
+            })
+            .transpose()
+    })
+    .await
+    .map_err(|_| "파일 선택 창을 열지 못했습니다.".to_string())?
+}
+#[tauri::command]
 async fn daemon_request(
     state: State<'_, Bridge>,
     method: String,
@@ -225,7 +255,11 @@ async fn daemon_request(
         .client
         .request(method, format!("http://127.0.0.1:{}{}", port, path))
         .bearer_auth(token)
-        .timeout(Duration::from_secs(30));
+        .timeout(Duration::from_secs(if path == "/v1/runtime/action" {
+            200
+        } else {
+            30
+        }));
     if let Some(body) = body {
         request = request.json(&body);
     }
@@ -389,6 +423,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             daemon_request,
             pick_project_folder,
+            pick_runtime_file,
             open_external,
             set_openrouter_key,
             connect_events,

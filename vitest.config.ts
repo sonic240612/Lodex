@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 export default defineConfig({
   resolve: {
     alias: Object.fromEntries(
-      ['contracts', 'storage', 'providers', 'context', 'tools'].map((name) => [
+      ['contracts', 'storage', 'providers', 'context', 'tools', 'local-runtime'].map((name) => [
         '@lodex/' + name,
         fileURLToPath(new URL('./packages/' + name + '/src/index.ts', import.meta.url)),
       ]),

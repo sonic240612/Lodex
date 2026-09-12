@@ -108,7 +108,14 @@ export async function runAgent(options: {
   const maxTools = autopilot?.limits.toolCalls ?? MAX_TOOL_CALLS;
   const signal = AbortSignal.any([
     controller.signal,
-    AbortSignal.timeout(autopilot ? autopilot.limits.minutes * 60000 : 300000),
+    AbortSignal.timeout(
+      autopilot
+        ? Math.max(
+            1,
+            autopilot.limits.minutes * 60000 - (Date.now() - Date.parse(autopilot.startedAt)),
+          )
+        : 300000,
+    ),
   ]);
   const activities: Activity[] = [];
   const continuation: InferenceMessage[] = [];

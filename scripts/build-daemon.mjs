@@ -1,6 +1,10 @@
 import { build } from 'esbuild';
 await build({
-  entryPoints: { main: 'apps/daemon/src/main.ts', worker: 'packages/storage/src/worker.ts' },
+  entryPoints: {
+    main: 'apps/daemon/src/main.ts',
+    worker: 'packages/storage/src/worker.ts',
+    supervisor: 'packages/local-runtime/src/supervisor.ts',
+  },
   bundle: true,
   platform: 'node',
   target: 'node24',

@@ -9,6 +9,8 @@ import {
   makeCommand,
   deleteSessionsSchema,
   type Session,
+  type LocalProfile,
+  engineSettingsSchema,
 } from '@lodex/contracts';
 import { Store } from './index';
 import {
@@ -60,6 +62,47 @@ afterEach(async () => {
   }
 });
 describe('durable worker storage', () => {
+  it('persists versioned runtime settings and model metadata without deleting model files', async () => {
+    const { store, path } = await db();
+    const modelPath = join(dirname(path), 'fixture.gguf');
+    await writeFile(modelPath, 'weights fixture');
+    const initial = await store.runtimeSettings();
+    await store.saveRuntimeSettings({ ...initial, vramBudgetMb: 16384 });
+    await expect(
+      store.saveRuntimeSettings({ ...initial, vramBudgetMb: 8192 }),
+    ).rejects.toMatchObject({ code: 'VERSION_CONFLICT' });
+    const profile: LocalProfile = {
+      id: crypto.randomUUID(),
+      version: 1,
+      name: 'fixture',
+      modelPath,
+      enginePath: process.execPath,
+      settings: engineSettingsSchema.parse({}),
+      vramReservationMb: 8192,
+      modelBytes: 15,
+      modelIdentity: 'test-model',
+      engineIdentity: 'test-engine',
+      engineVersion: 'fixture',
+      supportedFlags: [],
+      ggufVersion: 3,
+    };
+    const saved = await store.saveLocalProfile(profile);
+    const updated = await store.saveLocalProfile({ ...saved, name: 'renamed' }, saved.version);
+    await expect(
+      store.saveLocalProfile({ ...saved, name: 'stale' }, saved.version),
+    ).rejects.toMatchObject({ code: 'VERSION_CONFLICT' });
+    await close(store);
+    const reopened = await open(path);
+    expect(await reopened.runtimeSettings()).toEqual({
+      ...initial,
+      version: 1,
+      vramBudgetMb: 16384,
+    });
+    expect(await reopened.localProfiles()).toEqual([updated]);
+    await reopened.removeLocalProfile(saved.id);
+    expect(await reopened.localProfiles()).toEqual([]);
+    expect(await readFile(modelPath, 'utf8')).toBe('weights fixture');
+  });
   it('protects plan adoption against concurrent edits and enforces Plan file-write policy in storage', async () => {
     const { store, path } = await db();
     const project = await store.registerProject(await inspectProject(dirname(path)));
@@ -700,7 +743,7 @@ describe('durable worker storage', () => {
             db.prepare('UPDATE ' + table + ' SET ' + column + '=? WHERE ' + column + '=?').run(JSON.stringify(value), row.body);
           }
         }
-        db.exec('DROP TABLE projects; PRAGMA user_version=1;');
+        db.exec('DROP TABLE projects; DROP TABLE runtime_profiles; DROP TABLE runtime_settings; PRAGMA user_version=1;');
         db.close();
       `,
         { eval: true, workerData: path },

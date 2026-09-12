@@ -8,6 +8,7 @@
     "@lodex/storage": "0.1.0",
     "@lodex/providers": "0.1.0",
     "@lodex/context": "0.1.0",
-    "@lodex/tools": "0.1.0"
+    "@lodex/tools": "0.1.0",
+    "@lodex/local-runtime": "0.1.0"
   }
 }

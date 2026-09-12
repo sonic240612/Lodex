@@ -15,6 +15,10 @@ import {
   type DeleteSessions,
   type EditAction,
   localUrlSchema,
+  type RuntimeSnapshot,
+  type LocalProfileInput,
+  type LocalProfile,
+  type RuntimeSettings,
 } from '@lodex/contracts';
 export const nativeDesktop = isTauri();
 type Listener = (event: DomainEvent) => void;
@@ -238,6 +242,38 @@ export async function checkExecution(image: string): Promise<{ host: string; ima
     path: '/v1/execution/check?' + new URLSearchParams({ image }),
     body: null,
   });
+}
+export async function runtimeSnapshot(): Promise<RuntimeSnapshot> {
+  if (!nativeDesktop) throw new Error('로컬 모델 관리는 데스크톱 앱에서 사용할 수 있습니다.');
+  return invoke('daemon_request', { method: 'GET', path: '/v1/runtime', body: null });
+}
+export async function saveLocalProfile(profile: LocalProfileInput): Promise<LocalProfile> {
+  if (!nativeDesktop) throw new Error('데스크톱 앱에서 모델을 등록하세요.');
+  const result = await invoke<{ profile: LocalProfile }>('daemon_request', {
+    method: 'POST',
+    path: '/v1/runtime/profiles',
+    body: profile,
+  });
+  return result.profile;
+}
+export async function runtimeAction(
+  profileId: string,
+  action: 'load' | 'unload' | 'remove',
+): Promise<RuntimeSnapshot> {
+  if (!nativeDesktop) throw new Error('데스크톱 앱에서 모델을 관리하세요.');
+  return invoke('daemon_request', {
+    method: 'POST',
+    path: '/v1/runtime/action',
+    body: { profileId, action },
+  });
+}
+export async function configureRuntime(settings: RuntimeSettings): Promise<RuntimeSnapshot> {
+  if (!nativeDesktop) throw new Error('데스크톱 앱에서 설정하세요.');
+  return invoke('daemon_request', { method: 'POST', path: '/v1/runtime/settings', body: settings });
+}
+export async function pickRuntimeFile(kind: 'engine' | 'model'): Promise<string | null> {
+  if (!nativeDesktop) throw new Error('데스크톱 앱에서 파일을 선택하세요.');
+  return invoke('pick_runtime_file', { kind });
 }
 export async function cleanupCommands(sessionId: string): Promise<Session> {
   if (!nativeDesktop) throw new Error('데스크톱 앱에서 정리하세요.');

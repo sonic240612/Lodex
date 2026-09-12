@@ -8,6 +8,25 @@ import {
   planSchema,
 } from './index';
 describe('command boundary', () => {
+  it('requires a local provider and matching version reference for managed models', () => {
+    const managedModelId = crypto.randomUUID();
+    expect(modelConfigSchema.safeParse({ managedModelId }).success).toBe(false);
+    expect(modelConfigSchema.safeParse({ managedModelVersion: 1 }).success).toBe(false);
+    expect(
+      modelConfigSchema.safeParse({
+        provider: 'openrouter',
+        managedModelId,
+        managedModelVersion: 1,
+      }).success,
+    ).toBe(false);
+    expect(
+      modelConfigSchema.safeParse({
+        provider: 'llama-server',
+        managedModelId,
+        managedModelVersion: 1,
+      }).success,
+    ).toBe(true);
+  });
   it('rejects unknown protocol versions and injected fields', () => {
     const command = makeCommand({
       type: 'create_session',

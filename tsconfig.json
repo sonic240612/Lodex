@@ -20,7 +20,8 @@
       "@lodex/storage": ["./packages/storage/src/index.ts"],
       "@lodex/providers": ["./packages/providers/src/index.ts"],
       "@lodex/context": ["./packages/context/src/index.ts"],
-      "@lodex/tools": ["./packages/tools/src/index.ts"]
+      "@lodex/tools": ["./packages/tools/src/index.ts"],
+      "@lodex/local-runtime": ["./packages/local-runtime/src/index.ts"]
     }
   },
   "include": ["apps/**/*.ts", "apps/**/*.tsx", "packages/**/*.ts", "vitest.config.ts"],

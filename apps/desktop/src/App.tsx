@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, lazy, Suspense, type FormEvent } from 'react';
 import {
   modelConfigSchema,
   defaultPlan,
@@ -7,6 +7,7 @@ import {
   type Plan,
   type Session,
   type AgentMode,
+  type LocalProfile,
 } from '@lodex/contracts';
 import { models, nativeDesktop, saveKey, sendCommand, snapshot, subscribe } from './bridge';
 import { Icon, Logo } from './icons';
@@ -17,6 +18,9 @@ import { Markdown } from './Markdown';
 import { ConversationHistory } from './ConversationHistory';
 import { ExecutionPanel } from './ExecutionPanel';
 import { AutopilotPanel } from './AutopilotPanel';
+const ModelManager = lazy(() =>
+  import('./ModelManager').then((module) => ({ default: module.ModelManager })),
+);
 
 const providerName = (provider: string) =>
   provider === 'openrouter' ? 'OpenRouter' : provider === 'demo' ? '데모' : 'llama-server';
@@ -26,6 +30,7 @@ export function App() {
   const workspace = useWorkspace();
   const session = workspace.sessions.find((s) => s.id === workspace.selectedId);
   const [settings, setSettings] = useState(false);
+  const [modelManager, setModelManager] = useState(false);
   const [projectDialog, setProjectDialog] = useState(false);
   const [showActivities, setShowActivities] = useState(() => {
     try {
@@ -188,6 +193,23 @@ export function App() {
     }
     setSettings(false);
   }
+  async function chooseLocalModel(profile: LocalProfile) {
+    const config: ModelConfig = {
+      ...workspace.config,
+      provider: 'llama-server',
+      model: profile.name,
+      baseUrl: 'http://127.0.0.1:8080/v1',
+      managedModelId: profile.id,
+      managedModelVersion: profile.version,
+      contextBudgetTokens: profile.settings.contextSize,
+      maxTokens: Math.min(2048, Math.floor(profile.settings.contextSize / 4)),
+      cloudConsent: false,
+      projectCloudConsent: false,
+    };
+    await createSession(config);
+    workspace.setConfig(config);
+    setModelManager(false);
+  }
   async function changeMode(value: AgentMode) {
     if (!session) {
       setNewMode(value);
@@ -260,6 +282,10 @@ export function App() {
         <button className="nav-item" onClick={() => setSettings(true)}>
           <Icon name="chip" size={18} />
           모델 연결
+        </button>
+        <button className="nav-item" onClick={() => setModelManager(true)}>
+          <Icon name="chip" size={18} />
+          로컬 모델 관리
         </button>
         <div className="history-caption">
           <span>프로젝트</span>
@@ -695,6 +721,11 @@ export function App() {
           {session?.projectId && <AutopilotPanel key={session.id} session={session} />}
         </aside>
       )}
+      {modelManager && (
+        <Suspense fallback={<div role="status">모델 관리 화면을 여는 중…</div>}>
+          <ModelManager onClose={() => setModelManager(false)} onChoose={chooseLocalModel} />
+        </Suspense>
+      )}
       {projectDialog && (
         <ProjectDialog
           onClose={() => setProjectDialog(false)}
@@ -1118,10 +1149,15 @@ function Settings({
                 <button
                   type="button"
                   key={provider}
-                  className={draft.provider === provider ? 'chosen' : ''}
+                  className={!draft.managedModelId && draft.provider === provider ? 'chosen' : ''}
                   onClick={() => {
+                    const {
+                      managedModelId: _id,
+                      managedModelVersion: _version,
+                      ...externalConfig
+                    } = draft;
                     setDraft({
-                      ...draft,
+                      ...externalConfig,
                       provider,
                       model: provider === 'demo' ? 'demo' : '',
                       cloudConsent: false,
@@ -1135,11 +1171,15 @@ function Settings({
                       provider === 'openrouter' ? 'cloud' : provider === 'demo' ? 'chat' : 'chip'
                     }
                   />
-                  <span>{providerName(provider)}</span>
+                  <span>
+                    {provider === 'llama-server' && draft.managedModelId
+                      ? '외부 llama-server'
+                      : providerName(provider)}
+                  </span>
                 </button>
               ))}
             </div>
-            {draft.provider === 'llama-server' && (
+            {draft.provider === 'llama-server' && !draft.managedModelId && (
               <label className="field">
                 서버 API 주소
                 <input
@@ -1251,7 +1291,16 @@ function Settings({
                 </p>
               </div>
             )}
-            {draft.provider !== 'demo' ? (
+            {draft.managedModelId ? (
+              <div className="demo-notice">
+                <strong>{draft.model}</strong>
+                <p>
+                  로컬 모델 관리에서 등록한 설정 v{draft.managedModelVersion}을 사용합니다. 서버
+                  주소와 모델 ID는 로딩할 때 자동으로 연결됩니다. 엔진·모델 파일·컨텍스트 길이는
+                  로컬 모델 관리에서 변경하세요.
+                </p>
+              </div>
+            ) : draft.provider !== 'demo' ? (
               <label className="field">
                 모델 ID
                 <div className="input-action">

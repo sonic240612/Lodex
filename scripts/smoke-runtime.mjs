@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -13,6 +13,9 @@ const runtime = resourceRoot
 const script = resourceRoot
   ? join(resourceRoot, 'daemon/main.cjs')
   : resolve('apps/daemon/dist/main.cjs');
+const supervisor = resourceRoot
+  ? join(resourceRoot, 'daemon/supervisor.cjs')
+  : resolve('apps/daemon/dist/supervisor.cjs');
 const dataDir = await mkdtemp(join(tmpdir(), 'lodex-런타임 검증 '));
 const token = randomBytes(32).toString('hex');
 const children = new Set();
@@ -112,8 +115,60 @@ async function stop(app) {
   ]).finally(() => clearTimeout(timeout));
   assert.equal(exit.code, 0);
 }
+async function checkSupervisor() {
+  await access(supervisor);
+  const child = spawn(runtime, [supervisor], {
+    windowsHide: true,
+    stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+    env: { ...process.env, NODE_OPTIONS: '', NODE_PATH: '' },
+  });
+  children.add(child);
+  child.exited = new Promise((resolve) => {
+    child.once('exit', (code, signal) => {
+      children.delete(child);
+      resolve({ code, signal });
+    });
+    child.once('error', () => {
+      children.delete(child);
+      resolve({ code: null, signal: 'spawn-error' });
+    });
+  });
+  child.stderr.resume();
+  let engineStopped = false;
+  child.on('message', (message) => { if (message?.type === 'engine_stopped') engineStopped = true; });
+  const lines = createInterface({ input: child.stdout });
+  let timeout;
+  const ready = new Promise((resolve, reject) => {
+    timeout = setTimeout(
+      () => reject(new Error('Bundled supervisor did not launch fixture')),
+      10000,
+    );
+    lines.once('line', (line) => resolve(Number(line)));
+    child.once('error', reject);
+  });
+  child.stdin.write(
+    JSON.stringify({
+      executable: runtime,
+      args: ['-e', 'console.log(process.pid); setTimeout(() => process.exit(0), 15000);'],
+      cwd: dataDir,
+    }) + '\n',
+  );
+  const pid = await ready.finally(() => clearTimeout(timeout));
+  assert.ok(Number.isInteger(pid) && pid > 0);
+  await stop({ child });
+  assert.equal(engineStopped, true);
+  assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+}
 try {
+  await checkSupervisor();
   let app = await boot();
+  const runtimeSettings = await app.request('/v1/runtime').then((r) => r.json());
+  assert.deepEqual(runtimeSettings.profiles, []);
+  const updatedRuntime = await app.request('/v1/runtime/settings', {
+    method: 'POST',
+    body: JSON.stringify({ ...runtimeSettings.settings, vramBudgetMb: 16384 }),
+  });
+  assert.equal(updatedRuntime.status, 200);
   if (process.argv[3]) {
     const response = await app.request(
       '/v1/models?' + new URLSearchParams({ provider: 'llama-server', baseUrl: process.argv[3] }),
@@ -160,6 +215,10 @@ try {
   assert.equal(session.run.status, 'cancelled');
   await stop(app);
   app = await boot();
+  assert.equal(
+    (await app.request('/v1/runtime').then((r) => r.json())).settings.vramBudgetMb,
+    16384,
+  );
   session = (await app.state()).sessions[0];
   assert.equal((await app.state()).projects[0].id, project.id);
   assert.equal(session.projectId, project.id);
@@ -195,7 +254,7 @@ try {
   assert.equal((await app.state()).projects[0].id, project.id);
   await stop(app);
   console.log(
-    'PASS: dotenv loading without key exposure / bundled Node / Korean-space paths / auth / projects / chat / cancel / plan persistence / pipe shutdown / crash recovery / durable deletion.',
+    'PASS: dotenv without key exposure / bundled Node and engine supervisor / runtime settings / Korean-space paths / auth / projects / chat / cancel / plan persistence / pipe shutdown / crash recovery / durable deletion.',
   );
 } finally {
   for (const child of children) {

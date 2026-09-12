@@ -1,24 +1,35 @@
 import { z } from 'zod';
 import { localUrlSchema } from './network';
 export { localUrlSchema, isPrivateServerAddress } from './network';
+export * from './runtime';
 
 export const PROTOCOL_VERSION = 1 as const;
 export const idSchema = z.uuid();
 export const providerSchema = z.enum(['llama-server', 'openrouter', 'demo']);
 export type ProviderId = z.infer<typeof providerSchema>;
 
-export const modelConfigSchema = z.strictObject({
-  provider: providerSchema.default('llama-server'),
-  model: z.string().trim().max(200).default(''),
-  baseUrl: localUrlSchema.default('http://127.0.0.1:8080/v1'),
-  temperature: z.number().min(0).max(2).default(0.7),
-  topP: z.number().gt(0).max(1).default(0.95),
-  maxTokens: z.number().int().min(1).max(32768).default(2048),
-  contextBudgetTokens: z.number().int().min(1024).max(2097152).default(32768),
-  cloudConsent: z.boolean().default(false),
-  projectCloudConsent: z.boolean().default(false),
-  eco: z.boolean().default(false),
-});
+export const modelConfigSchema = z
+  .strictObject({
+    provider: providerSchema.default('llama-server'),
+    model: z.string().trim().max(200).default(''),
+    baseUrl: localUrlSchema.default('http://127.0.0.1:8080/v1'),
+    temperature: z.number().min(0).max(2).default(0.7),
+    topP: z.number().gt(0).max(1).default(0.95),
+    maxTokens: z.number().int().min(1).max(32768).default(2048),
+    contextBudgetTokens: z.number().int().min(1024).max(2097152).default(32768),
+    cloudConsent: z.boolean().default(false),
+    projectCloudConsent: z.boolean().default(false),
+    eco: z.boolean().default(false),
+    managedModelId: z.uuid().optional(),
+    managedModelVersion: z.number().int().positive().optional(),
+  })
+  .refine(
+    (config) =>
+      config.managedModelId === undefined
+        ? config.managedModelVersion === undefined
+        : config.provider === 'llama-server' && config.managedModelVersion !== undefined,
+    '관리 모델은 llama-server 공급자와 모델 설정 버전이 필요합니다.',
+  );
 export type ModelConfig = z.infer<typeof modelConfigSchema>;
 export const defaultModelConfig = (): ModelConfig => modelConfigSchema.parse({});
 export const taskSchema = z.strictObject({

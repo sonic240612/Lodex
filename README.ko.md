@@ -5,6 +5,7 @@
 로컬 LLM과 OpenRouter를 위한 데스크톱 에이전트 하네스.
 
 - localhost·사설망·Tailscale을 통한 llama-server 연결
+- GGUF 모델 로드·언로드, 엔진 상세 설정과 VRAM 예약
 - 프로젝트 파일 읽기, 변경 검토·적용·되돌리기
 - Plan/Build 전환, AI 계획 검토, 작업별 완료 기준·선행 작업 편집
 - 선택형 Docker 명령 실행, 접을 수 있는 출력과 실행 중지
@@ -26,10 +27,11 @@ npm run dev
 
 ## 모델 연결
 
-- **llama-server:** 서버를 실행한 뒤 앱 설정에 API 주소를 입력하세요. 기본값은 `http://127.0.0.1:8080/v1`입니다.
+- **로컬 모델:** 모델 관리에서 llama-server 실행 파일과 GGUF 파일을 선택하고, 저장한 모델로 대화를 시작하세요. 컨텍스트·GPU 레이어·KV cache·스레드·템플릿·추가 엔진 인자를 설정할 수 있습니다.
+- **외부 llama-server:** 서버를 실행한 뒤 앱 설정에 API 주소를 입력하세요. 기본값은 `http://127.0.0.1:8080/v1`입니다.
 - **OpenRouter:** [`.env.example`](.env.example)을 `.env`로 복사하고 `OPENROUTER_API_KEY`를 입력한 뒤 앱을 다시 실행하세요. 앱에서 OS 키 저장소에 키를 저장하는 방법도 지원합니다.
 
-`.env`는 Git 업로드에서 제외됩니다. 로컬 모델 서버는 별도로 실행해 주세요.
+`.env`는 Git 업로드에서 제외됩니다. 관리 엔진은 전용 loopback 연결을 사용합니다. VRAM 배치는 입력한 예약량을 기준으로 하며, 실제 GPU 메모리 사용량을 강제로 제한하지 않습니다.
 
 ## 명령 실행
 
@@ -39,15 +41,16 @@ npm run dev
 
 ## 패키지
 
-| 패키지                          | 역할                           |
-| ------------------------------- | ------------------------------ |
-| [desktop](apps/desktop)         | Tauri 앱과 React 화면          |
-| [daemon](apps/daemon)           | 로컬 API와 에이전트 실행 루프  |
-| [providers](packages/providers) | llama-server·OpenRouter 연결   |
-| [tools](packages/tools)         | 프로젝트 파일 도구와 변경 검토 |
-| [context](packages/context)     | 요청 구성과 컨텍스트 예산      |
-| [storage](packages/storage)     | SQLite 저장과 복구             |
-| [contracts](packages/contracts) | 공통 타입과 입력 검증          |
+| 패키지                                  | 역할                              |
+| --------------------------------------- | --------------------------------- |
+| [desktop](apps/desktop)                 | Tauri 앱과 React 화면             |
+| [daemon](apps/daemon)                   | 로컬 API와 에이전트 실행 루프     |
+| [providers](packages/providers)         | llama-server·OpenRouter 연결      |
+| [local-runtime](packages/local-runtime) | 모델 설정·엔진 프로세스·VRAM 예약 |
+| [tools](packages/tools)                 | 프로젝트 파일 도구와 변경 검토    |
+| [context](packages/context)             | 요청 구성과 컨텍스트 예산         |
+| [storage](packages/storage)             | SQLite 저장과 복구                |
+| [contracts](packages/contracts)         | 공통 타입과 입력 검증             |
 
 ## 개발
 

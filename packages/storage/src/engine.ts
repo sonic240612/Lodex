@@ -28,6 +28,9 @@ import {
   type CommandExecution,
   type AutopilotState,
   prepareAutopilot,
+  runtimeSettingsSchema,
+  type RuntimeSettings,
+  type LocalProfile,
 } from '@lodex/contracts';
 
 // Additive JSON fields are defaulted on all read paths, including old SSE events.
@@ -63,7 +66,7 @@ export class StorageEngine {
       'PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;',
     );
     const row = this.db.prepare('PRAGMA user_version').get() as { user_version: number };
-    if (row.user_version > 8) {
+    if (row.user_version > 9) {
       this.db.close();
       throw new AppError(
         'DATABASE_VERSION',
@@ -103,6 +106,14 @@ export class StorageEngine {
     // v7 records owned command containers, including cleanup after cancellation/restart.
     if (row.user_version < 7) this.db.exec('PRAGMA user_version=7;');
     if (row.user_version < 8) this.db.exec('PRAGMA user_version=8;');
+    if (row.user_version < 9)
+      this.db.exec(`
+      BEGIN IMMEDIATE;
+      CREATE TABLE runtime_profiles (id TEXT PRIMARY KEY, document TEXT NOT NULL);
+      CREATE TABLE runtime_settings (id INTEGER PRIMARY KEY CHECK (id=1), document TEXT NOT NULL);
+      PRAGMA user_version=9;
+      COMMIT;
+    `);
   }
   close(): void {
     if (!this.closed) {
@@ -162,6 +173,59 @@ export class StorageEngine {
         document: string;
       }[]
     ).map((row) => JSON.parse(row.document) as Project);
+  }
+  localProfiles(): LocalProfile[] {
+    return (
+      this.db.prepare('SELECT document FROM runtime_profiles ORDER BY rowid').all() as {
+        document: string;
+      }[]
+    ).map((r) => JSON.parse(r.document) as LocalProfile);
+  }
+  saveLocalProfile(profile: LocalProfile, expectedVersion?: number): LocalProfile {
+    return this.transaction(() => {
+      const previous = this.localProfiles().find((p) => p.id === profile.id);
+      if (
+        (previous && previous.version !== expectedVersion) ||
+        (!previous && expectedVersion !== undefined)
+      )
+        throw new AppError(
+          'VERSION_CONFLICT',
+          '모델 설정이 변경되었습니다. 목록을 새로 불러오세요.',
+          409,
+        );
+      const value = { ...profile, version: (previous?.version ?? 0) + 1 };
+      this.db
+        .prepare(
+          'INSERT INTO runtime_profiles(id,document) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET document=excluded.document',
+        )
+        .run(value.id, JSON.stringify(value));
+      return value;
+    });
+  }
+  removeLocalProfile(id: string): void {
+    this.db.prepare('DELETE FROM runtime_profiles WHERE id=?').run(id);
+  }
+  runtimeSettings(): RuntimeSettings {
+    const row = this.db.prepare('SELECT document FROM runtime_settings WHERE id=1').get() as
+      { document: string } | undefined;
+    return runtimeSettingsSchema.parse(row ? JSON.parse(row.document) : {});
+  }
+  saveRuntimeSettings(settings: RuntimeSettings): void {
+    this.transaction(() => {
+      const parsed = runtimeSettingsSchema.parse(settings),
+        previous = this.runtimeSettings();
+      if (parsed.version !== previous.version)
+        throw new AppError(
+          'VERSION_CONFLICT',
+          'VRAM 설정이 변경되었습니다. 최신 값을 불러오세요.',
+          409,
+        );
+      this.db
+        .prepare(
+          'INSERT INTO runtime_settings(id,document) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET document=excluded.document',
+        )
+        .run(JSON.stringify({ ...parsed, version: previous.version + 1 }));
+    });
   }
   project(id: string): Project {
     const project = this.projects().find((p) => p.id === id);

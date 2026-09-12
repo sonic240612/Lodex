@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { relative } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
+import { setTimeout as delay } from 'node:timers/promises';
 import {
   AppError,
   executionConfigSchema,
@@ -235,50 +236,59 @@ export async function cleanupExecution(
     return false;
   const signal = AbortSignal.timeout(15000);
   try {
-    const inspected = await cli(
-      [
-        '--host',
-        execution.dockerHost,
-        'container',
-        'inspect',
-        '--format',
-        '{{json .}}',
-        execution.containerId ?? execution.containerName,
-      ],
-      signal,
-    );
-    if (inspected.code !== 0) {
-      // Distinguish absent container from an unavailable engine; never declare cleanup on a connection error.
-      const list = await cli(
+    // A cancelled CLI does not acknowledge the daemon's create outcome. Give a late
+    // owned container a bounded chance to appear; absence alone cannot settle it.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const inspected = await cli(
         [
           '--host',
           execution.dockerHost,
           'container',
-          'ls',
-          '-aq',
-          '--filter',
-          'name=^/' + execution.containerName + '$',
+          'inspect',
+          '--format',
+          '{{json .}}',
+          execution.containerId ?? execution.containerName,
         ],
         signal,
       );
-      return list.code === 0 && list.output.trim() === '';
+      if (inspected.code !== 0) {
+        // A successful empty listing distinguishes absence from an unavailable
+        // engine, but is conclusive only after a create response supplied the ID.
+        const list = await cli(
+          [
+            '--host',
+            execution.dockerHost,
+            'container',
+            'ls',
+            '-aq',
+            '--filter',
+            'name=^/' + execution.containerName + '$',
+          ],
+          signal,
+        );
+        if (list.code !== 0) return false;
+        if (list.output.trim() === '' && execution.containerId) return true;
+        if (attempt < 2) await delay(250, undefined, { signal });
+        continue;
+      }
+      const container = JSON.parse(inspected.output) as {
+        Id?: string;
+        Config?: { Labels?: Record<string, string> };
+      };
+      if (
+        !container.Id ||
+        !/^[a-f0-9]{64}$/.test(container.Id) ||
+        container.Config?.Labels?.['io.lodex.execution'] !== execution.id
+      )
+        return false;
+      if (execution.containerId && execution.containerId !== container.Id) return false;
+      const result = await cli(
+        ['--host', execution.dockerHost, 'container', 'rm', '--force', '--volumes', container.Id],
+        signal,
+      );
+      return result.code === 0;
     }
-    const container = JSON.parse(inspected.output) as {
-      Id?: string;
-      Config?: { Labels?: Record<string, string> };
-    };
-    if (
-      !container.Id ||
-      !/^[a-f0-9]{64}$/.test(container.Id) ||
-      container.Config?.Labels?.['io.lodex.execution'] !== execution.id
-    )
-      return false;
-    if (execution.containerId && execution.containerId !== container.Id) return false;
-    const result = await cli(
-      ['--host', execution.dockerHost, 'container', 'rm', '--force', '--volumes', container.Id],
-      signal,
-    );
-    return result.code === 0;
+    return false;
   } catch {
     return false;
   }
@@ -317,6 +327,7 @@ export async function executeCommand(options: {
   await record(execution);
   let pending: Promise<void> = Promise.resolve(),
     lastSave = 0;
+  let creationAttempted = false;
   const signal = AbortSignal.any([parent, AbortSignal.timeout(input.timeoutMs)]);
   try {
     signal.throwIfAborted();
@@ -324,16 +335,22 @@ export async function executeCommand(options: {
     signal.throwIfAborted();
     execution.dockerHost = runtime.host;
     execution.imageId = runtime.imageId;
+    const args = containerArguments(root.path, config, execution, input);
     execution.cleanupPending = true;
     await record(execution); // Persist ownership before docker create, including the crash-before-ID window.
-    const args = containerArguments(root.path, config, execution, input);
+    signal.throwIfAborted();
+    creationAttempted = true;
     const created = await cli(args, signal);
-    if (created.code !== 0 || !/^[a-f0-9]{64}$/.test(created.output.trim()))
+    // Cancellation can win after the daemon's complete response reached stdout.
+    // Retain that acknowledged ID even when the CLI exit code was cancelled.
+    if (/^[a-f0-9]{64}$/.test(created.output.trim())) execution.containerId = created.output.trim();
+    if (created.code !== 0 || !execution.containerId) {
+      if (execution.containerId) await record(execution);
       throw new AppError(
         'CONTAINER_CREATE',
         '컨테이너를 만들지 못했습니다. 이미지·폴더 공유·자원 설정을 확인하세요.',
       );
-    execution.containerId = created.output.trim();
+    }
     execution.status = 'running';
     await record(execution);
     signal.throwIfAborted();
@@ -395,15 +412,20 @@ export async function executeCommand(options: {
       execution.error = '출력 한도를 초과했거나 실행 결과가 확인되지 않았습니다.';
   } catch (error) {
     execution.status = parent.aborted ? 'cancelled' : 'failed';
-    execution.error =
-      error instanceof AppError
+    execution.error = signal.aborted
+      ? parent.aborted
+        ? '사용자가 명령을 중지했습니다.'
+        : '명령 실행 시간이 초과되었습니다.'
+      : error instanceof AppError
         ? error.message
         : '명령 실행이 중단되었습니다. 실행 결과를 확인하세요.';
   } finally {
-    execution.cleanupPending = !(await cleanupExecution(execution, cli));
+    execution.cleanupPending = creationAttempted && !(await cleanupExecution(execution, cli));
     if (execution.cleanupPending) {
       execution.status = 'interrupted';
-      execution.error = '컨테이너 종료를 확인하지 못했습니다. Docker를 실행한 뒤 정리해야 합니다.';
+      execution.error = execution.containerId
+        ? '컨테이너 종료를 확인하지 못했습니다. Docker를 실행한 뒤 정리해야 합니다.'
+        : '컨테이너 생성 결과가 확인되지 않았습니다. Docker가 응답하면 정리를 다시 시도하세요. 목록에 없다는 이유만으로 정리가 완료되지는 않습니다.';
     }
     execution.finishedAt = new Date().toISOString();
     await pending;

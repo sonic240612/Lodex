@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
+import { join, resolve } from 'node:path';
 import {
   AppError,
   commandSchema,
@@ -13,6 +14,9 @@ import {
   localUrlSchema,
   prepareAutopilot,
   autopilotPrompt,
+  localProfileInputSchema,
+  runtimeSettingsSchema,
+  runtimeActionSchema,
   type Command,
   type InferenceProvider,
   type Session,
@@ -36,6 +40,8 @@ import {
 import { runAgent } from './agent-runner';
 import { planningTool } from './planning';
 import { verificationTools } from './autopilot';
+import { RuntimeManager, type RuntimeLease } from '@lodex/local-runtime';
+declare const __dirname: string;
 
 interface ServerOptions {
   token: string;
@@ -45,6 +51,7 @@ interface ServerOptions {
   envFilePath?: string;
   providerFactory?: (session: Session, key: string | null) => InferenceProvider;
   commandExecutor?: typeof executeCommand;
+  supervisorPath?: string;
 }
 async function readJson(request: IncomingMessage): Promise<unknown> {
   if (!request.headers['content-type']?.startsWith('application/json'))
@@ -72,6 +79,13 @@ function json(response: ServerResponse, status: number, body: unknown): void {
 }
 export async function startServer(options: ServerOptions) {
   const { store } = options;
+  const runtime = new RuntimeManager(
+    store,
+    options.supervisorPath ??
+      (typeof __dirname === 'string'
+        ? join(__dirname, 'supervisor.cjs')
+        : resolve('apps/daemon/dist/supervisor.cjs')),
+  );
   let openrouterKey = options.openrouterKey ?? null;
   let openrouterKeySource: SecretSource =
     options.openrouterKeySource ?? (openrouterKey ? 'os_keychain' : 'none');
@@ -91,15 +105,44 @@ export async function startServer(options: ServerOptions) {
     controller: AbortController,
     context: CompiledContext,
   ): Promise<void> {
+    let lease: RuntimeLease | undefined;
+    const autopilot = session.autopilot;
+    const loadSignal =
+      autopilot && autopilot.runId === session.run?.id
+        ? AbortSignal.any([
+            controller.signal,
+            AbortSignal.timeout(
+              Math.max(
+                1,
+                autopilot.limits.minutes * 60000 - (Date.now() - Date.parse(autopilot.startedAt)),
+              ),
+            ),
+          ])
+        : controller.signal;
     try {
+      if (session.config.provider === 'llama-server' && session.config.managedModelId) {
+        lease = await runtime.acquire(
+          session.config.managedModelId,
+          loadSignal,
+          session.config.managedModelVersion,
+        );
+        session = {
+          ...session,
+          config: { ...session.config, model: lease.model, baseUrl: lease.baseUrl },
+        };
+        context = { ...context, request: { ...context.request, config: session.config } };
+      }
       const provider =
-        options.providerFactory?.(session, openrouterKey) ??
+        options.providerFactory?.(
+          session,
+          session.config.provider === 'openrouter' ? openrouterKey : (lease?.key ?? null),
+        ) ??
         (session.config.provider === 'demo'
           ? new DemoProvider()
           : new ChatCompletionProvider(
               session.config.provider,
               session.config.baseUrl,
-              session.config.provider === 'openrouter' ? openrouterKey : null,
+              session.config.provider === 'openrouter' ? openrouterKey : (lease?.key ?? null),
             ));
       const project =
         session.projectId && context.request.tools?.length
@@ -114,17 +157,27 @@ export async function startServer(options: ServerOptions) {
         ...(project ? { project } : {}),
         ...(options.commandExecutor ? { commandExecutor: options.commandExecutor } : {}),
       });
-    } catch {
+    } catch (error) {
       await store
         .updateRun({
           sessionId: session.id,
           runId: session.run!.id,
-          status: 'failed',
-          error: '모델 또는 프로젝트 초기화에 실패했습니다.',
+          status: controller.signal.aborted ? 'cancelled' : 'failed',
+          error: controller.signal.aborted
+            ? '사용자가 응답을 중지했습니다.'
+            : loadSignal.aborted
+              ? '설정한 실행 시간을 초과했습니다.'
+              : error instanceof AppError
+                ? error.message
+                : '모델 또는 프로젝트 초기화에 실패했습니다.',
         })
         .catch(() => undefined);
     } finally {
-      active.delete(session.run!.id);
+      try {
+        await lease?.release();
+      } finally {
+        active.delete(session.run!.id);
+      }
     }
   }
   async function command(command: Command) {
@@ -142,6 +195,26 @@ export async function startServer(options: ServerOptions) {
     }
     if (command.type === 'send_message' || command.type === 'start_autopilot') {
       const session = await store.session(command.sessionId);
+      if (session.config.managedModelId) {
+        const profile = (await store.localProfiles()).find(
+          (p) => p.id === session.config.managedModelId,
+        );
+        if (
+          session.config.provider !== 'llama-server' ||
+          !profile ||
+          profile.version !== session.config.managedModelVersion
+        )
+          throw new AppError(
+            'MODEL_PROFILE_CHANGED',
+            '관리 모델 설정이 바뀌었거나 삭제되었습니다. 모델 목록에서 새 대화를 만드세요.',
+            409,
+          );
+        if (session.config.contextBudgetTokens > profile.settings.contextSize)
+          throw new AppError(
+            'ENGINE_CONTEXT_LIMIT',
+            '앱 컨텍스트 예산은 관리 엔진의 컨텍스트 길이 이하여야 합니다.',
+          );
+      }
       for (const other of (await store.snapshot()).sessions) {
         if (
           session.projectId &&
@@ -243,6 +316,32 @@ export async function startServer(options: ServerOptions) {
           openrouterKeySource,
           envFilePath: options.envFilePath,
         });
+      } else if (request.method === 'GET' && url.pathname === '/v1/runtime') {
+        json(response, 200, await runtime.snapshot());
+      } else if (request.method === 'POST' && url.pathname === '/v1/runtime/profiles') {
+        const input = localProfileInputSchema.safeParse(await readJson(request));
+        if (!input.success)
+          throw new AppError(
+            'PROFILE_INPUT',
+            input.error.issues[0]?.message ?? '모델 설정이 올바르지 않습니다.',
+          );
+        json(response, 200, { profile: await runtime.register(input.data) });
+      } else if (request.method === 'POST' && url.pathname === '/v1/runtime/settings') {
+        const settings = runtimeSettingsSchema.safeParse(await readJson(request));
+        if (!settings.success)
+          throw new AppError('RUNTIME_SETTINGS', 'VRAM 설정 범위가 올바르지 않습니다.');
+        await runtime.configure(settings.data);
+        json(response, 200, await runtime.snapshot());
+      } else if (request.method === 'POST' && url.pathname === '/v1/runtime/action') {
+        const parsed = runtimeActionSchema.safeParse(await readJson(request));
+        if (!parsed.success) throw new AppError('RUNTIME_ACTION', '모델 작업이 올바르지 않습니다.');
+        const value = parsed.data;
+        if (value.action === 'load') {
+          const lease = await runtime.acquire(value.profileId, AbortSignal.timeout(180000));
+          await lease.release();
+        } else if (value.action === 'unload') await runtime.unload(value.profileId);
+        else await runtime.remove(value.profileId);
+        json(response, 200, await runtime.snapshot());
       } else if (request.method === 'GET' && url.pathname === '/v1/execution/check') {
         const { executionConfigSchema } = await import('@lodex/contracts');
         const config = executionConfigSchema.safeParse({ image: url.searchParams.get('image') });
@@ -491,8 +590,9 @@ export async function startServer(options: ServerOptions) {
     port: address.port,
     async close() {
       closing = true;
-      await queue;
       for (const run of active.values()) run.abort.abort();
+      await runtime.close();
+      await queue;
       await Promise.allSettled([...active.values()].map((run) => run.task));
       for (const stream of streams) stream.end();
       await new Promise<void>((resolve) => {

@@ -5,6 +5,7 @@
 A desktop agent harness for local LLMs and OpenRouter.
 
 - Connect to llama-server over localhost, LAN, or Tailscale.
+- Load GGUF models with your llama-server binary; adjust engine settings and VRAM reservations.
 - Read project files, review changes, apply them, and undo them.
 - Switch between Plan and Build, review AI plans, and edit task criteria and dependencies.
 - Run commands in an opt-in Docker container, with collapsible output and cancellation.
@@ -26,10 +27,11 @@ npm run dev
 
 ## Models
 
-- **llama-server:** Start your server and enter its API URL in settings. Default: `http://127.0.0.1:8080/v1`.
+- **Local models:** Open the local model manager, select a llama-server binary and GGUF file, then create a conversation from the saved profile. Context, GPU layers, KV cache, threads, templates, and extra engine arguments are configurable.
+- **External llama-server:** Start your server and enter its API URL in settings. Default: `http://127.0.0.1:8080/v1`.
 - **OpenRouter:** Copy [`.env.example`](.env.example) to `.env`, set `OPENROUTER_API_KEY`, and restart the app. You can also save a key through the app's OS keychain integration.
 
-`.env` stays out of Git. Local model servers are managed separately.
+`.env` stays out of Git. Managed engines use a private loopback connection. VRAM scheduling uses declared reservations; it does not impose a GPU memory limit.
 
 ## Commands
 
@@ -39,15 +41,16 @@ For **Autopilot**, save task criteria and verification commands, enable the plan
 
 ## Packages
 
-| Package                         | Description                             |
-| ------------------------------- | --------------------------------------- |
-| [desktop](apps/desktop)         | Tauri app and React interface           |
-| [daemon](apps/daemon)           | Local API and agent loop                |
-| [providers](packages/providers) | llama-server and OpenRouter adapters    |
-| [tools](packages/tools)         | Project file tools and reviewed changes |
-| [context](packages/context)     | Request assembly and context budgets    |
-| [storage](packages/storage)     | SQLite persistence and recovery         |
-| [contracts](packages/contracts) | Shared types and validation             |
+| Package                                 | Description                                         |
+| --------------------------------------- | --------------------------------------------------- |
+| [desktop](apps/desktop)                 | Tauri app and React interface                       |
+| [daemon](apps/daemon)                   | Local API and agent loop                            |
+| [providers](packages/providers)         | llama-server and OpenRouter adapters                |
+| [local-runtime](packages/local-runtime) | Model profiles, engine processes, VRAM reservations |
+| [tools](packages/tools)                 | Project file tools and reviewed changes             |
+| [context](packages/context)             | Request assembly and context budgets                |
+| [storage](packages/storage)             | SQLite persistence and recovery                     |
+| [contracts](packages/contracts)         | Shared types and validation                         |
 
 ## Development
 

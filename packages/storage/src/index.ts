@@ -14,6 +14,8 @@ import {
   type ChangeSet,
   type ChangeStatus,
   type CommandExecution,
+  type RuntimeSettings,
+  type LocalProfile,
 } from '@lodex/contracts';
 import type { RunUpdate } from './engine';
 export type { RunUpdate } from './engine';
@@ -75,6 +77,21 @@ export class Store {
   }
   snapshot(): Promise<Omit<Snapshot, 'openrouterConfigured'>> {
     return this.call('snapshot');
+  }
+  localProfiles(): Promise<LocalProfile[]> {
+    return this.call('localProfiles');
+  }
+  saveLocalProfile(profile: LocalProfile, expectedVersion?: number): Promise<LocalProfile> {
+    return this.call('saveLocalProfile', profile, expectedVersion);
+  }
+  removeLocalProfile(id: string): Promise<void> {
+    return this.call('removeLocalProfile', id);
+  }
+  runtimeSettings(): Promise<RuntimeSettings> {
+    return this.call('runtimeSettings');
+  }
+  saveRuntimeSettings(settings: RuntimeSettings): Promise<void> {
+    return this.call('saveRuntimeSettings', settings);
   }
   session(id: string): Promise<Session> {
     return this.call('session', id);

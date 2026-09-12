@@ -26,6 +26,11 @@ port.on('message', (request: { id: number; method: keyof StorageEngine; args: un
         'finishEdit',
         'recordCreatedFile',
         'recordExecution',
+        'localProfiles',
+        'saveLocalProfile',
+        'removeLocalProfile',
+        'runtimeSettings',
+        'saveRuntimeSettings',
       ].includes(request.method)
     )
       throw new AppError('BAD_STORAGE_METHOD', 'Unknown storage operation.');

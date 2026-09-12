@@ -1740,3 +1740,69 @@ input[type='checkbox'] {
   border-radius: 6px;
   padding: 5px;
 }
+.model-manager {
+  width: min(860px, calc(100vw - 40px));
+}
+.model-manager .settings-body {
+  display: block;
+  max-height: 76vh;
+  overflow: auto;
+}
+.model-manager section,
+.model-manager form {
+  margin-bottom: 24px;
+}
+.model-manager fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.model-manager p {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.model-manager .settings-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+.model-manager select {
+  padding: 8px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.model-manager pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  max-height: 240px;
+  overflow: auto;
+}
+.local-model {
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  margin: 12px 0;
+}
+.local-model > span {
+  display: block;
+  font-size: 12px;
+  margin: 8px 0;
+  opacity: 0.7;
+}
+.local-model details summary {
+  font-size: 12px;
+  cursor: pointer;
+  margin-top: 12px;
+}
+.model-manager .field textarea {
+  width: 100%;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}

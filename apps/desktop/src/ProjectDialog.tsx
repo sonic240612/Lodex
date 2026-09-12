@@ -75,8 +75,8 @@ export function ProjectDialog({
           </label>
           <p className="subtle-note">
             폴더를 복사하거나 업로드하지 않고 연결합니다. 프로젝트별 대화를 만들고 모델이 파일
-            목록·읽기·검색 도구로 내용을 살펴볼 수 있습니다. 파일 수정과 명령 실행은 다음
-            단계입니다.
+            목록·읽기·검색 도구로 내용을 살펴볼 수 있습니다. 변경은 검토 후 적용하고, 명령 실행은
+            대화별로 허용할 수 있습니다.
           </p>
           {!nativeDesktop && (
             <p className="demo-notice">로컬 폴더 연결은 데스크톱 앱에서 사용할 수 있습니다.</p>

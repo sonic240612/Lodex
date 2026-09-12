@@ -13,6 +13,7 @@ import { decodeSse } from './sse';
 import { ThinkingSplitter } from './thinking';
 import { privateServerFetch, connectionError } from './network';
 export { decodeSse } from './sse';
+export { privateServerFetch } from './network';
 type Fetch = (input: string, init: RequestInit) => Promise<Response>;
 const object = (value: unknown): Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value)
