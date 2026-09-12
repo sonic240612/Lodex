@@ -1,5 +1,6 @@
 import { activityProposal, type Activity } from '@lodex/contracts';
 import { EditReview, editStatusText } from './EditReview';
+import { PlanReview } from './PlanReview';
 const statusText = {
   running: '진행 중',
   completed: '완료',
@@ -22,12 +23,36 @@ export function ActivityCards({
             <span className={'activity-dot ' + activity.status} />
             <span>{activity.label}</span>
             <small>
-              {activityProposal(activity)
-                ? editStatusText[activityProposal(activity)!.status]
-                : statusText[activity.status]}
+              {activity.execution
+                ? activity.execution.cleanupPending
+                  ? '컨테이너 정리 필요'
+                  : activity.execution.status === 'completed'
+                    ? '종료 코드 0'
+                    : activity.execution.status === 'running' ||
+                        activity.execution.status === 'starting'
+                      ? '명령 실행 중'
+                      : '명령 중단·실패'
+                : activityProposal(activity)
+                  ? editStatusText[activityProposal(activity)!.status]
+                  : statusText[activity.status]}
             </small>
           </summary>
-          {activityProposal(activity) && sessionId ? (
+          {activity.execution ? (
+            <div className="activity-section">
+              <span>명령 · {activity.execution.cwd}</span>
+              <pre>{activity.execution.command}</pre>
+              <span>출력 · 종료 코드 {activity.execution.exitCode ?? '미확인'}</span>
+              <pre>{activity.execution.output || '출력 없음'}</pre>
+              {activity.execution.truncated && <p>출력 일부가 생략되었습니다.</p>}
+              {activity.execution.error && <p role="alert">{activity.execution.error}</p>}
+            </div>
+          ) : activity.planProposal && sessionId ? (
+            <PlanReview
+              proposal={activity.planProposal}
+              sessionId={sessionId}
+              activityId={activity.id}
+            />
+          ) : activityProposal(activity) && sessionId ? (
             <EditReview
               edit={activityProposal(activity)!}
               activityId={activity.id}

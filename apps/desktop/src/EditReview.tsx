@@ -28,6 +28,7 @@ export function EditReview({
   const files = 'files' in edit ? edit.files : [edit];
   const grouped = 'files' in edit;
   const session = workspace.sessions.find((s) => s.id === sessionId);
+  const readOnly = session?.mode === 'plan';
   const running = workspace.sessions.some(
     (s) => s.projectId === session?.projectId && s.run?.status === 'running',
   );
@@ -124,7 +125,7 @@ export function EditReview({
       <div className="edit-actions">
         {['applied', 'partial'].includes(edit.status) && !confirmUndo && (
           <button
-            disabled={!nativeDesktop || !workspace.connected || busy || running}
+            disabled={!nativeDesktop || !workspace.connected || busy || running || readOnly}
             onClick={() => setConfirmUndo(true)}
           >
             변경 되돌리기
@@ -132,7 +133,7 @@ export function EditReview({
         )}
         {['proposed', 'partial'].includes(edit.status) && !confirmUndo && (
           <button
-            disabled={!nativeDesktop || !workspace.connected || busy || running}
+            disabled={!nativeDesktop || !workspace.connected || busy || running || readOnly}
             onClick={() => void act('apply')}
           >
             {busy ? '처리 중…' : edit.status === 'partial' ? '남은 변경 적용' : '검토한 변경 적용'}
@@ -147,6 +148,7 @@ export function EditReview({
           </button>
         )}
         {running && <small>프로젝트 응답이 끝나면 적용할 수 있습니다.</small>}
+        {readOnly && <small>파일 변경은 Build 모드에서 사용할 수 있습니다.</small>}
       </div>
       {confirmUndo && ['applied', 'partial'].includes(edit.status) && (
         <div className="undo-confirm" role="group" aria-label="되돌리기 확인">
@@ -157,7 +159,7 @@ export function EditReview({
           </p>
           <div className="edit-actions">
             <button
-              disabled={!workspace.connected || busy || running}
+              disabled={!workspace.connected || busy || running || readOnly}
               onClick={() => void act('undo')}
             >
               되돌리기 확인

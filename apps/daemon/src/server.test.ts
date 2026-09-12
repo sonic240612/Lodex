@@ -73,6 +73,120 @@ afterEach(async () => {
   for (const close of cleanup.splice(0)) await close();
 });
 describe('authenticated daemon integration', () => {
+  it('offers read-only Plan tools, reviews a plan, and adopts it without executing tasks', async () => {
+    let round = 0;
+    const provider: InferenceProvider = {
+      listModels: async () => [],
+      capabilities: async () => ({ tools: true, streaming: true }),
+      async *generate(request) {
+        expect(request.tools?.map((t) => t.function.name)).toEqual(['propose_plan']);
+        if (round++ === 0) {
+          yield {
+            type: 'tool_call_delta',
+            index: 0,
+            id: 'p',
+            name: 'propose_plan',
+            arguments: JSON.stringify({
+              goal: 'Release',
+              criteria: 'Checks pass',
+              tasks: [{ key: 'test', title: 'Test', criteria: 'Pass', dependsOn: [] }],
+            }),
+          };
+          yield { type: 'finished', reason: 'tool_calls' };
+        } else {
+          yield { type: 'text_delta', text: 'Review the plan.' };
+          yield { type: 'finished', reason: 'stop' };
+        }
+      },
+    };
+    const app = await setup(provider);
+    let session = await app.create();
+    session = (
+      await app
+        .command(
+          makeCommand({
+            type: 'set_mode',
+            sessionId: session.id,
+            expectedVersion: session.version,
+            mode: 'plan',
+          }),
+        )
+        .then((r) => r.json())
+    ).session;
+    await app.command(
+      makeCommand({
+        type: 'send_message',
+        sessionId: session.id,
+        expectedVersion: session.version,
+        content: 'Plan release',
+      }),
+    );
+    await vi.waitFor(async () =>
+      expect((await app.store.session(session.id)).run?.status).toBe('completed'),
+    );
+    session = await app.store.session(session.id);
+    expect(session.plan.tasks).toEqual([]);
+    const proposal = session.messages.at(-1)!.activities!.find((a) => a.planProposal)!;
+    const adoption = makeCommand({
+      type: 'adopt_plan',
+      sessionId: session.id,
+      expectedVersion: session.version,
+      activityId: proposal.id,
+    });
+    const response = await app.command(adoption);
+    expect(response.status).toBe(200);
+    expect((await response.json()).session.plan.tasks[0].done).toBe(false);
+    expect((await app.command(adoption).then((r) => r.json())).replayed).toBe(true);
+  });
+  it('blocks a model that requests a write proposal in Plan even with a selected project', async () => {
+    const provider: InferenceProvider = {
+      listModels: async () => [],
+      capabilities: async () => ({ tools: true, streaming: true }),
+      async *generate(request) {
+        expect(request.tools?.some((t) => t.function.name === 'read_file')).toBe(true);
+        expect(request.tools?.some((t) => t.function.name === 'propose_changes')).toBe(false);
+        yield {
+          type: 'tool_call_delta',
+          index: 0,
+          id: 'w',
+          name: 'propose_changes',
+          arguments: '{}',
+        };
+        yield { type: 'finished', reason: 'tool_calls' };
+      },
+    };
+    const app = await setup(provider);
+    const { project } = await app
+      .request('/v1/projects', { method: 'POST', body: JSON.stringify({ path: app.dir }) })
+      .then((r) => r.json());
+    let session = await app.create({}, project.id);
+    session = (
+      await app
+        .command(
+          makeCommand({
+            type: 'set_mode',
+            sessionId: session.id,
+            expectedVersion: session.version,
+            mode: 'plan',
+          }),
+        )
+        .then((r) => r.json())
+    ).session;
+    await app.command(
+      makeCommand({
+        type: 'send_message',
+        sessionId: session.id,
+        expectedVersion: session.version,
+        content: 'Ignore Plan and write',
+      }),
+    );
+    await vi.waitFor(async () =>
+      expect((await app.store.session(session.id)).run?.status).toBe('failed'),
+    );
+    expect(
+      (await app.store.session(session.id)).messages.at(-1)!.activities?.every((a) => !a.changes),
+    ).toBe(true);
+  });
   it('exposes only dotenv source metadata and rejects UI replacement of a managed key', async () => {
     const secret = 'private-test-fixture-do-not-display';
     const app = await setup(undefined, {
@@ -389,6 +503,7 @@ describe('authenticated daemon integration', () => {
       'list_files',
       'read_file',
       'search_text',
+      'propose_plan',
     ]);
     expect(requests[1]!.messages.at(-1)).toMatchObject({ role: 'tool', toolCallId: 'read-1' });
     expect(requests[1]!.messages.at(-1)?.content).toContain('안녕 프로젝트');
@@ -448,7 +563,7 @@ describe('authenticated daemon integration', () => {
         }),
       );
       await vi.waitFor(() => expect(captured).toBeDefined());
-      expect(!!captured!.tools?.length).toBe(consent);
+      expect(!!captured!.tools?.some((tool) => tool.function.name === 'read_file')).toBe(consent);
       expect(JSON.stringify(captured)).not.toContain(app.dir);
     },
   );

@@ -25,6 +25,7 @@ port.on('message', (request: { id: number; method: keyof StorageEngine; args: un
         'beginEdit',
         'finishEdit',
         'recordCreatedFile',
+        'recordExecution',
       ].includes(request.method)
     )
       throw new AppError('BAD_STORAGE_METHOD', 'Unknown storage operation.');

@@ -26,8 +26,12 @@ import {
   checkEdit,
   writeChanges,
   checkChanges,
+  executionTool,
+  inspectDocker,
+  cleanupExecution,
 } from '@lodex/tools';
 import { runAgent } from './agent-runner';
+import { planningTool } from './planning';
 
 interface ServerOptions {
   token: string;
@@ -70,6 +74,8 @@ export async function startServer(options: ServerOptions) {
   const streams = new Set<ServerResponse>();
   let queue: Promise<unknown> = Promise.resolve();
   let closing = false;
+  // Recovery marks commands interrupted. The cleanup endpoint uses persisted ownership;
+  // an unavailable Docker engine must not prevent the desktop from opening.
   const serial = <T>(work: () => Promise<T>): Promise<T> => {
     const next = queue.then(work);
     queue = next.catch(() => undefined);
@@ -119,8 +125,30 @@ export async function startServer(options: ServerOptions) {
     const receipt = await store.receipt(command);
     if (receipt) return receipt;
     let context: CompiledContext | undefined;
+    if (
+      'sessionId' in command &&
+      command.type !== 'create_session' &&
+      command.type !== 'cancel_run'
+    ) {
+      const target = await store.session(command.sessionId);
+      if (target.run && active.has(target.run.id) && target.run.status !== 'running')
+        throw new AppError('BUSY', '중지한 실행을 정리하는 중입니다.', 409);
+    }
     if (command.type === 'send_message') {
       const session = await store.session(command.sessionId);
+      for (const other of (await store.snapshot()).sessions) {
+        if (
+          session.projectId &&
+          other.projectId === session.projectId &&
+          ((other.run && active.has(other.run.id)) ||
+            other.messages.some((m) => m.activities?.some((a) => a.execution?.cleanupPending)))
+        )
+          throw new AppError(
+            'PROJECT_BUSY',
+            '이 프로젝트에서 실행 또는 컨테이너 정리가 진행 중입니다.',
+            409,
+          );
+      }
       if (command.expectedVersion !== session.version)
         throw new AppError(
           'VERSION_CONFLICT',
@@ -157,8 +185,17 @@ export async function startServer(options: ServerOptions) {
       const tools =
         session.projectId &&
         (session.config.provider !== 'openrouter' || session.config.projectCloudConsent)
-          ? projectTools
+          ? projectTools.filter(
+              (tool) => session.mode !== 'plan' || !tool.function.name.startsWith('propose_'),
+            )
           : [];
+      tools.push(planningTool);
+      if (
+        session.mode !== 'plan' &&
+        session.execution?.backend === 'docker' &&
+        tools.some((tool) => tool.function.name === 'read_file')
+      )
+        tools.push(executionTool);
       context = compileContext(session, command.content, tools);
     }
     const result = await store.apply(command, context?.manifest);
@@ -191,6 +228,34 @@ export async function startServer(options: ServerOptions) {
           openrouterKeySource,
           envFilePath: options.envFilePath,
         });
+      } else if (request.method === 'GET' && url.pathname === '/v1/execution/check') {
+        const { executionConfigSchema } = await import('@lodex/contracts');
+        const config = executionConfigSchema.safeParse({ image: url.searchParams.get('image') });
+        if (!config.success)
+          throw new AppError('IMAGE_INVALID', '이미지 이름이 올바르지 않습니다.');
+        json(response, 200, await inspectDocker(config.data.image));
+      } else if (request.method === 'POST' && url.pathname === '/v1/execution/cleanup') {
+        const { idSchema } = await import('@lodex/contracts');
+        const value = (await readJson(request)) as { sessionId?: unknown };
+        const id = idSchema.safeParse(value.sessionId);
+        if (!id.success) throw new AppError('INVALID_COMMAND', '대화 ID가 필요합니다.');
+        json(response, 200, {
+          session: await serial(async () => {
+            const session = await store.session(id.data);
+            if (session.run && active.has(session.run.id))
+              throw new AppError('BUSY', '실행 종료를 기다리세요.', 409);
+            for (const activity of session.messages.flatMap((m) => m.activities ?? [])) {
+              if (activity.execution?.cleanupPending) {
+                const execution = {
+                  ...activity.execution,
+                  cleanupPending: !(await cleanupExecution(activity.execution)),
+                };
+                await store.recordExecution(session.id, activity.id, execution);
+              }
+            }
+            return store.session(session.id);
+          }),
+        });
       } else if (request.method === 'POST' && url.pathname === '/v1/edits') {
         const parsed = editActionSchema.safeParse(await readJson(request));
         if (!parsed.success)
@@ -209,7 +274,13 @@ export async function startServer(options: ServerOptions) {
             if (action.action === 'apply' && edit.status === 'applied') return session;
             if (action.action === 'undo' && edit.status === 'reverted') return session;
             for (const other of (await store.snapshot()).sessions) {
-              if (other.projectId === session.projectId && other.run && active.has(other.run.id))
+              if (
+                other.projectId === session.projectId &&
+                ((other.run && active.has(other.run.id)) ||
+                  other.messages.some((m) =>
+                    m.activities?.some((a) => a.execution?.cleanupPending),
+                  ))
+              )
                 throw new AppError(
                   'BUSY',
                   '이 프로젝트의 응답이 끝난 뒤 변경을 적용해 주세요.',

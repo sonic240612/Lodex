@@ -25,21 +25,114 @@ export const taskSchema = z.strictObject({
   id: idSchema,
   title: z.string().trim().min(1).max(500),
   done: z.boolean(),
+  criteria: z.string().trim().max(2000).optional(),
+  dependsOn: z.array(idSchema).max(100).optional(),
 });
-export const planSchema = z.strictObject({
-  goal: z.string().trim().max(4000),
-  instructions: z.string().trim().max(4000).default(''),
-  includeInContext: z.boolean().default(false),
-  tasks: z
-    .array(taskSchema)
-    .max(100)
-    .refine(
-      (tasks) => new Set(tasks.map((t) => t.id)).size === tasks.length,
-      '중복된 작업 ID입니다.',
-    ),
-});
+export const planSchema = z
+  .strictObject({
+    goal: z.string().trim().max(4000),
+    instructions: z.string().trim().max(4000).default(''),
+    includeInContext: z.boolean().default(false),
+    criteria: z.string().trim().max(4000).optional(),
+    tasks: z
+      .array(taskSchema)
+      .max(100)
+      .refine(
+        (tasks) => new Set(tasks.map((t) => t.id)).size === tasks.length,
+        '중복된 작업 ID입니다.',
+      ),
+  })
+  .superRefine((plan, ctx) => {
+    const tasks = new Map(plan.tasks.map((task) => [task.id, task]));
+    const visiting = new Set<string>(),
+      visited = new Set<string>();
+    const visit = (id: string): boolean => {
+      if (visiting.has(id)) return false;
+      if (visited.has(id)) return true;
+      visiting.add(id);
+      for (const dependency of tasks.get(id)?.dependsOn ?? [])
+        if (!tasks.has(dependency) || !visit(dependency)) return false;
+      visiting.delete(id);
+      visited.add(id);
+      return true;
+    };
+    if (plan.tasks.some((task) => !visit(task.id)))
+      ctx.addIssue({
+        code: 'custom',
+        path: ['tasks'],
+        message: '작업 의존 관계에 순환 또는 없는 작업이 포함되어 있습니다.',
+      });
+  });
 export type Plan = z.infer<typeof planSchema>;
 export const defaultPlan = (): Plan => planSchema.parse({ goal: '', tasks: [] });
+export const modeSchema = z.enum(['plan', 'build']);
+export type AgentMode = z.infer<typeof modeSchema>;
+export const executionConfigSchema = z
+  .strictObject({
+    backend: z.enum(['disabled', 'docker']).default('disabled'),
+    image: z
+      .string()
+      .trim()
+      .regex(/^[a-zA-Z0-9][a-zA-Z0-9_.:/@-]{0,255}$/)
+      .default('node:24-bookworm-slim'),
+    network: z.enum(['none', 'bridge']).default('none'),
+    cpus: z.number().min(0.5).max(16).default(2),
+    memoryMb: z.number().int().min(256).max(32768).default(2048),
+    projectAccess: z.boolean().default(false),
+  })
+  .refine(
+    (config) => config.backend === 'disabled' || config.projectAccess,
+    '프로젝트 폴더 접근 허용이 필요합니다.',
+  );
+export type ExecutionConfig = z.infer<typeof executionConfigSchema>;
+export const defaultExecutionConfig = (): ExecutionConfig => executionConfigSchema.parse({});
+export const runCommandSchema = z.strictObject({
+  command: z
+    .string()
+    .min(1)
+    .max(8000)
+    .refine((s) => !s.includes('\0')),
+  cwd: z.string().min(1).max(4096).default('.'),
+  timeoutMs: z.number().int().min(1000).max(120000).default(60000),
+  stdin: z.string().max(8000).default(''),
+});
+export interface CommandExecution {
+  id: string;
+  containerName: string;
+  dockerHost?: string;
+  containerId?: string;
+  imageId?: string;
+  command: string;
+  cwd: string;
+  status: 'starting' | 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
+  startedAt: string;
+  finishedAt?: string;
+  exitCode: number | null;
+  output: string;
+  truncated: boolean;
+  cleanupPending: boolean;
+  error?: string;
+}
+export const planDraftSchema = z.strictObject({
+  goal: z.string().trim().min(1).max(4000),
+  criteria: z.string().trim().min(1).max(4000),
+  tasks: z
+    .array(
+      z.strictObject({
+        key: z.string().regex(/^[a-zA-Z0-9_-]{1,40}$/),
+        title: z.string().trim().min(1).max(500),
+        criteria: z.string().trim().max(2000),
+        dependsOn: z.array(z.string().max(40)).max(100),
+      }),
+    )
+    .min(1)
+    .max(100),
+});
+export interface PlanProposal {
+  plan: Plan;
+  basePlan: Plan;
+  status: 'proposed' | 'adopted';
+}
 const envelope = {
   protocolVersion: z.literal(PROTOCOL_VERSION),
   commandId: idSchema,
@@ -75,6 +168,7 @@ export const commandSchema = z.discriminatedUnion('type', [
     title: z.string().trim().min(1).max(120),
     config: modelConfigSchema,
     projectId: idSchema.nullable().default(null),
+    mode: modeSchema.default('build'),
   }),
   z.strictObject({
     ...envelope,
@@ -89,6 +183,14 @@ export const commandSchema = z.discriminatedUnion('type', [
     content: z.string().trim().min(1).max(64000),
   }),
   z.strictObject({ ...envelope, ...target, type: z.literal('save_plan'), plan: planSchema }),
+  z.strictObject({ ...envelope, ...target, type: z.literal('set_mode'), mode: modeSchema }),
+  z.strictObject({
+    ...envelope,
+    ...target,
+    type: z.literal('configure_execution'),
+    execution: executionConfigSchema,
+  }),
+  z.strictObject({ ...envelope, ...target, type: z.literal('adopt_plan'), activityId: idSchema }),
   z.strictObject({
     ...envelope,
     type: z.literal('cancel_run'),
@@ -185,6 +287,8 @@ export const editActionSchema = z.strictObject({
 });
 export type EditAction = z.infer<typeof editActionSchema>;
 export interface Activity {
+  execution?: CommandExecution;
+  planProposal?: PlanProposal;
   edit?: EditProposal;
   changes?: ChangeSet;
   id: string;
@@ -227,6 +331,8 @@ export interface ContextManifest {
   eco: boolean;
 }
 export interface Session {
+  execution?: ExecutionConfig;
+  mode?: AgentMode;
   id: string;
   title: string;
   version: number;

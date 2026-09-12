@@ -13,6 +13,7 @@ import {
   type EditAction,
   type ChangeSet,
   type ChangeStatus,
+  type CommandExecution,
 } from '@lodex/contracts';
 import type { RunUpdate } from './engine';
 export type { RunUpdate } from './engine';
@@ -92,6 +93,13 @@ export class Store {
   }
   beginEdit(action: EditAction): Promise<Session> {
     return this.call('beginEdit', action);
+  }
+  recordExecution(
+    sessionId: string,
+    activityId: string,
+    execution: CommandExecution,
+  ): Promise<Session> {
+    return this.call('recordExecution', sessionId, activityId, execution);
   }
   recordCreatedFile(
     sessionId: string,

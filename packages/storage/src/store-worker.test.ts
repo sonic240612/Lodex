@@ -60,6 +60,173 @@ afterEach(async () => {
   }
 });
 describe('durable worker storage', () => {
+  it('protects plan adoption against concurrent edits and enforces Plan file-write policy in storage', async () => {
+    const { store, path } = await db();
+    const project = await store.registerProject(await inspectProject(dirname(path)));
+    await writeFile(join(project.path, 'a.txt'), 'before');
+    let session = (
+      await store.apply(
+        makeCommand({
+          type: 'create_session',
+          sessionId: crypto.randomUUID(),
+          title: 'policy',
+          config: defaultModelConfig(),
+          projectId: project.id,
+        }),
+      )
+    ).session;
+    session = (
+      await store.apply(
+        makeCommand({
+          type: 'send_message',
+          sessionId: session.id,
+          expectedVersion: session.version,
+          content: 'plan',
+        }),
+      )
+    ).session;
+    const planId = crypto.randomUUID(),
+      editId = crypto.randomUUID();
+    session = await store.updateRun({
+      sessionId: session.id,
+      runId: session.run!.id,
+      status: 'completed',
+      activities: [
+        {
+          id: planId,
+          kind: 'tool',
+          label: 'propose_plan',
+          status: 'completed',
+          text: '',
+          planProposal: {
+            basePlan: session.plan,
+            plan: { ...session.plan, goal: 'Proposed goal' },
+            status: 'proposed',
+          },
+        },
+        {
+          id: editId,
+          kind: 'tool',
+          label: 'propose_edit',
+          status: 'completed',
+          text: '',
+          edit: await proposeEdit(
+            project,
+            {
+              path: 'a.txt',
+              expectedHash: createHash('sha256').update('before').digest('hex'),
+              oldText: 'before',
+              newText: 'after',
+            },
+            AbortSignal.timeout(5000),
+          ),
+        },
+      ],
+    });
+    session = (
+      await store.apply(
+        makeCommand({
+          type: 'save_plan',
+          sessionId: session.id,
+          expectedVersion: session.version,
+          plan: { ...session.plan, goal: 'User edited goal' },
+        }),
+      )
+    ).session;
+    await expect(
+      store.apply(
+        makeCommand({
+          type: 'adopt_plan',
+          sessionId: session.id,
+          expectedVersion: session.version,
+          activityId: planId,
+        }),
+      ),
+    ).rejects.toMatchObject({ code: 'PLAN_CONFLICT' });
+    session = (
+      await store.apply(
+        makeCommand({
+          type: 'set_mode',
+          sessionId: session.id,
+          expectedVersion: session.version,
+          mode: 'plan',
+        }),
+      )
+    ).session;
+    await expect(
+      store.beginEdit({
+        sessionId: session.id,
+        expectedVersion: session.version,
+        activityId: editId,
+        action: 'apply',
+      }),
+    ).rejects.toMatchObject({ code: 'PLAN_READ_ONLY' });
+    expect(await readFile(join(project.path, 'a.txt'), 'utf8')).toBe('before');
+  });
+  it('keeps a cancelled command outcome and blocks deletion until owned-container cleanup', async () => {
+    const { store, path } = await db();
+    let session = await create(store);
+    session = (
+      await store.apply(
+        makeCommand({
+          type: 'send_message',
+          sessionId: session.id,
+          expectedVersion: session.version,
+          content: 'run',
+        }),
+      )
+    ).session;
+    const activityId = crypto.randomUUID(),
+      id = crypto.randomUUID();
+    session = await store.updateRun({
+      sessionId: session.id,
+      runId: session.run!.id,
+      activities: [
+        { id: activityId, kind: 'tool', label: 'run_command', status: 'running', text: '' },
+      ],
+    });
+    await store.recordExecution(session.id, activityId, {
+      id,
+      containerName: 'lodex-' + id,
+      command: 'test',
+      cwd: '.',
+      status: 'running',
+      startedAt: '',
+      exitCode: null,
+      output: '',
+      truncated: false,
+      cleanupPending: true,
+    });
+    session = (
+      await store.apply(
+        makeCommand({ type: 'cancel_run', sessionId: session.id, runId: session.run!.id }),
+      )
+    ).session;
+    await close(store);
+    const reopened = await open(path);
+    session = await reopened.session(session.id);
+    expect(session.messages.at(-1)!.activities![0]!.execution?.status).toBe('interrupted');
+    await expect(
+      reopened.deleteSessions(
+        deleteSessionsSchema.parse({
+          protocolVersion: 1,
+          commandId: crypto.randomUUID(),
+          actor: 'desktop',
+          policyVersion: 1,
+          type: 'delete_sessions',
+          targets: [{ sessionId: session.id, expectedVersion: session.version }],
+        }),
+      ),
+    ).rejects.toMatchObject({ code: 'CLEANUP_REQUIRED' });
+    const execution = session.messages.at(-1)!.activities![0]!.execution!;
+    session = await reopened.recordExecution(session.id, activityId, {
+      ...execution,
+      cleanupPending: false,
+      output: 'late cleanup result',
+    });
+    expect(session.run?.status).toBe('cancelled');
+    expect(session.messages.at(-1)!.activities![0]!.execution?.output).toBe('late cleanup result');
+  });
   it.each(['partial', 'published'] as const)(
     'recovers a grouped change after interruption at %s without replaying effects',
     async (point) => {

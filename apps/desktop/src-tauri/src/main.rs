@@ -163,8 +163,11 @@ fn route_allowed(method: &str, path: &str) -> bool {
         | ("POST", "/v1/commands")
         | ("POST", "/v1/projects")
         | ("POST", "/v1/sessions/delete")
+        | ("POST", "/v1/execution/cleanup")
         | ("POST", "/v1/edits") => true,
-        ("GET", value) if value.starts_with("/v1/models?") => {
+        ("GET", value)
+            if value.starts_with("/v1/models?") || value.starts_with("/v1/execution/check?") =>
+        {
             !value.contains('#') && !value.contains('\\')
         }
         _ => false,

@@ -46,6 +46,7 @@ async function previewCommand(command: Command): Promise<CommandResult> {
       createdAt: now,
       updatedAt: now,
       config: { ...command.config, provider: 'demo', model: 'demo' },
+      mode: command.mode,
       projectId: command.projectId,
       plan: defaultPlan(),
       messages: [],
@@ -55,7 +56,17 @@ async function previewCommand(command: Command): Promise<CommandResult> {
   } else {
     if (!session) throw new Error('대화를 찾을 수 없습니다.');
     if (command.type === 'save_plan') session.plan = command.plan;
-    else if (command.type === 'configure_session')
+    else if (command.type === 'set_mode') session.mode = command.mode;
+    else if (command.type === 'configure_execution')
+      throw new Error('명령 실행은 데스크톱 앱에서 설정할 수 있습니다.');
+    else if (command.type === 'adopt_plan') {
+      const proposal = session.messages
+        .flatMap((m) => m.activities ?? [])
+        .find((a) => a.id === command.activityId)?.planProposal;
+      if (!proposal || proposal.status !== 'proposed') throw new Error('검토할 계획이 없습니다.');
+      session.plan = proposal.plan;
+      proposal.status = 'adopted';
+    } else if (command.type === 'configure_session')
       session.config = { ...command.config, provider: 'demo', model: 'demo' };
     else if (command.type === 'send_message') {
       const now = new Date().toISOString();
@@ -215,6 +226,23 @@ export async function editAction(action: EditAction): Promise<Session> {
     method: 'POST',
     path: '/v1/edits',
     body: action,
+  });
+  return result.session;
+}
+export async function checkExecution(image: string): Promise<{ host: string; imageId: string }> {
+  if (!nativeDesktop) throw new Error('데스크톱 앱에서 Docker를 연결하세요.');
+  return invoke('daemon_request', {
+    method: 'GET',
+    path: '/v1/execution/check?' + new URLSearchParams({ image }),
+    body: null,
+  });
+}
+export async function cleanupCommands(sessionId: string): Promise<Session> {
+  if (!nativeDesktop) throw new Error('데스크톱 앱에서 정리하세요.');
+  const result = await invoke<{ session: Session }>('daemon_request', {
+    method: 'POST',
+    path: '/v1/execution/cleanup',
+    body: { sessionId },
   });
   return result.session;
 }

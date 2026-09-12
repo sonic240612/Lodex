@@ -12,6 +12,7 @@ import {
 import { createTwoFilesPatch } from 'diff';
 import { proposeChanges, changeInputSchema } from './changes';
 export { proposeChanges, checkChanges, writeChanges } from './changes';
+export { executeCommand, cleanupExecution, inspectDocker, executionTool } from './execution';
 
 const MAX_FILE = 1024 * 1024;
 const ignored = new Set([

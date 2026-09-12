@@ -6,7 +6,8 @@ A desktop agent harness for local LLMs and OpenRouter.
 
 - Connect to llama-server over localhost, LAN, or Tailscale.
 - Read project files, review changes, apply them, and undo them.
-- Edit goals and tasks alongside chat, with collapsible thinking and tool logs.
+- Switch between Plan and Build, review AI plans, and edit task criteria and dependencies.
+- Run commands in an opt-in Docker container, with collapsible output and cancellation.
 - Adjust generation settings and see token usage, generation speed, and prefill speed.
 
 Early development. Windows x64 tested; macOS and Linux support is in progress.
@@ -28,6 +29,10 @@ npm run dev
 - **OpenRouter:** Copy [`.env.example`](.env.example) to `.env`, set `OPENROUTER_API_KEY`, and restart the app. You can also save a key through the app's OS keychain integration.
 
 `.env` stays out of Git. Local model servers are managed separately.
+
+## Commands
+
+Open a project conversation and expand **Command execution** in the plan panel. Select a local Linux Docker image with `/bin/sh`, check the engine and image, then enable project access. Commands run in Build mode. Network access is off by default; images are never downloaded automatically. Container integration is experimental; host shell and interactive PTY support are pending.
 
 ## Packages
 

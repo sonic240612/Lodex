@@ -23,12 +23,17 @@ import {
   type ChangeSet,
   type ChangeStatus,
   activityProposal,
+  defaultExecutionConfig,
+  executionConfigSchema,
+  type CommandExecution,
 } from '@lodex/contracts';
 
 // Additive JSON fields are defaulted on all read paths, including old SSE events.
 function hydrate(session: Session): Session {
   return {
     ...session,
+    mode: session.mode ?? 'build',
+    execution: executionConfigSchema.parse(session.execution ?? {}),
     projectId: session.projectId ?? null,
     config: modelConfigSchema.parse(session.config),
     plan: planSchema.parse(session.plan),
@@ -55,7 +60,7 @@ export class StorageEngine {
       'PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;',
     );
     const row = this.db.prepare('PRAGMA user_version').get() as { user_version: number };
-    if (row.user_version > 5) {
+    if (row.user_version > 7) {
       this.db.close();
       throw new AppError(
         'DATABASE_VERSION',
@@ -90,6 +95,10 @@ export class StorageEngine {
     if (row.user_version < 4) this.db.exec('PRAGMA user_version=4;');
     // v5 adds grouped file changes and recoverable partial outcomes.
     if (row.user_version < 5) this.db.exec('PRAGMA user_version=5;');
+    // v6 enforces Plan mode and persists reviewed plan proposals.
+    if (row.user_version < 6) this.db.exec('PRAGMA user_version=6;');
+    // v7 records owned command containers, including cleanup after cancellation/restart.
+    if (row.user_version < 7) this.db.exec('PRAGMA user_version=7;');
   }
   close(): void {
     if (!this.closed) {
@@ -228,7 +237,17 @@ export class StorageEngine {
           );
         if (session.run?.status === 'running')
           throw new AppError('BUSY', '응답을 중지한 뒤 대화를 삭제해 주세요.', 409);
-        if (session.messages.some((m) => m.activities?.some((a) => a.edit?.status === 'applying')))
+        if (session.messages.some((m) => m.activities?.some((a) => a.execution?.cleanupPending)))
+          throw new AppError(
+            'CLEANUP_REQUIRED',
+            '컨테이너 정리를 확인한 뒤 대화를 삭제하세요.',
+            409,
+          );
+        if (
+          session.messages.some((m) =>
+            m.activities?.some((a) => activityProposal(a)?.status === 'applying'),
+          )
+        )
           throw new AppError('BUSY', '파일 변경을 처리한 뒤 대화를 삭제해 주세요.', 409);
       }
       const sessionIds = command.targets.map((t) => t.sessionId);
@@ -300,6 +319,8 @@ export class StorageEngine {
           createdAt: now,
           updatedAt: now,
           config: command.config,
+          mode: command.mode,
+          execution: defaultExecutionConfig(),
           projectId: command.projectId,
           plan: defaultPlan(),
           messages: [],
@@ -328,6 +349,40 @@ export class StorageEngine {
           }
         } else if (command.type === 'save_plan') {
           session.plan = command.plan;
+        } else if (
+          command.type === 'set_mode' ||
+          command.type === 'adopt_plan' ||
+          command.type === 'configure_execution'
+        ) {
+          if (
+            session.run?.status === 'running' ||
+            session.messages.some((m) =>
+              m.activities?.some((a) => activityProposal(a)?.status === 'applying'),
+            )
+          )
+            throw new AppError('BUSY', '실행이 끝난 뒤 모드나 계획을 변경하세요.', 409);
+          if (command.type === 'set_mode') session.mode = command.mode;
+          else if (command.type === 'configure_execution') {
+            if (!session.projectId && command.execution.backend !== 'disabled')
+              throw new AppError('PROJECT_REQUIRED', '명령 실행에는 프로젝트가 필요합니다.');
+            session.execution = command.execution;
+          } else {
+            const proposal = session.messages
+              .flatMap((m) => m.activities ?? [])
+              .find((a) => a.id === command.activityId)?.planProposal;
+            if (!proposal || proposal.status !== 'proposed')
+              throw new AppError('PLAN_NOT_FOUND', '검토 대기 중인 계획이 없습니다.', 409);
+            if (
+              JSON.stringify(planSchema.parse(proposal.basePlan)) !== JSON.stringify(session.plan)
+            )
+              throw new AppError(
+                'PLAN_CONFLICT',
+                '제안 이후 계획을 편집했습니다. 현재 계획을 기준으로 다시 제안해 주세요.',
+                409,
+              );
+            session.plan = planSchema.parse(proposal.plan);
+            proposal.status = 'adopted';
+          }
         } else {
           if (session.run?.status === 'running')
             throw new AppError('BUSY', '현재 응답이 끝나거나 중지된 뒤 변경하세요.', 409);
@@ -422,6 +477,8 @@ export class StorageEngine {
   beginEdit(action: EditAction): Session {
     return this.transaction(() => {
       const session = this.session(action.sessionId);
+      if (session.mode === 'plan' && action.action !== 'check')
+        throw new AppError('PLAN_READ_ONLY', '파일을 변경하려면 Build 모드로 전환하세요.', 403);
       if (session.run?.status === 'running')
         throw new AppError('BUSY', '응답이 끝난 뒤 변경을 적용해 주세요.', 409);
       if (session.version !== action.expectedVersion)
@@ -451,6 +508,19 @@ export class StorageEngine {
         edit.observations = edit.files.map((f) => ({ path: f.path, state: 'unknown' }));
       delete edit.error;
       this.persist(session); // Durable intent before any filesystem effect.
+      return session;
+    });
+  }
+  recordExecution(sessionId: string, activityId: string, execution: CommandExecution): Session {
+    return this.transaction(() => {
+      const session = this.session(sessionId);
+      const activity = session.messages
+        .flatMap((m) => m.activities ?? [])
+        .find((a) => a.id === activityId);
+      if (!activity || (activity.execution && activity.execution.id !== execution.id))
+        throw new AppError('EXECUTION_NOT_FOUND', '명령 실행 기록을 찾을 수 없습니다.', 409);
+      activity.execution = execution;
+      this.persist(session); // Also accepts late cancellation results; never loses a container owner.
       return session;
     });
   }
@@ -513,6 +583,16 @@ export class StorageEngine {
   recover(): number {
     let count = 0;
     for (const session of this.snapshot().sessions) {
+      for (const activity of session.messages.flatMap((m) => m.activities ?? [])) {
+        if (activity.execution && ['starting', 'running'].includes(activity.execution.status)) {
+          this.recordExecution(session.id, activity.id, {
+            ...activity.execution,
+            status: 'interrupted',
+            error: '이전 명령이 중단되었습니다. 자동으로 반복하지 않았습니다.',
+          });
+          count++;
+        }
+      }
       const uncertain = session.messages
         .flatMap((m) => m.activities ?? [])
         .filter((a) => activityProposal(a)?.status === 'applying');

@@ -10,8 +10,9 @@ import {
   type Usage,
 } from '@lodex/contracts';
 import { measureRequest, type CompiledContext } from '@lodex/context';
-import { runProjectTool } from '@lodex/tools';
+import { runProjectTool, executeCommand } from '@lodex/tools';
 import type { Store } from '@lodex/storage';
+import { proposePlan } from './planning';
 
 export const MAX_MODEL_CALLS = 6;
 const MAX_TOOL_CALLS = 12;
@@ -217,7 +218,7 @@ export async function runAgent(options: {
           'INCOMPLETE_RESPONSE',
           '응답 종료 사유: ' + finished + '. 부분 응답을 보존했습니다.',
         );
-      if (!project || !request.tools?.length)
+      if (!request.tools?.length)
         throw new AppError(
           'TOOLS_UNAVAILABLE',
           '프로젝트 도구가 허용되지 않아 실행하지 않았습니다. 프로젝트 선택과 전송 설정을 확인하세요.',
@@ -237,20 +238,76 @@ export async function runAgent(options: {
       for (const [index, call] of calls.entries()) {
         signal.throwIfAborted();
         if (!request.tools.some((tool) => tool.function.name === call.name))
-          throw new AppError('TOOL_UNAVAILABLE', '이 요청에 제공되지 않은 도구입니다.');
+          throw new AppError(
+            'TOOL_UNAVAILABLE',
+            '이 요청에 제공되지 않은 도구라 실행하지 않았습니다.',
+          );
         const card = cards.get(index)!;
-        const result = await runProjectTool(
-          project,
-          call.name,
-          call.arguments,
-          signal,
-          (edit) => {
-            card.edit = edit;
-          },
-          (changes) => {
-            card.changes = changes;
-          },
-        );
+        let result: string;
+        if (call.name === 'propose_plan') {
+          try {
+            card.planProposal = proposePlan(call.arguments, session.plan);
+            result = JSON.stringify({
+              status: 'proposed',
+              goal: card.planProposal.plan.goal,
+              tasks: card.planProposal.plan.tasks.length,
+              note: 'Awaiting user adoption in UI. Nothing executed.',
+            });
+          } catch {
+            result = JSON.stringify({
+              error: 'INVALID_PLAN',
+              message: 'Provide valid JSON, unique task keys, existing dependencies and no cycles.',
+            });
+          }
+        } else if (call.name === 'run_command') {
+          if (!project || session.mode === 'plan' || session.execution?.backend !== 'docker')
+            throw new AppError(
+              'EXECUTION_DISABLED',
+              '이 대화의 명령 실행이 허용되지 않았습니다.',
+              403,
+            );
+          const execution = await executeCommand({
+            project,
+            config: session.execution,
+            argumentsJson: call.arguments,
+            signal,
+            record: async (execution) => {
+              card.execution = structuredClone(execution);
+              await store.recordExecution(session.id, card.id, execution);
+            },
+          });
+          result = JSON.stringify({
+            ...(execution.status !== 'completed'
+              ? { error: execution.error ?? 'COMMAND_FAILED' }
+              : {}),
+            executionId: execution.id,
+            exitCode: execution.exitCode,
+            status: execution.status,
+            output: execution.output,
+            truncated: execution.truncated,
+            cleanupPending: execution.cleanupPending,
+          });
+          if (execution.cleanupPending) throw new AppError('CLEANUP_REQUIRED', execution.error!);
+        } else {
+          if (!project) throw new AppError('PROJECT_REQUIRED', '프로젝트가 필요합니다.');
+          if (
+            session.mode === 'plan' &&
+            !['list_files', 'read_file', 'search_text'].includes(call.name)
+          )
+            throw new AppError('PLAN_READ_ONLY', 'Plan 모드에서는 파일을 변경할 수 없습니다.', 403);
+          result = await runProjectTool(
+            project,
+            call.name,
+            call.arguments,
+            signal,
+            (edit) => {
+              card.edit = edit;
+            },
+            (changes) => {
+              card.changes = changes;
+            },
+          );
+        }
         signal.throwIfAborted();
         card.text = result;
         card.status = 'error' in JSON.parse(result) ? 'failed' : 'completed';

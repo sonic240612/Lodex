@@ -6,6 +6,7 @@ import {
   type ModelDescriptor,
   type Plan,
   type Session,
+  type AgentMode,
 } from '@lodex/contracts';
 import { models, nativeDesktop, saveKey, sendCommand, snapshot, subscribe } from './bridge';
 import { Icon, Logo } from './icons';
@@ -14,6 +15,7 @@ import { ActivityCards } from './ActivityCards';
 import { ProjectDialog } from './ProjectDialog';
 import { Markdown } from './Markdown';
 import { ConversationHistory } from './ConversationHistory';
+import { ExecutionPanel } from './ExecutionPanel';
 
 const providerName = (provider: string) =>
   provider === 'openrouter' ? 'OpenRouter' : provider === 'demo' ? '데모' : 'llama-server';
@@ -43,6 +45,8 @@ export function App() {
   const [error, setError] = useState('');
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
+  const [newMode, setNewMode] = useState<AgentMode>('plan');
+  const mode = session?.mode ?? newMode;
   const [light, setLight] = useState(false);
   const end = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
@@ -121,6 +125,7 @@ export function App() {
       title: '새 대화',
       config: modelConfig,
       projectId: workspace.selectedProjectId,
+      mode,
     });
     workspace.upsert(result.session);
     workspace.select(result.session.id);
@@ -181,6 +186,29 @@ export function App() {
       workspace.upsert(result.session);
     }
     setSettings(false);
+  }
+  async function changeMode(value: AgentMode) {
+    if (!session) {
+      setNewMode(value);
+      return;
+    }
+    setBusy(true);
+    try {
+      workspace.upsert(
+        (
+          await sendCommand({
+            type: 'set_mode',
+            sessionId: session.id,
+            expectedVersion: session.version,
+            mode: value,
+          })
+        ).session,
+      );
+    } catch (failure) {
+      setError(messageError(failure));
+    } finally {
+      setBusy(false);
+    }
   }
   const latestUsage = session?.messages.filter((m) => m.role === 'assistant').at(-1)?.usage;
   return (
@@ -316,7 +344,9 @@ export function App() {
           </div>
           <div className="topbar-right">
             <span className="mode-badge" title={project?.path}>
-              {project ? project.name + ' · Plan / 변경 검토' : '대화 · Plan 편집'}
+              {project
+                ? project.name + ' · ' + (mode === 'plan' ? 'Plan' : 'Build')
+                : '대화 · 계획 편집'}
             </span>
             <button
               className="activity-toggle"
@@ -405,6 +435,17 @@ export function App() {
                         파일 수정안 확인
                       </button>
                     )}
+                  {!showActivities &&
+                    message.activities?.some(
+                      (a) =>
+                        a.planProposal?.status === 'proposed' ||
+                        a.execution?.cleanupPending ||
+                        a.execution?.status === 'failed',
+                    ) && (
+                      <button className="review-reveal" onClick={() => setShowActivities(true)}>
+                        계획 제안·명령 결과 확인
+                      </button>
+                    )}
                   <div className="message-body">
                     {(message.content ? <Markdown text={message.content} /> : null) ||
                       (message.status === 'streaming' ? (
@@ -484,6 +525,16 @@ export function App() {
               }}
             />
             <div className="composer-toolbar">
+              <select
+                className="mode-select"
+                aria-label="에이전트 모드"
+                value={mode}
+                disabled={busy || running || !workspace.connected}
+                onChange={(event) => void changeMode(event.target.value as AgentMode)}
+              >
+                <option value="plan">Plan</option>
+                <option value="build">Build</option>
+              </select>
               <button type="button" className="provider-tag" onClick={() => setSettings(true)}>
                 <Icon name={config.provider === 'openrouter' ? 'cloud' : 'chip'} size={15} />
                 {providerName(config.provider)}
@@ -528,7 +579,9 @@ export function App() {
                 : project
                   ? config.provider === 'openrouter' && !config.projectCloudConsent
                     ? '프로젝트 파일 전송이 꺼져 있습니다. 설정에서 허용할 수 있습니다.'
-                    : '파일 목록·읽기·검색과 수정안 제안을 사용할 수 있습니다. 변경은 검토 후 적용합니다.'
+                    : mode === 'plan'
+                      ? '파일을 읽고 계획을 제안합니다. 파일 변경은 Build에서 가능합니다.'
+                      : '파일 탐색과 수정안을 사용할 수 있습니다. 변경은 검토 후 적용합니다.'
                   : '프로젝트를 연결하면 파일을 살펴보며 작업할 수 있습니다.'}
             </span>
             <span className="metrics-mini">
@@ -555,6 +608,7 @@ export function App() {
             onError={setError}
           />
           <div className="run-panel">
+            {session?.projectId && <ExecutionPanel key={session.id} session={session} />}
             <div className="section-label">현재 실행</div>
             <div className="run-state">
               <span className={`status-dot ${running ? 'pulsing' : ''}`} />
@@ -686,8 +740,12 @@ function PlanEditor({
   const [taskTitle, setTaskTitle] = useState('');
   const connected = useWorkspace((state) => state.connected);
   const storedPlan = JSON.stringify(session?.plan ?? defaultPlan());
+  const editBase = useRef(storedPlan);
   useEffect(() => {
-    if (!dirty) setDraft(JSON.parse(storedPlan) as Plan);
+    if (!dirty) {
+      setDraft(JSON.parse(storedPlan) as Plan);
+      editBase.current = storedPlan;
+    }
   }, [storedPlan, dirty]);
   const completed = draft.tasks.filter((task) => task.done).length;
   const update = (value: Plan) => {
@@ -697,6 +755,10 @@ function PlanEditor({
   async function save() {
     setSaving(true);
     try {
+      if (storedPlan !== editBase.current)
+        throw new Error(
+          '편집 중 저장된 계획이 변경되었습니다. 저장된 계획을 불러온 뒤 다시 편집하세요.',
+        );
       const target = session ?? (await ensureSession());
       const result = await sendCommand({
         type: 'save_plan',
@@ -747,6 +809,18 @@ function PlanEditor({
         value={draft.instructions}
         onChange={(event) => update({ ...draft, instructions: event.target.value })}
       />
+      <label className="section-label" htmlFor="goal-criteria">
+        목표 완료 기준
+      </label>
+      <textarea
+        id="goal-criteria"
+        className="goal-input"
+        rows={2}
+        maxLength={4000}
+        value={draft.criteria ?? ''}
+        placeholder="어떤 결과로 완료를 확인할까요?"
+        onChange={(event) => update({ ...draft, criteria: event.target.value })}
+      />
       <label className="check-field plan-context-choice">
         <input
           type="checkbox"
@@ -783,44 +857,116 @@ function PlanEditor({
             </p>
           </div>
         ) : (
-          draft.tasks.map((task) => (
-            <div className={`task-row ${task.done ? 'done' : ''}`} key={task.id}>
-              <input
-                type="checkbox"
-                aria-label={task.title + ' 완료'}
-                checked={task.done}
-                onChange={(event) =>
-                  update({
-                    ...draft,
-                    tasks: draft.tasks.map((item) =>
-                      item.id === task.id ? { ...item, done: event.target.checked } : item,
-                    ),
-                  })
-                }
-              />
-              <input
-                className="task-title"
-                aria-label="할 일 제목"
-                value={task.title}
-                maxLength={500}
-                onChange={(event) =>
-                  update({
-                    ...draft,
-                    tasks: draft.tasks.map((item) =>
-                      item.id === task.id ? { ...item, title: event.target.value } : item,
-                    ),
-                  })
-                }
-              />
-              <button
-                className="icon-button"
-                aria-label={task.title + ' 삭제'}
-                onClick={() =>
-                  update({ ...draft, tasks: draft.tasks.filter((item) => item.id !== task.id) })
-                }
-              >
-                <Icon name="close" size={13} />
-              </button>
+          draft.tasks.map((task, index) => (
+            <div key={task.id}>
+              <div className={`task-row ${task.done ? 'done' : ''}`}>
+                <input
+                  type="checkbox"
+                  aria-label={task.title + ' 완료'}
+                  checked={task.done}
+                  onChange={(event) =>
+                    update({
+                      ...draft,
+                      tasks: draft.tasks.map((item) =>
+                        item.id === task.id ? { ...item, done: event.target.checked } : item,
+                      ),
+                    })
+                  }
+                />
+                <input
+                  className="task-title"
+                  aria-label="할 일 제목"
+                  value={task.title}
+                  maxLength={500}
+                  onChange={(event) =>
+                    update({
+                      ...draft,
+                      tasks: draft.tasks.map((item) =>
+                        item.id === task.id ? { ...item, title: event.target.value } : item,
+                      ),
+                    })
+                  }
+                />
+                <button
+                  className="icon-button"
+                  aria-label={task.title + ' 삭제'}
+                  onClick={() =>
+                    update({
+                      ...draft,
+                      tasks: draft.tasks
+                        .filter((item) => item.id !== task.id)
+                        .map((item) => ({
+                          ...item,
+                          dependsOn: item.dependsOn?.filter((id) => id !== task.id),
+                        })),
+                    })
+                  }
+                >
+                  <Icon name="close" size={13} />
+                </button>
+              </div>
+              <details className="task-details">
+                <summary>완료 기준·선행 작업·순서</summary>
+                <textarea
+                  aria-label={task.title + ' 완료 기준'}
+                  className="goal-input"
+                  rows={2}
+                  maxLength={2000}
+                  value={task.criteria ?? ''}
+                  onChange={(event) =>
+                    update({
+                      ...draft,
+                      tasks: draft.tasks.map((item) =>
+                        item.id === task.id ? { ...item, criteria: event.target.value } : item,
+                      ),
+                    })
+                  }
+                />
+                {draft.tasks
+                  .filter((item) => item.id !== task.id)
+                  .map((item) => (
+                    <label className="check-field" key={item.id}>
+                      <input
+                        type="checkbox"
+                        checked={task.dependsOn?.includes(item.id) ?? false}
+                        onChange={(event) =>
+                          update({
+                            ...draft,
+                            tasks: draft.tasks.map((t) =>
+                              t.id === task.id
+                                ? {
+                                    ...t,
+                                    dependsOn: event.target.checked
+                                      ? [...(t.dependsOn ?? []), item.id]
+                                      : t.dependsOn?.filter((id) => id !== item.id),
+                                  }
+                                : t,
+                            ),
+                          })
+                        }
+                      />
+                      {item.title}
+                    </label>
+                  ))}
+                <div className="edit-actions">
+                  {[-1, 1].map((direction) => (
+                    <button
+                      key={direction}
+                      disabled={index + direction < 0 || index + direction >= draft.tasks.length}
+                      onClick={() => {
+                        const tasks = [...draft.tasks];
+                        [tasks[index], tasks[index + direction]] = [
+                          tasks[index + direction]!,
+                          tasks[index]!,
+                        ];
+                        update({ ...draft, tasks });
+                      }}
+                    >
+                      {direction === -1 ? '위로' : '아래로'}
+                    </button>
+                  ))}
+                </div>
+              </details>
             </div>
           ))
         )}
@@ -854,6 +1000,17 @@ function PlanEditor({
       <p className="subtle-note">
         완료 표시는 직접 관리합니다. 아직 에이전트가 목표를 자동 실행하거나 검증하지 않습니다.
       </p>
+      {dirty && (
+        <button
+          className="save-plan"
+          onClick={() => {
+            setDraft(JSON.parse(storedPlan) as Plan);
+            setDirty(false);
+          }}
+        >
+          저장된 계획 불러오기
+        </button>
+      )}
     </div>
   );
 }
