@@ -3,6 +3,9 @@ import type { RegisteredSkill, SkillDialect } from '@lodex/skills';
 import type { McpConfig, McpRegistration, McpImport } from '@lodex/mcp';
 import type { OAuthPreparation, OAuthStatus } from '@lodex/mcp';
 import {
+  type TelegramStatus,
+  type TelegramConfig,
+  type WorktreeRecord,
   makeCommand,
   defaultPlan,
   type Command,
@@ -25,6 +28,34 @@ import {
   type McpContentInput,
   type McpContentPreview,
 } from '@lodex/contracts';
+export async function telegramStatus(): Promise<TelegramStatus> {
+  if (!nativeDesktop)
+    return {
+      configured: false,
+      config: { enabled: false, sessionId: null, allowBuild: false, transmissionConsent: false },
+      running: false,
+      pending: 0,
+      unknownDeliveries: 0,
+    };
+  return invoke('daemon_request', { method: 'GET', path: '/v1/telegram', body: null });
+}
+export async function telegramAction(
+  action: 'config' | 'pair' | 'approve' | 'unpair',
+  body: TelegramConfig | { userId: number; chatId: number } | null,
+): Promise<TelegramStatus | { code: string; expiresAt: number }> {
+  if (!nativeDesktop) throw new Error('Telegram 연결은 데스크톱 앱에서 설정하세요.');
+  return invoke('daemon_request', { method: 'POST', path: '/v1/telegram/' + action, body });
+}
+export async function worktreeList(): Promise<{ records: WorktreeRecord[] }> {
+  if (!nativeDesktop) return { records: [] };
+  return invoke('daemon_request', { method: 'GET', path: '/v1/worktrees', body: null });
+}
+export async function createWorktree(
+  projectId: string,
+): Promise<{ record: WorktreeRecord; project: Project }> {
+  if (!nativeDesktop) throw new Error('worktree 생성은 데스크톱 앱에서 사용할 수 있습니다.');
+  return invoke('daemon_request', { method: 'POST', path: '/v1/worktrees', body: { projectId } });
+}
 export const nativeDesktop = isTauri();
 export type { McpContentPreview } from '@lodex/contracts';
 export async function previewMcpContent(input: McpContentInput): Promise<McpContentPreview> {

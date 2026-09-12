@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { loadSecrets, loadMcpSecret } from './secrets';
+import { loadSecrets, loadMcpSecret, loadTelegramToken } from './secrets';
 const dirs: string[] = [];
 async function setup(content?: string) {
   const dir = await mkdtemp(join(tmpdir(), 'lodex-env-한글 '));
@@ -18,6 +18,26 @@ afterEach(async () => {
   }
 });
 describe('private daemon dotenv loading', () => {
+  it('loads only the Telegram token with environment precedence and redacts invalid values', async () => {
+    const fileToken = '12345678:fixture_file_token_123456789';
+    const envToken = '98765432:fixture_environment_token_12345';
+    const envFilePath = await setup(
+      'TELEGRAM_BOT_TOKEN="' + fileToken + '"\nNODE_OPTIONS=--inspect',
+    );
+    expect(await loadTelegramToken({ envFilePath, environment: {} })).toBe(fileToken);
+    expect(
+      await loadTelegramToken({ envFilePath, environment: { TELEGRAM_BOT_TOKEN: envToken } }),
+    ).toBe(envToken);
+    await expect(
+      loadTelegramToken({
+        envFilePath,
+        environment: { TELEGRAM_BOT_TOKEN: 'secret-invalid-value' },
+      }),
+    ).rejects.toMatchObject({
+      code: 'TELEGRAM_TOKEN',
+      message: expect.not.stringContaining('secret-invalid-value'),
+    });
+  });
   it('resolves only named MCP references without inheriting unrelated keys', async () => {
     const envFilePath = await setup(
       'LODEX_MCP_TOKEN=file-fixture\nOPENROUTER_API_KEY=other-secret\nNODE_OPTIONS=--inspect',

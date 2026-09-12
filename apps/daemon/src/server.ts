@@ -24,6 +24,7 @@ import {
   type McpContextAttachment,
   resolveModelConfig,
   type ModelConfig,
+  telegramConfigSchema,
 } from '@lodex/contracts';
 import { Store } from '@lodex/storage';
 import { ChatCompletionProvider, DemoProvider } from '@lodex/providers';
@@ -55,7 +56,9 @@ import {
   type McpConfig,
 } from '@lodex/mcp';
 import { RunMcp, selectedMcpTools } from './mcp';
-import { loadMcpSecret } from './secrets';
+import { loadMcpSecret, loadTelegramToken } from './secrets';
+import { Telegram } from './telegram';
+import { Worktrees } from './worktrees';
 import { McpContentPreviews } from './mcp-content';
 import { OAuthEnvStore } from './oauth-store';
 import { InferenceScheduler } from './inference-scheduler';
@@ -79,6 +82,9 @@ const skillRemovalInput = z.strictObject({
 });
 
 interface ServerOptions {
+  worktreeRoot?: string;
+  telegramFetch?: typeof fetch;
+  telegramToken?: string;
   token: string;
   store: Store;
   openrouterKey?: string | null;
@@ -259,6 +265,7 @@ export async function startServer(options: ServerOptions) {
     }
   }
   async function command(command: Command) {
+    if (closing) throw new AppError('SHUTTING_DOWN', '앱을 종료하는 중입니다.', 503);
     const receipt = await store.receipt(command);
     if (receipt) return receipt;
     let attachment: McpContextAttachment | undefined;
@@ -484,6 +491,20 @@ export async function startServer(options: ServerOptions) {
     if (command.type === 'cancel_run') active.get(command.runId)?.abort.abort();
     return result;
   }
+  const worktrees = options.worktreeRoot
+    ? await Worktrees.open(store, options.worktreeRoot)
+    : undefined;
+  const telegram = await Telegram.open({
+    store,
+    loadToken: () =>
+      options.telegramToken
+        ? Promise.resolve(options.telegramToken)
+        : loadTelegramToken({
+            ...(options.envFilePath ? { envFilePath: options.envFilePath } : {}),
+          }),
+    dispatch: (value) => serial(() => command(value)),
+    ...(options.telegramFetch ? { fetch: options.telegramFetch } : {}),
+  });
   const server = createServer(async (request, response) => {
     try {
       if (closing) throw new AppError('SHUTTING_DOWN', '앱을 종료하는 중입니다.', 503);
@@ -505,6 +526,55 @@ export async function startServer(options: ServerOptions) {
           openrouterKeySource,
           envFilePath: options.envFilePath,
         });
+      } else if (request.method === 'GET' && url.pathname === '/v1/telegram') {
+        json(response, 200, telegram.status());
+      } else if (request.method === 'POST' && url.pathname === '/v1/telegram/config') {
+        const value = telegramConfigSchema.safeParse(await readJson(request));
+        if (!value.success)
+          throw new AppError('TELEGRAM_CONFIG', '대화·Build 허용·Telegram 전송 동의를 확인하세요.');
+        json(response, 200, await telegram.configure(value.data));
+      } else if (request.method === 'POST' && url.pathname === '/v1/telegram/pair') {
+        json(response, 200, await telegram.pair());
+      } else if (request.method === 'POST' && url.pathname === '/v1/telegram/approve') {
+        const value = z
+          .strictObject({
+            userId: z.number().int().positive().safe(),
+            chatId: z.number().int().positive().safe(),
+          })
+          .safeParse(await readJson(request));
+        if (!value.success) throw new AppError('TELEGRAM_PAIR', '연결할 계정 ID를 확인하세요.');
+        json(response, 200, await telegram.approve(value.data.userId, value.data.chatId));
+      } else if (request.method === 'POST' && url.pathname === '/v1/telegram/unpair') {
+        json(response, 200, await telegram.unpair());
+      } else if (request.method === 'GET' && url.pathname === '/v1/worktrees') {
+        json(response, 200, { records: worktrees?.list() ?? [] });
+      } else if (request.method === 'POST' && url.pathname === '/v1/worktrees') {
+        if (!worktrees)
+          throw new AppError('WORKTREE_PATH', 'worktree 저장 경로가 설정되지 않았습니다.');
+        const input = z.strictObject({ projectId: z.uuid() }).safeParse(await readJson(request));
+        if (!input.success) throw new AppError('WORKTREE_PROJECT', '원본 프로젝트를 선택하세요.');
+        const signal = AbortSignal.any([shutdown.signal, AbortSignal.timeout(120000)]);
+        json(
+          response,
+          200,
+          await serial(async () => {
+            const source = await store.project(input.data.projectId);
+            if (
+              (await store.snapshot()).sessions.some(
+                (session) =>
+                  session.projectId === source.id &&
+                  session.run &&
+                  (session.run.status === 'running' || active.has(session.run.id)),
+              )
+            )
+              throw new AppError(
+                'PROJECT_BUSY',
+                '원본 프로젝트의 실행이 끝난 뒤 worktree를 만드세요.',
+                409,
+              );
+            return worktrees.create(source, signal);
+          }),
+        );
       } else if (request.method === 'GET' && url.pathname === '/v1/mcp') {
         json(response, 200, { servers: await store.registeredMcp() });
       } else if (request.method === 'POST' && url.pathname === '/v1/mcp/content') {
@@ -876,16 +946,22 @@ export async function startServer(options: ServerOptions) {
         json(
           response,
           200,
-          await serial(async () => {
-            // A cancelled run may still be releasing a provider or tool operation.
-            const state = await store.snapshot();
-            for (const target of parsed.data.targets) {
-              const session = state.sessions.find((s) => s.id === target.sessionId);
-              if (session?.run && active.has(session.run.id))
-                throw new AppError('BUSY', '실행을 정리하는 중입니다. 잠시 후 삭제해 주세요.', 409);
-            }
-            return store.deleteSessions(parsed.data);
-          }),
+          await telegram.withPaused(() =>
+            serial(async () => {
+              // A cancelled run may still be releasing a provider or tool operation.
+              const state = await store.snapshot();
+              for (const target of parsed.data.targets) {
+                const session = state.sessions.find((s) => s.id === target.sessionId);
+                if (session?.run && active.has(session.run.id))
+                  throw new AppError(
+                    'BUSY',
+                    '실행을 정리하는 중입니다. 잠시 후 삭제해 주세요.',
+                    409,
+                  );
+              }
+              return store.deleteSessions(parsed.data);
+            }),
+          ),
         );
       } else if (request.method === 'POST' && url.pathname === '/v1/projects') {
         const value = (await readJson(request)) as { path?: unknown };
@@ -1006,6 +1082,8 @@ export async function startServer(options: ServerOptions) {
     async close() {
       closing = true;
       shutdown.abort();
+      await telegram.close();
+      await worktrees?.close();
       await oauth?.close();
       for (const run of active.values()) run.abort.abort();
       await runtime.close();

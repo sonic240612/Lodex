@@ -163,6 +163,13 @@ fn route_allowed(method: &str, path: &str) -> bool {
         | ("GET", "/v1/runtime")
         | ("GET", "/v1/skills")
         | ("GET", "/v1/mcp")
+        | ("GET", "/v1/telegram")
+        | ("GET", "/v1/worktrees")
+        | ("POST", "/v1/telegram/config")
+        | ("POST", "/v1/telegram/pair")
+        | ("POST", "/v1/telegram/approve")
+        | ("POST", "/v1/telegram/unpair")
+        | ("POST", "/v1/worktrees")
         | ("POST", "/v1/commands")
         | ("POST", "/v1/projects")
         | ("POST", "/v1/sessions/delete")
@@ -268,16 +275,18 @@ async fn daemon_request(
         .client
         .request(method, format!("http://127.0.0.1:{}{}", port, path))
         .bearer_auth(token)
-        .timeout(Duration::from_secs(if path == "/v1/runtime/action" {
-            200
-        } else if path == "/v1/mcp/register"
-            || path == "/v1/mcp/content"
-            || path == "/v1/mcp/oauth/prepare"
-        {
-            45
-        } else {
-            30
-        }));
+        .timeout(Duration::from_secs(
+            if path == "/v1/runtime/action" || path == "/v1/worktrees" {
+                200
+            } else if path == "/v1/mcp/register"
+                || path == "/v1/mcp/content"
+                || path == "/v1/mcp/oauth/prepare"
+            {
+                45
+            } else {
+                30
+            },
+        ));
     if let Some(body) = body {
         request = request.json(&body);
     }

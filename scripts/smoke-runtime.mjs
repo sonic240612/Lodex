@@ -308,6 +308,8 @@ try {
   assert.equal(session.run.status, 'cancelled');
   await stop(app);
   app = await boot();
+  assert.equal((await app.request('/v1/telegram').then((r) => r.json())).config.enabled, false);
+  assert.deepEqual((await app.request('/v1/worktrees').then((r) => r.json())).records, []);
   assert.equal(
     (await app.request('/v1/runtime').then((r) => r.json())).settings.vramBudgetMb,
     16384,

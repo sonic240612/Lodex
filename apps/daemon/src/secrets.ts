@@ -69,6 +69,20 @@ export async function loadMcpSecret(
     ? (await readEnvFile({ envFilePath: options.envFilePath }))[name]
     : undefined;
 }
+export async function loadTelegramToken(options: {
+  envFilePath?: string;
+  environment?: NodeJS.ProcessEnv;
+}): Promise<string | null> {
+  const value =
+    (options.environment ?? process.env).TELEGRAM_BOT_TOKEN ||
+    (options.envFilePath
+      ? (await readEnvFile({ envFilePath: options.envFilePath })).TELEGRAM_BOT_TOKEN
+      : undefined);
+  if (!value?.trim()) return null;
+  if (!/^\d{5,20}:[A-Za-z0-9_-]{20,150}$/.test(value.trim()))
+    throw new AppError('TELEGRAM_TOKEN', 'TELEGRAM_BOT_TOKEN 형식을 확인하세요.');
+  return value.trim();
+}
 export async function loadSecrets(options: {
   envFilePath: string;
   requiredFile?: boolean;

@@ -13,6 +13,8 @@ port.on('message', (request: { id: number; method: keyof StorageEngine; args: un
       typeof method !== 'function' ||
       ![
         'snapshot',
+        'integration',
+        'saveIntegration',
         'session',
         'events',
         'receipt',

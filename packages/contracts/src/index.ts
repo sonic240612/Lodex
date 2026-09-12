@@ -9,6 +9,7 @@ import {
 } from './routing';
 export { localUrlSchema, isPrivateServerAddress } from './network';
 export * from './runtime';
+export * from './integrations';
 export * from './routing';
 
 export const PROTOCOL_VERSION = 1 as const;
@@ -153,7 +154,7 @@ export interface AutopilotState {
 const envelope = {
   protocolVersion: z.literal(PROTOCOL_VERSION),
   commandId: idSchema,
-  actor: z.literal('desktop'),
+  actor: z.enum(['desktop', 'telegram']),
   policyVersion: z.literal(1),
 };
 const target = { sessionId: idSchema, expectedVersion: z.number().int().nonnegative() };

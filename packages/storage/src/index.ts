@@ -82,6 +82,18 @@ export class Store {
   snapshot(): Promise<Omit<Snapshot, 'openrouterConfigured'>> {
     return this.call('snapshot');
   }
+  integration(
+    name: 'telegram' | 'worktrees',
+  ): Promise<{ version: number; document: unknown } | null> {
+    return this.call('integration', name);
+  }
+  saveIntegration(
+    name: 'telegram' | 'worktrees',
+    expectedVersion: number,
+    document: unknown,
+  ): Promise<number> {
+    return this.call('saveIntegration', name, expectedVersion, document);
+  }
   localProfiles(): Promise<LocalProfile[]> {
     return this.call('localProfiles');
   }

@@ -68,6 +68,7 @@ async function main() {
     token: config.token,
     store,
     supervisorPath: join(__dirname, 'supervisor.cjs'),
+    worktreeRoot: join(config.dataDir, 'worktrees'),
     ...secrets,
   });
   process.stdout.write(JSON.stringify({ protocolVersion: 1, port: app.port }) + '\n');

@@ -35,6 +35,12 @@ const SkillManager = lazy(() =>
 const RoutingSettings = lazy(() =>
   import('./RoutingSettings').then((module) => ({ default: module.RoutingSettings })),
 );
+const TelegramSettings = lazy(() =>
+  import('./TelegramSettings').then((module) => ({ default: module.TelegramSettings })),
+);
+const WorktreeManager = lazy(() =>
+  import('./WorktreeManager').then((module) => ({ default: module.WorktreeManager })),
+);
 
 const providerName = (provider: string) =>
   provider === 'openrouter' ? 'OpenRouter' : provider === 'demo' ? '데모' : 'llama-server';
@@ -46,6 +52,8 @@ export function App() {
   const [settings, setSettings] = useState(false);
   const [modelManager, setModelManager] = useState(false);
   const [routingSettings, setRoutingSettings] = useState(false);
+  const [telegramSettings, setTelegramSettings] = useState(false);
+  const [worktreeManager, setWorktreeManager] = useState(false);
   const [skillManager, setSkillManager] = useState(false);
   const [mcpManager, setMcpManager] = useState(false);
   const [projectDialog, setProjectDialog] = useState(false);
@@ -390,6 +398,14 @@ export function App() {
         <button className="nav-item" onClick={() => setMcpManager(true)}>
           <Icon name="bolt" />
           MCP{session?.mcp?.length ? ` · ${session.mcp.length}` : ''}
+        </button>
+        <button className="nav-item" onClick={() => setTelegramSettings(true)}>
+          <Icon name="chat" size={18} />
+          Telegram
+        </button>
+        <button className="nav-item" onClick={() => setWorktreeManager(true)}>
+          <Icon name="folder" size={18} />
+          Worktree
         </button>
         <div className="history-caption">
           <span>프로젝트</span>
@@ -884,6 +900,30 @@ export function App() {
             running={!!running}
             onClose={() => setRoutingSettings(false)}
             onSave={applyRouting}
+          />
+        </Suspense>
+      )}
+      {telegramSettings && (
+        <Suspense fallback={null}>
+          <TelegramSettings
+            sessions={workspace.sessions}
+            selectedId={session?.id ?? null}
+            onClose={() => setTelegramSettings(false)}
+          />
+        </Suspense>
+      )}
+      {worktreeManager && (
+        <Suspense fallback={null}>
+          <WorktreeManager
+            projects={workspace.projects}
+            selectedId={workspace.selectedProjectId}
+            onClose={() => setWorktreeManager(false)}
+            onOpen={(project) => {
+              workspace.upsertProject(project);
+              workspace.selectProject(project.id);
+              setText('');
+              setWorktreeManager(false);
+            }}
           />
         </Suspense>
       )}

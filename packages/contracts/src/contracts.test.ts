@@ -65,7 +65,8 @@ describe('command boundary', () => {
     });
     expect(commandSchema.safeParse({ ...command, protocolVersion: 2 }).success).toBe(false);
     expect(commandSchema.safeParse({ ...command, shell: 'anything' }).success).toBe(false);
-    expect(commandSchema.safeParse({ ...command, actor: 'telegram' }).success).toBe(false);
+    expect(commandSchema.safeParse({ ...command, actor: 'telegram' }).success).toBe(true);
+    expect(commandSchema.safeParse({ ...command, actor: 'unknown-channel' }).success).toBe(false);
   });
   it('rejects out-of-range generation settings and duplicate task IDs', () => {
     expect(modelConfigSchema.safeParse({ temperature: -1 }).success).toBe(false);

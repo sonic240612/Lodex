@@ -7,6 +7,8 @@ A desktop agent harness for local LLMs and OpenRouter.
 - Connect to llama-server over localhost, LAN, or Tailscale.
 - Load GGUF models with your llama-server binary; adjust engine settings and VRAM reservations.
 - Assign Plan, Build, and subagent models; delegate up to three isolated read-only tasks at a time.
+- Create a Git worktree as a separate project without changing the original working files.
+- Pair a Telegram bot for messages, status, plans, and cancellation in one selected conversation.
 - Read project files, review changes, apply them, and undo them.
 - Switch between Plan and Build, review AI plans, and edit task criteria and dependencies.
 - Run commands in an opt-in Docker container, with collapsible output and cancellation.
@@ -40,6 +42,8 @@ Use **Role models** to set each role's connection and generation settings. Subag
 
 ## Commands
 
+**Worktree** creates a separate branch and project from the current commit. Uncommitted changes stay in the original folder. Review and apply edits in the new project; merging and cleanup remain manual.
+
 Open a project conversation and expand **Command execution** in the plan panel. Select a local Linux Docker image with `/bin/sh`, check the engine and image, then enable project access. Commands run in Build mode. Network access is off by default; images are never downloaded automatically. Container integration is experimental; host shell and interactive PTY support are pending.
 
 For **Autopilot**, save task criteria and verification commands, enable the plan in model context, and choose the scope and budgets. Passing checks and manual checkboxes have separate records. File proposals pause for review; interrupted runs never restart automatically. Currently local models only.
@@ -51,6 +55,12 @@ Import a folder containing `SKILL.md`, review its compatibility notes, and selec
 MCP settings accept `mcpServers` JSON. Choose tools for Build mode, or preview text resources and prompts before attaching them to a conversation. OpenRouter transmission needs separate consent. Parameterized resources, binary content, and some JSON Schema features are still pending.
 
 Keep API keys in `.env` using `LODEX_MCP_` references. OAuth supports pre-registered public clients with PKCE and a loopback callback; use the **OAuth login** panel, then add `"oauth": { "clientId": "your-client-id" }` to the HTTP server config. Tokens stay in the ignored `.env.mcp` file beside `.env`.
+
+## Telegram
+
+Create a bot with [BotFather](https://core.telegram.org/bots/tutorial#obtain-your-bot-token), put `TELEGRAM_BOT_TOKEN` in `.env`, and open Telegram settings. Select a conversation, enable transmission, generate a pairing code, and approve your numeric user/chat IDs in the desktop app.
+
+Use `/ask`, `/status`, `/plan`, or `/stop`. Build requests require separate permission. File approvals stay on desktop; Lodex must remain running. Uncertain message deliveries are recorded without automatic resend.
 
 ## Packages
 

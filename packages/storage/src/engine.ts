@@ -100,7 +100,7 @@ export class StorageEngine {
       'PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;',
     );
     const row = this.db.prepare('PRAGMA user_version').get() as { user_version: number };
-    if (row.user_version > 13) {
+    if (row.user_version > 14) {
       this.db.close();
       throw new AppError(
         'DATABASE_VERSION',
@@ -164,6 +164,35 @@ export class StorageEngine {
     `);
     if (row.user_version < 12) this.db.exec('PRAGMA user_version=12;');
     if (row.user_version < 13) this.db.exec('PRAGMA user_version=13;');
+    if (row.user_version < 14)
+      this.db.exec(`BEGIN IMMEDIATE;
+      CREATE TABLE integration_state (name TEXT PRIMARY KEY, version INTEGER NOT NULL, document TEXT NOT NULL);
+      PRAGMA user_version=14; COMMIT;`);
+  }
+  integration(name: string): { version: number; document: unknown } | null {
+    const row = this.db
+      .prepare('SELECT version,document FROM integration_state WHERE name=?')
+      .get(name) as { version: number; document: string } | undefined;
+    return row ? { version: row.version, document: JSON.parse(row.document) } : null;
+  }
+  saveIntegration(name: string, expectedVersion: number, document: unknown): number {
+    if (
+      !['telegram', 'worktrees'].includes(name) ||
+      Buffer.byteLength(JSON.stringify(document)) > 2097152
+    )
+      throw new AppError('INTEGRATION_STATE', '연동 기록 형식 또는 크기를 확인하세요.');
+    return this.transaction(() => {
+      const current = this.integration(name);
+      if ((current?.version ?? 0) !== expectedVersion)
+        throw new AppError('VERSION_CONFLICT', '연동 상태가 변경되었습니다.', 409);
+      const version = expectedVersion + 1;
+      this.db
+        .prepare(
+          'INSERT INTO integration_state(name,version,document) VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET version=excluded.version,document=excluded.document',
+        )
+        .run(name, version, JSON.stringify(document));
+      return version;
+    });
   }
   close(): void {
     if (!this.closed) {
@@ -487,6 +516,38 @@ export class StorageEngine {
           .prepare("UPDATE commands SET result=? WHERE json_extract(result,'$.session.id')=?")
           .run(JSON.stringify({ deleted: true }), id);
         this.db.prepare('INSERT INTO deleted_sessions(id) VALUES(?)').run(id);
+      }
+      const telegram = this.integration('telegram');
+      if (telegram) {
+        const state = telegram.document as {
+          config: { enabled: boolean; sessionId: string | null };
+          epoch: number;
+          pairing?: unknown;
+          candidate?: unknown;
+          inbox: { sessionId?: string; command?: Command; run?: { sessionId: string } }[];
+          outbox: { sessionId?: string }[];
+        };
+        const selected =
+          state.config.sessionId !== null && sessionIds.includes(state.config.sessionId);
+        state.inbox = state.inbox.filter(
+          (item) =>
+            !sessionIds.includes(
+              item.sessionId ?? item.command?.sessionId ?? item.run?.sessionId ?? '',
+            ),
+        );
+        state.outbox = state.outbox.filter((item) => !sessionIds.includes(item.sessionId ?? ''));
+        if (selected) {
+          state.config.enabled = false;
+          state.config.sessionId = null;
+          state.epoch++;
+          delete state.pairing;
+          delete state.candidate;
+          state.inbox = [];
+          state.outbox = [];
+        }
+        this.db
+          .prepare('UPDATE integration_state SET version=?,document=? WHERE name=?')
+          .run(telegram.version + 1, JSON.stringify(state), 'telegram');
       }
       const event: SessionsDeletedEvent = {
         seq: 0,

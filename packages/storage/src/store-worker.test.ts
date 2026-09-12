@@ -1199,7 +1199,7 @@ describe('durable worker storage', () => {
             db.prepare('UPDATE ' + table + ' SET ' + column + '=? WHERE ' + column + '=?').run(JSON.stringify(value), row.body);
           }
         }
-        db.exec('DROP TABLE projects; DROP TABLE runtime_profiles; DROP TABLE runtime_settings; DROP TABLE skill_registrations; DROP TABLE mcp_registrations; PRAGMA user_version=1;');
+        db.exec('DROP TABLE projects; DROP TABLE runtime_profiles; DROP TABLE runtime_settings; DROP TABLE skill_registrations; DROP TABLE mcp_registrations; DROP TABLE integration_state; PRAGMA user_version=1;');
         db.close();
       `,
         { eval: true, workerData: path },
