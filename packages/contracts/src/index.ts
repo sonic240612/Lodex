@@ -188,6 +188,22 @@ export const skillSelectionsSchema = z
     '중복된 스킬 ID입니다.',
   );
 export type SkillSelection = z.infer<typeof skillSelectionSchema>;
+export const mcpSelectionSchema = z.strictObject({
+  serverId: idSchema,
+  serverRevision: z.string().regex(/^[a-f0-9]{64}$/),
+  toolName: z.string().min(1).max(256),
+  toolRevision: z.string().regex(/^[a-f0-9]{64}$/),
+});
+export const mcpSelectionsSchema = z
+  .array(mcpSelectionSchema)
+  .max(16)
+  .refine(
+    (values) =>
+      new Set(values.map((value) => JSON.stringify([value.serverId, value.toolName]))).size ===
+      values.length,
+    '중복된 MCP 도구입니다.',
+  );
+export type McpSelection = z.infer<typeof mcpSelectionSchema>;
 export const deleteSessionsSchema = z
   .strictObject({
     ...envelope,
@@ -253,6 +269,13 @@ export const commandSchema = z.discriminatedUnion('type', [
     skillCloudConsent: z.boolean(),
   }),
   z.strictObject({ ...envelope, ...target, type: z.literal('adopt_plan'), activityId: idSchema }),
+  z.strictObject({
+    ...envelope,
+    ...target,
+    type: z.literal('configure_mcp'),
+    mcp: mcpSelectionsSchema,
+    mcpCloudConsent: z.boolean(),
+  }),
   z.strictObject({
     ...envelope,
     type: z.literal('cancel_run'),
@@ -349,6 +372,16 @@ export const editActionSchema = z.strictObject({
 });
 export type EditAction = z.infer<typeof editActionSchema>;
 export interface Activity {
+  mcpCall?: {
+    serverId: string;
+    serverRevision: string;
+    toolName: string;
+    toolRevision: string;
+    status: 'running' | 'completed' | 'failed' | 'unknown';
+    startedAt: string;
+    finishedAt?: string;
+    error?: string;
+  };
   skillRead?: {
     skillId: string;
     revision: string;
@@ -387,6 +420,7 @@ export interface Run {
   context?: ContextManifest;
 }
 export interface ContextManifest {
+  mcpTools?: string[];
   skillCatalog?: { includedIds: string[]; omittedIds: string[]; serializedBytes: number };
   compilerVersion: 'context-v1';
   sourceSessionVersion: number;
@@ -404,6 +438,9 @@ export interface ContextManifest {
   eco: boolean;
 }
 export interface Session {
+  mcp?: McpSelection[];
+  mcpCloudConsent?: boolean;
+  hasMcpHistory?: boolean;
   hasSkillHistory?: boolean;
   skills?: SkillSelection[];
   skillCloudConsent?: boolean;

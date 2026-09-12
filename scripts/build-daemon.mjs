@@ -4,6 +4,7 @@ await build({
     main: 'apps/daemon/src/main.ts',
     worker: 'packages/storage/src/worker.ts',
     supervisor: 'packages/local-runtime/src/supervisor.ts',
+    'mcp-supervisor': 'packages/mcp/src/supervisor.ts',
   },
   bundle: true,
   platform: 'node',

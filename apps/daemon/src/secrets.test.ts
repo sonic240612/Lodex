@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { loadSecrets } from './secrets';
+import { loadSecrets, loadMcpSecret } from './secrets';
 const dirs: string[] = [];
 async function setup(content?: string) {
   const dir = await mkdtemp(join(tmpdir(), 'lodex-env-한글 '));
@@ -18,6 +18,26 @@ afterEach(async () => {
   }
 });
 describe('private daemon dotenv loading', () => {
+  it('resolves only named MCP references without inheriting unrelated keys', async () => {
+    const envFilePath = await setup(
+      'LODEX_MCP_TOKEN=file-fixture\nOPENROUTER_API_KEY=other-secret\nNODE_OPTIONS=--inspect',
+    );
+    expect(await loadMcpSecret('LODEX_MCP_TOKEN', { envFilePath, environment: {} })).toBe(
+      'file-fixture',
+    );
+    expect(
+      await loadMcpSecret('LODEX_MCP_TOKEN', {
+        envFilePath,
+        environment: { LODEX_MCP_TOKEN: 'env-fixture' },
+      }),
+    ).toBe('env-fixture');
+    expect(
+      await loadMcpSecret('LODEX_MCP_MISSING', { envFilePath, environment: {} }),
+    ).toBeUndefined();
+    await expect(loadMcpSecret('OPENROUTER_API_KEY', { envFilePath })).rejects.toMatchObject({
+      code: 'MCP_SECRET_REF',
+    });
+  });
   it('reads quoted keys without changing process environment or evaluating other entries', async () => {
     const path = await setup(
       'OPENROUTER_API_KEY=" fixture-key " # comment\nNODE_OPTIONS=--inspect\nVITE_SECRET=not-forwarded\nOTHER=$(do-not-execute)\n',

@@ -2,6 +2,34 @@ import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { ActivityCards } from './ActivityCards';
 describe('activity disclosure', () => {
+  it('keeps uncertain MCP outcomes visible in the collapsed summary and escapes server text', () => {
+    const html = renderToStaticMarkup(
+      <ActivityCards
+        activities={[
+          {
+            id: 'mcp',
+            kind: 'tool',
+            label: 'mcp_fixture',
+            status: 'cancelled',
+            text: '<script>fixture</script>',
+            mcpCall: {
+              serverId: 'server',
+              serverRevision: '1',
+              toolName: 'echo',
+              toolRevision: '1',
+              status: 'unknown',
+              startedAt: '2026-09-12',
+              error: 'Check the server result',
+            },
+          },
+        ]}
+      />,
+    );
+    expect(html).toContain('실행 결과 미확인');
+    expect(html).toContain('MCP · echo');
+    expect(html).not.toMatch(/<details[^>]*\sopen/);
+    expect(html).not.toContain('<script>');
+  });
   it('shows every grouped diff and partial state inside a collapsed activity', () => {
     const html = renderToStaticMarkup(
       <ActivityCards

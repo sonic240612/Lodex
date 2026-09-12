@@ -1,5 +1,6 @@
 import { Worker } from 'node:worker_threads';
 import type { RegisteredSkill } from '@lodex/skills';
+import type { McpRegistration } from '@lodex/mcp';
 import {
   AppError,
   type Command,
@@ -85,6 +86,22 @@ export class Store {
   }
   registeredSkills(): Promise<RegisteredSkill[]> {
     return this.call('registeredSkills');
+  }
+  registeredMcp(): Promise<McpRegistration[]> {
+    return this.call('registeredMcp');
+  }
+  saveRegisteredMcp(value: McpRegistration, expectedRevision?: string): Promise<McpRegistration> {
+    return this.call('saveRegisteredMcp', value, expectedRevision);
+  }
+  removeRegisteredMcp(id: string, expectedRevision: string): Promise<void> {
+    return this.call('removeRegisteredMcp', id, expectedRevision);
+  }
+  recordMcpCall(
+    sessionId: string,
+    activityId: string,
+    call: NonNullable<Activity['mcpCall']>,
+  ): Promise<Session> {
+    return this.call('recordMcpCall', sessionId, activityId, call);
   }
   saveRegisteredSkill(skill: RegisteredSkill, expectedRevision?: string): Promise<RegisteredSkill> {
     return this.call('saveRegisteredSkill', skill, expectedRevision);

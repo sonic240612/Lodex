@@ -17,6 +17,7 @@ import type { Store } from '@lodex/storage';
 import { proposePlan } from './planning';
 import { verifyAutopilot } from './autopilot';
 import { runSkillTool } from './skills';
+import type { RunMcp } from './mcp';
 import type { RegisteredSkill } from '@lodex/skills';
 
 export const MAX_MODEL_CALLS = 6;
@@ -102,6 +103,7 @@ export async function runAgent(options: {
   project?: Project;
   commandExecutor?: typeof executeCommand;
   skills?: RegisteredSkill[];
+  mcp?: RunMcp;
 }) {
   const { store, session, provider, context, controller, project } = options;
   const runId = session.run!.id;
@@ -275,6 +277,7 @@ export async function runAgent(options: {
           await save();
           continue;
         }
+        await options.mcp?.close();
         await save('completed');
         return;
       }
@@ -355,6 +358,19 @@ export async function runAgent(options: {
               message: error instanceof AppError ? error.message : '검증 인자가 올바르지 않습니다.',
             });
           }
+        } else if (call.name.startsWith('mcp_')) {
+          if (!options.mcp) throw new AppError('MCP_DISABLED', 'MCP 도구가 연결되지 않았습니다.');
+          result = await options.mcp.call({
+            name: call.name,
+            argumentsJson: call.arguments,
+            mode: session.mode ?? 'build',
+            signal,
+            maxBytes: session.config.eco ? 12288 : 24576,
+            record: async (audit) => {
+              card.mcpCall = structuredClone(audit);
+              await store.recordMcpCall(session.id, card.id, audit);
+            },
+          });
         } else if (call.name === 'read_skill' || call.name === 'read_skill_resource') {
           result = await runSkillTool({
             skills: options.skills ?? [],
@@ -439,7 +455,10 @@ export async function runAgent(options: {
               executionId: card.execution.id,
             })
           : result;
-        card.status = 'error' in JSON.parse(result) ? 'failed' : 'completed';
+        card.status =
+          'error' in JSON.parse(result) || JSON.parse(result).isError === true
+            ? 'failed'
+            : 'completed';
         let contextResult = result;
         if (card.execution) {
           const data = JSON.parse(result) as {
@@ -524,5 +543,7 @@ export async function runAgent(options: {
       status: cancelled ? 'cancelled' : 'failed',
       error: message,
     });
+  } finally {
+    await options.mcp?.close();
   }
 }

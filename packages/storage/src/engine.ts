@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomUUID } from 'node:crypto';
 import type { RegisteredSkill } from '@lodex/skills';
+import type { McpRegistration } from '@lodex/mcp';
 import {
   AppError,
   emptyUsage,
@@ -33,6 +34,7 @@ import {
   type RuntimeSettings,
   type LocalProfile,
   skillSelectionsSchema,
+  mcpSelectionsSchema,
 } from '@lodex/contracts';
 
 // Additive JSON fields are defaulted on all read paths, including old SSE events.
@@ -40,6 +42,14 @@ function hydrate(session: Session): Session {
   return {
     ...session,
     mode: session.mode ?? 'build',
+    mcp: mcpSelectionsSchema.parse(session.mcp ?? []),
+    mcpCloudConsent: session.mcpCloudConsent ?? false,
+    hasMcpHistory:
+      session.hasMcpHistory ??
+      !!(
+        session.run?.context?.mcpTools?.length ||
+        session.messages.some((m) => m.activities?.some((a) => a.mcpCall))
+      ),
     skills: skillSelectionsSchema.parse(session.skills ?? []),
     skillCloudConsent: session.skillCloudConsent ?? false,
     hasSkillHistory:
@@ -78,7 +88,7 @@ export class StorageEngine {
       'PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;',
     );
     const row = this.db.prepare('PRAGMA user_version').get() as { user_version: number };
-    if (row.user_version > 10) {
+    if (row.user_version > 11) {
       this.db.close();
       throw new AppError(
         'DATABASE_VERSION',
@@ -131,6 +141,13 @@ export class StorageEngine {
       BEGIN IMMEDIATE;
       CREATE TABLE skill_registrations (id TEXT PRIMARY KEY, document TEXT NOT NULL);
       PRAGMA user_version=10;
+      COMMIT;
+    `);
+    if (row.user_version < 11)
+      this.db.exec(`
+      BEGIN IMMEDIATE;
+      CREATE TABLE mcp_registrations (id TEXT PRIMARY KEY, document TEXT NOT NULL);
+      PRAGMA user_version=11;
       COMMIT;
     `);
   }
@@ -206,6 +223,48 @@ export class StorageEngine {
         document: string;
       }[]
     ).map((row) => JSON.parse(row.document) as RegisteredSkill);
+  }
+  registeredMcp(): McpRegistration[] {
+    return (
+      this.db.prepare('SELECT document FROM mcp_registrations ORDER BY rowid').all() as {
+        document: string;
+      }[]
+    ).map((row) => JSON.parse(row.document) as McpRegistration);
+  }
+  private assertMcpIdle(id: string): void {
+    if (
+      this.snapshot().sessions.some(
+        (s) => s.run?.status === 'running' && s.mcp?.some((m) => m.serverId === id),
+      )
+    )
+      throw new AppError('BUSY', '사용 중인 MCP 서버는 실행이 끝난 뒤 변경하세요.', 409);
+  }
+  saveRegisteredMcp(value: McpRegistration, expectedRevision?: string): McpRegistration {
+    return this.transaction(() => {
+      const previous = this.registeredMcp().find((entry) => entry.id === value.id);
+      if (previous?.revision !== expectedRevision)
+        throw new AppError(
+          'VERSION_CONFLICT',
+          'MCP 등록 정보가 변경되었습니다. 목록을 다시 불러오세요.',
+          409,
+        );
+      this.assertMcpIdle(value.id);
+      this.db
+        .prepare(
+          'INSERT INTO mcp_registrations(id,document) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET document=excluded.document',
+        )
+        .run(value.id, JSON.stringify(value));
+      return value;
+    });
+  }
+  removeRegisteredMcp(id: string, expectedRevision: string): void {
+    this.transaction(() => {
+      const value = this.registeredMcp().find((entry) => entry.id === id);
+      if (!value || value.revision !== expectedRevision)
+        throw new AppError('VERSION_CONFLICT', 'MCP 등록 정보가 변경되었습니다.', 409);
+      this.assertMcpIdle(id);
+      this.db.prepare('DELETE FROM mcp_registrations WHERE id=?').run(id);
+    });
   }
   private assertSkillIdle(id: string): void {
     const selectedByRunningSession = this.snapshot().sessions.some(
@@ -505,8 +564,14 @@ export class StorageEngine {
             const message = session.messages.find((m) => m.id === session.run?.messageId);
             if (message) {
               message.status = 'cancelled';
-              for (const activity of message.activities ?? [])
+              for (const activity of message.activities ?? []) {
                 if (activity.status === 'running') activity.status = 'cancelled';
+                if (activity.mcpCall?.status === 'running') {
+                  activity.mcpCall.status = 'unknown';
+                  activity.mcpCall.error =
+                    '중지 시점의 MCP 실행 결과가 확인되지 않았습니다. 서버 기록을 확인하세요.';
+                }
+              }
             }
           }
         } else if (command.type === 'save_plan') {
@@ -517,7 +582,8 @@ export class StorageEngine {
           command.type === 'set_mode' ||
           command.type === 'adopt_plan' ||
           command.type === 'configure_execution' ||
-          command.type === 'configure_skills'
+          command.type === 'configure_skills' ||
+          command.type === 'configure_mcp'
         ) {
           if (
             session.run?.status === 'running' ||
@@ -527,7 +593,26 @@ export class StorageEngine {
           )
             throw new AppError('BUSY', '실행이 끝난 뒤 모드나 계획을 변경하세요.', 409);
           if (command.type === 'set_mode') session.mode = command.mode;
-          else if (command.type === 'configure_skills') {
+          else if (command.type === 'configure_mcp') {
+            const selections = mcpSelectionsSchema.parse(command.mcp);
+            for (const selection of selections) {
+              const server = this.registeredMcp().find((entry) => entry.id === selection.serverId);
+              const tool = server?.tools.find((entry) => entry.name === selection.toolName);
+              if (
+                !server ||
+                server.revision !== selection.serverRevision ||
+                !tool?.supported ||
+                tool.revision !== selection.toolRevision
+              )
+                throw new AppError(
+                  'MCP_CHANGED',
+                  'MCP 도구 등록 정보가 바뀌었습니다. 다시 선택하세요.',
+                  409,
+                );
+            }
+            session.mcp = selections;
+            session.mcpCloudConsent = command.mcpCloudConsent;
+          } else if (command.type === 'configure_skills') {
             const skills = skillSelectionsSchema.parse(command.skills);
             const registrations = this.registeredSkills();
             for (const selection of skills) {
@@ -589,6 +674,7 @@ export class StorageEngine {
                 409,
               );
             if (context?.skillCatalog?.includedIds.length) session.hasSkillHistory = true;
+            if (context?.mcpTools?.length) session.hasMcpHistory = true;
             if (session.messages.length >= 120)
               throw new AppError(
                 'CONTEXT_LIMIT',
@@ -681,6 +767,11 @@ export class StorageEngine {
             update.error ?? '실행이 멈췄습니다. 기록을 확인한 뒤 다시 실행할 수 있습니다.';
         }
         for (const activity of message.activities ?? []) {
+          if (activity.mcpCall?.status === 'running') {
+            activity.mcpCall.status = 'unknown';
+            activity.mcpCall.error =
+              'MCP 실행 결과가 확인되지 않았습니다. 서버 기록을 확인하고 다시 요청하세요.';
+          }
           if (activity.status === 'running')
             activity.status = update.status === 'completed' ? 'completed' : update.status;
         }
@@ -778,6 +869,38 @@ export class StorageEngine {
       return session;
     });
   }
+  recordMcpCall(
+    sessionId: string,
+    activityId: string,
+    call: NonNullable<Activity['mcpCall']>,
+  ): Session {
+    return this.transaction(() => {
+      const session = this.session(sessionId);
+      const activity = session.messages
+        .flatMap((m) => m.activities ?? [])
+        .find((a) => a.id === activityId);
+      if (!activity || activity.kind !== 'tool' || !activity.label.startsWith('mcp_'))
+        throw new AppError('MCP_ACTIVITY', 'MCP 실행 기록을 찾을 수 없습니다.', 409);
+      const previous = activity.mcpCall;
+      if (
+        previous &&
+        ['serverId', 'serverRevision', 'toolName', 'toolRevision', 'startedAt'].some(
+          (key) => previous[key as keyof typeof previous] !== call[key as keyof typeof call],
+        )
+      )
+        throw new AppError('MCP_ACTIVITY', '이미 기록된 MCP 실행 정보를 변경할 수 없습니다.', 409);
+      if (
+        previous &&
+        ['completed', 'failed'].includes(previous.status) &&
+        JSON.stringify(previous) !== JSON.stringify(call)
+      )
+        throw new AppError('MCP_ACTIVITY', '완료된 MCP 실행 결과를 변경할 수 없습니다.', 409);
+      activity.mcpCall = call;
+      session.hasMcpHistory = true;
+      this.persist(session);
+      return session;
+    });
+  }
   recordCreatedFile(
     sessionId: string,
     activityId: string,
@@ -838,6 +961,14 @@ export class StorageEngine {
     let count = 0;
     for (const session of this.snapshot().sessions) {
       for (const activity of session.messages.flatMap((m) => m.activities ?? [])) {
+        if (activity.mcpCall?.status === 'running') {
+          this.recordMcpCall(session.id, activity.id, {
+            ...activity.mcpCall,
+            status: 'unknown',
+            error: '앱이 종료되어 MCP 실행 결과를 확인하지 못했습니다. 자동 반복하지 않았습니다.',
+          });
+          count++;
+        }
         if (activity.execution && ['starting', 'running'].includes(activity.execution.status)) {
           this.recordExecution(session.id, activity.id, {
             ...activity.execution,

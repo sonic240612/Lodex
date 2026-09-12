@@ -1,0 +1,121 @@
+import { AppError, type Activity, type McpSelection, type Session } from '@lodex/contracts';
+import {
+  McpConnection,
+  definitionForModel,
+  mcpToolName,
+  type McpRegistration,
+  type SecretResolver,
+} from '@lodex/mcp';
+
+export function selectedMcpTools(session: Session, registrations: McpRegistration[]) {
+  return (session.mcp ?? []).map((selection) => {
+    const server = registrations.find((entry) => entry.id === selection.serverId);
+    const tool = server?.tools.find((entry) => entry.name === selection.toolName);
+    if (
+      !server ||
+      server.revision !== selection.serverRevision ||
+      !tool?.supported ||
+      tool.revision !== selection.toolRevision
+    )
+      throw new AppError(
+        'MCP_CHANGED',
+        '선택한 MCP 도구가 변경되거나 삭제되었습니다. MCP 목록에서 다시 검토하세요.',
+        409,
+      );
+    return { selection, server, definition: definitionForModel(server, tool) };
+  });
+}
+/** Connections belong to one run. No shared capabilities or automatic replay. */
+export class RunMcp {
+  private connections = new Map<string, McpConnection>();
+  constructor(
+    private options: {
+      selections: { selection: McpSelection; server: McpRegistration }[];
+      supervisorPath: string;
+      resolveSecret: SecretResolver;
+    },
+  ) {}
+  async call(options: {
+    name: string;
+    argumentsJson: string;
+    mode: 'plan' | 'build';
+    signal: AbortSignal;
+    maxBytes: number;
+    record: (call: NonNullable<Activity['mcpCall']>) => Promise<void>;
+  }): Promise<string> {
+    if (options.mode !== 'build')
+      throw new AppError('MCP_PLAN', 'Plan 모드에서는 MCP 도구를 실행하지 않습니다.', 403);
+    const selected = this.options.selections.find(
+      (value) => mcpToolName(value.server.id, value.selection.toolName) === options.name,
+    );
+    if (!selected) throw new AppError('MCP_TOOL', '이 대화에 허용되지 않은 MCP 도구입니다.', 403);
+    let args: Record<string, unknown>;
+    try {
+      if (Buffer.byteLength(options.argumentsJson) > 16384) throw new Error();
+      const parsed: unknown = JSON.parse(options.argumentsJson);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error();
+      args = parsed as Record<string, unknown>;
+    } catch {
+      throw new AppError('MCP_ARGUMENTS', 'MCP 인자는 16 KiB 이하의 JSON 객체여야 합니다.');
+    }
+    let connection = this.connections.get(selected.server.id);
+    if (!connection) {
+      connection = await McpConnection.connect({
+        config: selected.server.config,
+        expected: selected.server,
+        supervisorPath: this.options.supervisorPath,
+        resolveSecret: this.options.resolveSecret,
+        signal: options.signal,
+      });
+      this.connections.set(selected.server.id, connection);
+    }
+    const audit: NonNullable<Activity['mcpCall']> = {
+      ...selected.selection,
+      status: 'running',
+      startedAt: new Date().toISOString(),
+    };
+    await options.record(audit);
+    try {
+      options.signal.throwIfAborted();
+      const result = await connection.call({
+        name: selected.selection.toolName,
+        revision: selected.selection.toolRevision,
+        arguments: args,
+        mode: options.mode,
+        signal: options.signal,
+        maxBytes: options.maxBytes,
+      });
+      await options.record({
+        ...audit,
+        status: result.isError ? 'failed' : 'completed',
+        finishedAt: new Date().toISOString(),
+      });
+      return JSON.stringify(result);
+    } catch (error) {
+      const unknown =
+        options.signal.aborted ||
+        !(error instanceof AppError) ||
+        error.code === 'MCP_OUTCOME_UNKNOWN';
+      await options.record({
+        ...audit,
+        status: unknown ? 'unknown' : 'failed',
+        finishedAt: new Date().toISOString(),
+        error: unknown
+          ? 'MCP 실행 결과를 확인하지 못했습니다. 서버 기록을 확인하세요.'
+          : (error as AppError).message,
+      });
+      throw error;
+    }
+  }
+  async close() {
+    const results = await Promise.allSettled(
+      [...this.connections.values()].map((connection) => connection.close()),
+    );
+    this.connections.clear();
+    if (results.some((result) => result.status === 'rejected'))
+      throw new AppError(
+        'MCP_CLOSE_UNKNOWN',
+        'MCP 서버 종료를 확인하지 못했습니다. 실행 중인 프로세스를 확인하세요.',
+      );
+  }
+}

@@ -43,6 +43,9 @@ import { verificationTools } from './autopilot';
 import { RuntimeManager, type RuntimeLease } from '@lodex/local-runtime';
 import { inspectSkillDirectory, skillCatalog, type RegisteredSkill } from '@lodex/skills';
 import { skillTools } from './skills';
+import { McpConnection, importMcpConfigurations, mcpConfigSchema } from '@lodex/mcp';
+import { RunMcp, selectedMcpTools } from './mcp';
+import { loadMcpSecret } from './secrets';
 import { z } from 'zod';
 declare const __dirname: string;
 const skillRegistrationInput = z
@@ -70,6 +73,7 @@ interface ServerOptions {
   providerFactory?: (session: Session, key: string | null) => InferenceProvider;
   commandExecutor?: typeof executeCommand;
   supervisorPath?: string;
+  mcpSupervisorPath?: string;
 }
 async function readJson(request: IncomingMessage): Promise<unknown> {
   if (!request.headers['content-type']?.startsWith('application/json'))
@@ -97,6 +101,13 @@ function json(response: ServerResponse, status: number, body: unknown): void {
 }
 export async function startServer(options: ServerOptions) {
   const { store } = options;
+  const mcpSupervisorPath =
+    options.mcpSupervisorPath ??
+    (typeof __dirname === 'string'
+      ? join(__dirname, 'mcp-supervisor.cjs')
+      : resolve('apps/daemon/dist/mcp-supervisor.cjs'));
+  const resolveMcpSecret = async (name: string) => (await loadMcpSecret(name, options)) ?? null;
+  const shutdown = new AbortController();
   const runtime = new RuntimeManager(
     store,
     options.supervisorPath ??
@@ -123,6 +134,7 @@ export async function startServer(options: ServerOptions) {
     controller: AbortController,
     context: CompiledContext,
     skills: RegisteredSkill[],
+    mcpSelections: ReturnType<typeof selectedMcpTools>,
   ): Promise<void> {
     let lease: RuntimeLease | undefined;
     const autopilot = session.autopilot;
@@ -174,6 +186,11 @@ export async function startServer(options: ServerOptions) {
         controller,
         context,
         skills,
+        mcp: new RunMcp({
+          selections: mcpSelections,
+          supervisorPath: mcpSupervisorPath,
+          resolveSecret: resolveMcpSecret,
+        }),
         ...(project ? { project } : {}),
         ...(options.commandExecutor ? { commandExecutor: options.commandExecutor } : {}),
       });
@@ -205,6 +222,7 @@ export async function startServer(options: ServerOptions) {
     if (receipt) return receipt;
     let context: CompiledContext | undefined;
     let selectedSkills: RegisteredSkill[] = [];
+    let mcpSelections: ReturnType<typeof selectedMcpTools> = [];
     if (
       'sessionId' in command &&
       command.type !== 'create_session' &&
@@ -216,6 +234,23 @@ export async function startServer(options: ServerOptions) {
     }
     if (command.type === 'send_message' || command.type === 'start_autopilot') {
       const session = await store.session(command.sessionId);
+      if (
+        session.config.provider === 'openrouter' &&
+        !session.mcpCloudConsent &&
+        (session.hasMcpHistory || (session.mode !== 'plan' && session.mcp?.length))
+      )
+        throw new AppError(
+          'MCP_CLOUD_CONSENT',
+          'MCP 도구 설명과 실행 결과를 OpenRouter로 보내려면 이 대화의 MCP 전송 동의가 필요합니다. 선택을 해제해도 이전 내용은 기록에 남습니다.',
+          403,
+        );
+      if (command.type === 'start_autopilot' && session.mcp?.length)
+        throw new AppError(
+          'MCP_AUTOPILOT',
+          'MCP 도구를 선택한 대화는 아직 Autopilot을 지원하지 않습니다. MCP 선택을 해제하고 실행하세요.',
+        );
+      if (session.mode !== 'plan')
+        mcpSelections = selectedMcpTools(session, await store.registeredMcp());
       const registrations = await store.registeredSkills();
       selectedSkills = (session.skills ?? []).map((selection) => {
         const skill = registrations.find((entry) => entry.id === selection.id);
@@ -321,6 +356,7 @@ export async function startServer(options: ServerOptions) {
             )
           : [];
       tools.push(planningTool);
+      tools.push(...mcpSelections.map((value) => value.definition));
       if (selectedSkills.length) tools.push(...skillTools);
       if (
         session.mode !== 'plan' &&
@@ -349,7 +385,7 @@ export async function startServer(options: ServerOptions) {
       (command.type === 'send_message' || command.type === 'start_autopilot')
     ) {
       const abort = new AbortController();
-      const task = execute(result.session, abort, context!, selectedSkills);
+      const task = execute(result.session, abort, context!, selectedSkills, mcpSelections);
       active.set(result.session.run!.id, { abort, task });
     }
     if (command.type === 'cancel_run') active.get(command.runId)?.abort.abort();
@@ -376,6 +412,83 @@ export async function startServer(options: ServerOptions) {
           openrouterKeySource,
           envFilePath: options.envFilePath,
         });
+      } else if (request.method === 'GET' && url.pathname === '/v1/mcp') {
+        json(response, 200, { servers: await store.registeredMcp() });
+      } else if (request.method === 'POST' && url.pathname === '/v1/mcp/import') {
+        const parsed = z
+          .strictObject({ text: z.string().max(131072), cwd: z.string().max(4096).optional() })
+          .safeParse(await readJson(request));
+        if (!parsed.success) throw new AppError('MCP_IMPORT', 'MCP 설정 JSON을 확인하세요.');
+        json(response, 200, {
+          candidates: importMcpConfigurations(parsed.data.text, parsed.data.cwd),
+        });
+      } else if (request.method === 'POST' && url.pathname === '/v1/mcp/register') {
+        const parsed = z
+          .strictObject({
+            config: mcpConfigSchema,
+            approved: z.literal(true),
+            id: z.uuid().optional(),
+            expectedRevision: z
+              .string()
+              .regex(/^[a-f0-9]{64}$/)
+              .optional(),
+          })
+          .refine((value) => !!value.id === !!value.expectedRevision)
+          .safeParse(await readJson(request));
+        if (!parsed.success)
+          throw new AppError('MCP_CONFIG', 'MCP 연결 설정과 실행 허용을 확인하세요.');
+        const input = parsed.data;
+        json(response, 200, {
+          server: await serial(async () => {
+            if (
+              input.id &&
+              (await store.snapshot()).sessions.some(
+                (session) =>
+                  session.mcp?.some((selection) => selection.serverId === input.id) &&
+                  session.run &&
+                  (session.run.status === 'running' || active.has(session.run.id)),
+              )
+            )
+              throw new AppError(
+                'BUSY',
+                'MCP 서버를 사용하는 실행이 끝난 뒤 다시 검사하세요.',
+                409,
+              );
+            if (
+              input.id &&
+              (await store.registeredMcp()).find((server) => server.id === input.id)?.revision !==
+                input.expectedRevision
+            )
+              throw new AppError(
+                'VERSION_CONFLICT',
+                'MCP 등록 정보가 바뀌었습니다. 목록을 다시 불러오세요.',
+                409,
+              );
+            const connection = await McpConnection.connect({
+              config: input.config,
+              supervisorPath: mcpSupervisorPath,
+              resolveSecret: resolveMcpSecret,
+              signal: AbortSignal.any([shutdown.signal, AbortSignal.timeout(30000)]),
+            });
+            const registration = connection.registration;
+            await connection.close();
+            return store.saveRegisteredMcp(
+              { ...registration, ...(input.id ? { id: input.id } : {}) },
+              input.expectedRevision,
+            );
+          }),
+        });
+      } else if (request.method === 'POST' && url.pathname === '/v1/mcp/remove') {
+        const parsed = skillRemovalInput.safeParse(await readJson(request));
+        if (!parsed.success) throw new AppError('MCP_CONFIG', 'MCP 등록 정보를 확인하세요.');
+        json(
+          response,
+          200,
+          await serial(async () => {
+            await store.removeRegisteredMcp(parsed.data.id, parsed.data.expectedRevision);
+            return { servers: await store.registeredMcp() };
+          }),
+        );
       } else if (request.method === 'GET' && url.pathname === '/v1/skills') {
         json(response, 200, { skills: await store.registeredSkills() });
       } else if (request.method === 'POST' && url.pathname === '/v1/skills/register') {
@@ -692,6 +805,7 @@ export async function startServer(options: ServerOptions) {
     port: address.port,
     async close() {
       closing = true;
+      shutdown.abort();
       for (const run of active.values()) run.abort.abort();
       await runtime.close();
       await queue;

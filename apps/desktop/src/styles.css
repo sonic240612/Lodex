@@ -1890,3 +1890,17 @@ input[type='checkbox'] {
 .skill-manager .skill-conflict p {
   margin-top: 0;
 }
+.mcp-manager pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+.mcp-manager textarea {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  font: 12px/1.6 monospace;
+}
+.mcp-manager .primary-button {
+  margin: 8px 8px 8px 0;
+}

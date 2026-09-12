@@ -11,6 +11,7 @@ A desktop agent harness for local LLMs and OpenRouter.
 - Run commands in an opt-in Docker container, with collapsible output and cancellation.
 - Run local Autopilot with task dependencies, saved verification commands, and explicit budgets.
 - Select local SKILL.md folders per conversation and load instructions only when needed.
+- Connect stdio or Streamable HTTP MCP servers and choose tools per conversation.
 - Adjust generation settings and see token usage, generation speed, and prefill speed.
 
 Early development. Windows x64 tested; macOS and Linux builds checked in CI.
@@ -40,9 +41,11 @@ Open a project conversation and expand **Command execution** in the plan panel. 
 
 For **Autopilot**, save task criteria and verification commands, enable the plan in model context, and choose the scope and budgets. Passing checks and manual checkboxes have separate records. File proposals pause for review; interrupted runs never restart automatically. Currently local models only.
 
-## Skills
+## Skills & MCP
 
 Import a folder containing `SKILL.md`, review its compatibility notes, and select it for the conversation. Standard, Codex, Claude, and pi metadata are supported within the displayed limits. Imports do not run scripts, hooks, or install dependencies. OpenRouter access requires separate consent for skill content.
+
+MCP settings accept `mcpServers` JSON. Keep credentials in `.env` using `LODEX_MCP_` references. MCP tools run in Build mode with separate OpenRouter consent; OAuth, resources, prompts, and some JSON Schema features are still pending.
 
 ## Packages
 

@@ -5,6 +5,7 @@
   "type": "module",
   "exports": "./src/index.ts",
   "dependencies": {
+    "@lodex/mcp": "0.1.0",
     "@lodex/contracts": "0.1.0",
     "@lodex/skills": "0.1.0"
   }

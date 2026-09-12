@@ -64,6 +64,70 @@ afterEach(async () => {
   }
 });
 describe('durable worker storage', () => {
+  it('recovers unfinished MCP effects without replay and retains late audit without reviving cancellation', async () => {
+    let { store, path } = await db();
+    let session = await create(store);
+    session = (
+      await store.apply(
+        makeCommand({
+          type: 'send_message',
+          sessionId: session.id,
+          expectedVersion: session.version,
+          content: 'MCP recovery',
+        }),
+      )
+    ).session;
+    const activity = {
+      id: crypto.randomUUID(),
+      kind: 'tool' as const,
+      label: 'mcp_fixture',
+      status: 'running' as const,
+      text: '',
+    };
+    await store.updateRun({
+      sessionId: session.id,
+      runId: session.run!.id,
+      activities: [activity],
+    });
+    const audit = {
+      serverId: crypto.randomUUID(),
+      serverRevision: '1'.repeat(64),
+      toolName: 'echo',
+      toolRevision: '2'.repeat(64),
+      status: 'running' as const,
+      startedAt: new Date().toISOString(),
+    };
+    await store.recordMcpCall(session.id, activity.id, audit);
+    await close(store);
+    store = await open(path);
+    session = await store.session(session.id);
+    expect(session.run?.status).toBe('interrupted');
+    expect(session.messages.at(-1)?.activities?.[0]?.mcpCall?.status).toBe('unknown');
+    expect(session.hasMcpHistory).toBe(true);
+    await store.recordMcpCall(session.id, activity.id, {
+      ...audit,
+      status: 'completed',
+      finishedAt: new Date().toISOString(),
+    });
+    expect((await store.session(session.id)).run?.status).toBe('interrupted');
+    await expect(
+      store.recordMcpCall(session.id, activity.id, { ...audit, toolName: 'different' }),
+    ).rejects.toMatchObject({ code: 'MCP_ACTIVITY' });
+    session = await store.session(session.id);
+    await store.deleteSessions(
+      deleteSessionsSchema.parse({
+        protocolVersion: 1,
+        policyVersion: 1,
+        actor: 'desktop',
+        commandId: crypto.randomUUID(),
+        type: 'delete_sessions',
+        targets: [{ sessionId: session.id, expectedVersion: session.version }],
+      }),
+    );
+    await expect(store.recordMcpCall(session.id, activity.id, audit)).rejects.toMatchObject({
+      code: 'NOT_FOUND',
+    });
+  });
   it('retains catalog exposure after deselection and later runs with no skill reads', async () => {
     const { store, path } = await db();
     const root = join(dirname(path), 'catalog-skill');
@@ -1073,7 +1137,7 @@ describe('durable worker storage', () => {
             db.prepare('UPDATE ' + table + ' SET ' + column + '=? WHERE ' + column + '=?').run(JSON.stringify(value), row.body);
           }
         }
-        db.exec('DROP TABLE projects; DROP TABLE runtime_profiles; DROP TABLE runtime_settings; DROP TABLE skill_registrations; PRAGMA user_version=1;');
+        db.exec('DROP TABLE projects; DROP TABLE runtime_profiles; DROP TABLE runtime_settings; DROP TABLE skill_registrations; DROP TABLE mcp_registrations; PRAGMA user_version=1;');
         db.close();
       `,
         { eval: true, workerData: path },

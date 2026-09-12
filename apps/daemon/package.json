@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "dependencies": {
+    "@lodex/mcp": "0.1.0",
     "@lodex/contracts": "0.1.0",
     "@lodex/storage": "0.1.0",
     "@lodex/providers": "0.1.0",

@@ -18,12 +18,10 @@ function key(value: string | null | undefined): string | null {
     );
   return trimmed;
 }
-export async function loadSecrets(options: {
+async function readEnvFile(options: {
   envFilePath: string;
   requiredFile?: boolean;
-  environment?: Pick<NodeJS.ProcessEnv, 'OPENROUTER_API_KEY'>;
-  keychainKey?: string | null;
-}): Promise<SecretConfig> {
+}): Promise<Record<string, string | undefined>> {
   if (!isAbsolute(options.envFilePath))
     throw new AppError('ENV_PATH', '.env 파일은 절대 경로로 지정해야 합니다.');
   let values: Record<string, string | undefined> = {};
@@ -57,6 +55,27 @@ export async function loadSecrets(options: {
       );
     }
   }
+  return values;
+}
+export async function loadMcpSecret(
+  name: string,
+  options: { envFilePath?: string; environment?: NodeJS.ProcessEnv },
+): Promise<string | undefined> {
+  if (!/^LODEX_MCP_[A-Z][A-Z0-9_]{0,99}$/.test(name))
+    throw new AppError('MCP_SECRET_REF', 'MCP 비밀 변수 이름이 올바르지 않습니다.');
+  const value = (options.environment ?? process.env)[name];
+  if (value) return value;
+  return options.envFilePath
+    ? (await readEnvFile({ envFilePath: options.envFilePath }))[name]
+    : undefined;
+}
+export async function loadSecrets(options: {
+  envFilePath: string;
+  requiredFile?: boolean;
+  environment?: Pick<NodeJS.ProcessEnv, 'OPENROUTER_API_KEY'>;
+  keychainKey?: string | null;
+}): Promise<SecretConfig> {
+  const values = await readEnvFile(options);
   // Only the allowlisted key is used. Never mutate process.env, expand variables,
   // execute shell substitutions, or forward arbitrary file entries to children.
   const candidates: [SecretSource, string | null | undefined][] = [

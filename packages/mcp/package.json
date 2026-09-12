@@ -1,0 +1,14 @@
+{
+  "name": "@lodex/mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@lodex/contracts": "0.1.0",
+    "@lodex/providers": "0.1.0",
+    "@modelcontextprotocol/client": "2.0.0",
+    "@modelcontextprotocol/core": "2.0.0",
+    "zod": "4.6.2"
+  }
+}

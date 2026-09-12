@@ -1,5 +1,6 @@
 import { Channel, invoke, isTauri } from '@tauri-apps/api/core';
 import type { RegisteredSkill, SkillDialect } from '@lodex/skills';
+import type { McpConfig, McpRegistration, McpImport } from '@lodex/mcp';
 import {
   makeCommand,
   defaultPlan,
@@ -22,6 +23,44 @@ import {
   type RuntimeSettings,
 } from '@lodex/contracts';
 export const nativeDesktop = isTauri();
+export async function registeredMcp(): Promise<McpRegistration[]> {
+  const result = await invoke<{ servers: McpRegistration[] }>('daemon_request', {
+    method: 'GET',
+    path: '/v1/mcp',
+    body: null,
+  });
+  return result.servers;
+}
+export async function importMcp(text: string, cwd?: string): Promise<McpImport[]> {
+  const result = await invoke<{ candidates: McpImport[] }>('daemon_request', {
+    method: 'POST',
+    path: '/v1/mcp/import',
+    body: { text, ...(cwd ? { cwd } : {}) },
+  });
+  return result.candidates;
+}
+export async function registerMcp(
+  config: McpConfig,
+  previous?: McpRegistration,
+): Promise<McpRegistration> {
+  const result = await invoke<{ server: McpRegistration }>('daemon_request', {
+    method: 'POST',
+    path: '/v1/mcp/register',
+    body: {
+      config,
+      approved: true,
+      ...(previous ? { id: previous.id, expectedRevision: previous.revision } : {}),
+    },
+  });
+  return result.server;
+}
+export async function removeMcp(server: McpRegistration): Promise<void> {
+  await invoke('daemon_request', {
+    method: 'POST',
+    path: '/v1/mcp/remove',
+    body: { id: server.id, expectedRevision: server.revision },
+  });
+}
 type Listener = (event: DomainEvent) => void;
 const previewSessions: Session[] = [];
 const previewDeleted: string[] = [];

@@ -21,22 +21,33 @@ export function ActivityCards({
         <details className={'activity-card activity-' + activity.kind} key={activity.id}>
           <summary>
             <span className={'activity-dot ' + activity.status} />
-            <span>{activity.label}</span>
+            <span>{activity.mcpCall ? `MCP · ${activity.mcpCall.toolName}` : activity.label}</span>
             <small>
-              {activity.execution
-                ? activity.execution.cleanupPending
-                  ? '컨테이너 정리 필요'
-                  : activity.execution.status === 'completed'
-                    ? '종료 코드 0'
-                    : activity.execution.status === 'running' ||
-                        activity.execution.status === 'starting'
-                      ? '명령 실행 중'
-                      : '명령 중단·실패'
-                : activityProposal(activity)
-                  ? editStatusText[activityProposal(activity)!.status]
-                  : statusText[activity.status]}
+              {activity.mcpCall?.status === 'unknown'
+                ? '실행 결과 미확인'
+                : activity.execution
+                  ? activity.execution.cleanupPending
+                    ? '컨테이너 정리 필요'
+                    : activity.execution.status === 'completed'
+                      ? '종료 코드 0'
+                      : activity.execution.status === 'running' ||
+                          activity.execution.status === 'starting'
+                        ? '명령 실행 중'
+                        : '명령 중단·실패'
+                  : activityProposal(activity)
+                    ? editStatusText[activityProposal(activity)!.status]
+                    : statusText[activity.status]}
             </small>
           </summary>
+          {activity.mcpCall && (
+            <div className="activity-section">
+              <span>MCP · {activity.mcpCall.toolName}</span>
+              <small>
+                {activity.mcpCall.startedAt} · {activity.mcpCall.status}
+              </small>
+              {activity.mcpCall.error && <p role="alert">{activity.mcpCall.error}</p>}
+            </div>
+          )}
           {activity.execution ? (
             <div className="activity-section">
               <span>명령 · {activity.execution.cwd}</span>

@@ -203,6 +203,36 @@ try {
   });
   assert.equal(importedSkill.status, 200);
   const { skill } = await importedSkill.json();
+  const mcpFixture = join(dataDir, 'mcp-fixture.cjs');
+  await writeFile(
+    mcpFixture,
+    `
+    require('node:readline').createInterface({input:process.stdin}).on('line', line => {
+      const m = JSON.parse(line); if (m.id === undefined) return;
+      const result = m.method === 'initialize' ? { protocolVersion:'2025-11-25', capabilities:{tools:{}}, serverInfo:{name:'bundled-fixture',version:'1'} }
+        : m.method === 'tools/list' ? {tools:[{name:'fixture_echo',inputSchema:{type:'object',properties:{}}}]} : {};
+      process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result})+'\\n');
+    });
+    process.stdin.on('end',()=>process.exit(0));
+  `,
+  );
+  const mcpResponse = await app.request('/v1/mcp/register', {
+    method: 'POST',
+    body: JSON.stringify({
+      approved: true,
+      config: {
+        name: 'Bundled MCP',
+        transport: 'stdio',
+        executable: runtime,
+        args: [mcpFixture],
+        cwd: dataDir,
+        protocol: 'legacy',
+      },
+    }),
+  });
+  const mcpPayload = await mcpResponse.json();
+  assert.equal(mcpResponse.status, 200, JSON.stringify(mcpPayload));
+  const mcpServer = mcpPayload.server;
   let session = await app.command({
     type: 'create_session',
     sessionId: randomUUID(),
@@ -216,6 +246,21 @@ try {
     expectedVersion: session.version,
     skills: [{ id: skill.id, revision: skill.revision }],
     skillCloudConsent: false,
+  });
+  const mcpSelection = [
+    {
+      serverId: mcpServer.id,
+      serverRevision: mcpServer.revision,
+      toolName: mcpServer.tools[0].name,
+      toolRevision: mcpServer.tools[0].revision,
+    },
+  ];
+  session = await app.command({
+    type: 'configure_mcp',
+    sessionId: session.id,
+    expectedVersion: session.version,
+    mcp: mcpSelection,
+    mcpCloudConsent: false,
   });
   session = await app.command({
     type: 'save_plan',
@@ -246,6 +291,8 @@ try {
   assert.equal(session.plan.goal, '번들 런타임 복구 검증');
   assert.equal(session.plan.tasks[0].done, true);
   assert.deepEqual(session.skills, [{ id: skill.id, revision: skill.revision }]);
+  assert.deepEqual(session.mcp, mcpSelection);
+  assert.equal((await app.request('/v1/mcp').then((r) => r.json())).servers[0].id, mcpServer.id);
   assert.equal((await app.request('/v1/skills').then((r) => r.json())).skills[0].id, skill.id);
   session = await app.command({
     type: 'send_message',
@@ -277,7 +324,7 @@ try {
   assert.equal((await app.state()).projects[0].id, project.id);
   await stop(app);
   console.log(
-    'PASS: dotenv without key exposure / bundled Node and engine supervisor / runtime settings / skill registration and selection / Korean-space paths / auth / projects / chat / cancel / plan persistence / pipe shutdown / crash recovery / durable deletion.',
+    'PASS: dotenv without key exposure / bundled Node and engine supervisor / runtime settings / skill and stdio MCP registration and selection / Korean-space paths / auth / projects / chat / cancel / plan persistence / pipe shutdown / crash recovery / durable deletion.',
   );
 } finally {
   for (const child of children) {

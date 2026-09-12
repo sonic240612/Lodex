@@ -19,6 +19,10 @@ import { ConversationHistory } from './ConversationHistory';
 import { ExecutionPanel } from './ExecutionPanel';
 import { AutopilotPanel } from './AutopilotPanel';
 import type { SkillSelectionSave } from './SkillManager';
+import type { McpSelectionSave } from './McpManager';
+const McpManager = lazy(() =>
+  import('./McpManager').then((module) => ({ default: module.McpManager })),
+);
 const ModelManager = lazy(() =>
   import('./ModelManager').then((module) => ({ default: module.ModelManager })),
 );
@@ -36,6 +40,7 @@ export function App() {
   const [settings, setSettings] = useState(false);
   const [modelManager, setModelManager] = useState(false);
   const [skillManager, setSkillManager] = useState(false);
+  const [mcpManager, setMcpManager] = useState(false);
   const [projectDialog, setProjectDialog] = useState(false);
   const [showActivities, setShowActivities] = useState(() => {
     try {
@@ -227,6 +232,18 @@ export function App() {
     workspace.upsert(result.session);
     setSkillManager(false);
   }
+  async function applyMcp(value: McpSelectionSave) {
+    const target = session ?? (await createSession());
+    const result = await sendCommand({
+      type: 'configure_mcp',
+      sessionId: target.id,
+      expectedVersion: value.expectedVersion ?? target.version,
+      mcp: value.mcp,
+      mcpCloudConsent: value.mcpCloudConsent,
+    });
+    workspace.upsert(result.session);
+    setMcpManager(false);
+  }
   async function changeMode(value: AgentMode) {
     if (!session) {
       setNewMode(value);
@@ -307,6 +324,10 @@ export function App() {
         <button className="nav-item" onClick={() => setSkillManager(true)}>
           <Icon name="bolt" size={18} />
           스킬{session?.skills?.length ? ` · ${session.skills.length}` : ''}
+        </button>
+        <button className="nav-item" onClick={() => setMcpManager(true)}>
+          <Icon name="bolt" />
+          MCP{session?.mcp?.length ? ` · ${session.mcp.length}` : ''}
         </button>
         <div className="history-caption">
           <span>프로젝트</span>
@@ -756,6 +777,17 @@ export function App() {
             connected={workspace.connected}
             onClose={() => setSkillManager(false)}
             onSave={applySkills}
+          />
+        </Suspense>
+      )}
+      {mcpManager && (
+        <Suspense fallback={null}>
+          <McpManager
+            session={session}
+            provider={config.provider}
+            connected={workspace.connected}
+            onClose={() => setMcpManager(false)}
+            onSave={applyMcp}
           />
         </Suspense>
       )}
