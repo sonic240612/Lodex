@@ -15,15 +15,19 @@ import {
   type ModelConfig,
   type Session,
   type SecretSource,
+  autopilotLimitsSchema,
+  defaultExecutionConfig,
 } from '@lodex/contracts';
 import { decodeSse } from '@lodex/providers';
 import { Store } from '@lodex/storage';
 import { startServer } from './server';
+import type { executeCommand } from '@lodex/tools';
 const cleanup: (() => Promise<void>)[] = [];
 const token = 'a'.repeat(64);
 async function setup(
   provider?: InferenceProvider,
   secrets?: { openrouterKey: string; openrouterKeySource: SecretSource; envFilePath: string },
+  commandExecutor?: typeof executeCommand,
 ) {
   const dir = await mkdtemp(join(tmpdir(), 'lodex-http-한글 '));
   const store = await Store.open(join(dir, 'test.sqlite'), resolve('apps/daemon/dist/worker.cjs'));
@@ -33,6 +37,7 @@ async function setup(
     store,
     ...secrets,
     ...(provider ? { providerFactory: factory } : {}),
+    ...(commandExecutor ? { commandExecutor } : {}),
   });
   cleanup.push(async () => {
     await app.close();
@@ -73,6 +78,135 @@ afterEach(async () => {
   for (const close of cleanup.splice(0)) await close();
 });
 describe('authenticated daemon integration', () => {
+  it.each(['pass', 'fail', 'budget', 'no_progress'] as const)(
+    'runs a bounded local Autopilot and persists %s distinctly',
+    async (outcome) => {
+      let taskId = '',
+        round = 0,
+        executions = 0;
+      const provider: InferenceProvider = {
+        listModels: async () => [],
+        capabilities: async () => ({ tools: true, streaming: true }),
+        async *generate(request) {
+          expect(request.tools?.some((t) => t.function.name === 'verify_task')).toBe(true);
+          if (outcome === 'no_progress') {
+            yield { type: 'text_delta', text: 'I am done.' };
+            yield { type: 'finished', reason: 'stop' };
+            return;
+          }
+          const name = outcome === 'pass' && round > 0 ? 'verify_goal' : 'verify_task';
+          yield {
+            type: 'tool_call_delta',
+            index: 0,
+            id: 'v-' + round++,
+            name,
+            arguments: name === 'verify_task' ? JSON.stringify({ taskId }) : '{}',
+          };
+          if (name === 'verify_goal')
+            yield {
+              type: 'tool_call_delta',
+              index: 1,
+              id: 'after-goal',
+              name: 'run_command',
+              arguments: '{"command":"must not run"}',
+            };
+          yield { type: 'finished', reason: 'tool_calls' };
+        },
+      };
+      const executor: typeof executeCommand = async (options) => {
+        executions++;
+        const id = crypto.randomUUID(),
+          command = JSON.parse(options.argumentsJson).command as string;
+        expect(command).toBe('npm test');
+        const execution = {
+          id,
+          containerName: 'lodex-' + id,
+          command,
+          cwd: '.',
+          status: (outcome === 'fail' ? 'failed' : 'completed') as 'failed' | 'completed',
+          startedAt: '',
+          exitCode: outcome === 'fail' ? 1 : 0,
+          output: outcome === 'fail' ? 'regression failed' : 'fixture check passed',
+          truncated: false,
+          cleanupPending: false,
+        };
+        await options.record(execution);
+        return execution;
+      };
+      const app = await setup(provider, undefined, executor);
+      const { project } = await app
+        .request('/v1/projects', { method: 'POST', body: JSON.stringify({ path: app.dir }) })
+        .then((r) => r.json());
+      let session = await app.create(
+        { provider: 'llama-server', model: 'fixture', contextBudgetTokens: 65536 },
+        project.id,
+      );
+      taskId = crypto.randomUUID();
+      session = (
+        await app
+          .command(
+            makeCommand({
+              type: 'save_plan',
+              sessionId: session.id,
+              expectedVersion: session.version,
+              plan: {
+                ...defaultPlan(),
+                goal: 'Regression',
+                criteria: 'Check passes',
+                verificationCommand: 'npm test',
+                includeInContext: true,
+                tasks: [
+                  {
+                    id: taskId,
+                    title: 'Fix',
+                    criteria: 'Check passes',
+                    verificationCommand: 'npm test',
+                    done: false,
+                  },
+                ],
+              },
+            }),
+          )
+          .then((r) => r.json())
+      ).session;
+      session = (
+        await app
+          .command(
+            makeCommand({
+              type: 'configure_execution',
+              sessionId: session.id,
+              expectedVersion: session.version,
+              execution: { ...defaultExecutionConfig(), backend: 'docker', projectAccess: true },
+            }),
+          )
+          .then((r) => r.json())
+      ).session;
+      const response = await app.command(
+        makeCommand({
+          type: 'start_autopilot',
+          sessionId: session.id,
+          expectedVersion: session.version,
+          taskIds: [],
+          limits: autopilotLimitsSchema.parse({ modelCalls: outcome === 'budget' ? 1 : 6 }),
+        }),
+      );
+      expect(response.status).toBe(200);
+      await vi.waitFor(async () =>
+        expect((await app.store.session(session.id)).run?.status).not.toBe('running'),
+      );
+      session = await app.store.session(session.id);
+      expect(session.autopilot?.status).toBe(outcome === 'pass' ? 'completed' : 'paused');
+      expect(session.plan.tasks[0]!.done).toBe(false);
+      expect(session.autopilot?.modelCalls).toBe(
+        outcome === 'budget' ? 1 : outcome === 'fail' ? 3 : 2,
+      );
+      expect(executions).toBe(
+        outcome === 'no_progress' ? 0 : outcome === 'fail' ? 3 : outcome === 'budget' ? 1 : 2,
+      );
+      if (outcome === 'pass') expect(session.autopilot?.evidence).toHaveLength(2);
+      else expect(session.autopilot?.reason).toBeTruthy();
+    },
+  );
   it('offers read-only Plan tools, reviews a plan, and adopts it without executing tasks', async () => {
     let round = 0;
     const provider: InferenceProvider = {

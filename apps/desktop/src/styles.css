@@ -1711,3 +1711,32 @@ input[type='checkbox'] {
   display: flex;
   gap: 12px;
 }
+.autopilot-panel {
+  border-top: 1px solid var(--border);
+  padding: 20px 24px;
+  font-size: 12px;
+}
+.autopilot-panel p {
+  opacity: 0.75;
+  line-height: 1.6;
+}
+.autopilot-panel summary {
+  cursor: pointer;
+  margin: 12px 0;
+}
+.autopilot-panel small {
+  display: block;
+  opacity: 0.6;
+}
+.budget-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 8px 0;
+}
+.budget-field input {
+  width: 100px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px;
+}

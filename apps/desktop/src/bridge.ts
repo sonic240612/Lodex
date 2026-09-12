@@ -56,6 +56,8 @@ async function previewCommand(command: Command): Promise<CommandResult> {
   } else {
     if (!session) throw new Error('대화를 찾을 수 없습니다.');
     if (command.type === 'save_plan') session.plan = command.plan;
+    else if (command.type === 'start_autopilot')
+      throw new Error('Autopilot은 데스크톱 앱의 로컬 모델에서 사용할 수 있습니다.');
     else if (command.type === 'set_mode') session.mode = command.mode;
     else if (command.type === 'configure_execution')
       throw new Error('명령 실행은 데스크톱 앱에서 설정할 수 있습니다.');

@@ -26,6 +26,8 @@ import {
   defaultExecutionConfig,
   executionConfigSchema,
   type CommandExecution,
+  type AutopilotState,
+  prepareAutopilot,
 } from '@lodex/contracts';
 
 // Additive JSON fields are defaulted on all read paths, including old SSE events.
@@ -41,6 +43,7 @@ function hydrate(session: Session): Session {
 }
 
 export interface RunUpdate {
+  autopilot?: AutopilotState;
   sessionId: string;
   runId: string;
   text?: string;
@@ -60,7 +63,7 @@ export class StorageEngine {
       'PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;',
     );
     const row = this.db.prepare('PRAGMA user_version').get() as { user_version: number };
-    if (row.user_version > 7) {
+    if (row.user_version > 8) {
       this.db.close();
       throw new AppError(
         'DATABASE_VERSION',
@@ -99,6 +102,7 @@ export class StorageEngine {
     if (row.user_version < 6) this.db.exec('PRAGMA user_version=6;');
     // v7 records owned command containers, including cleanup after cancellation/restart.
     if (row.user_version < 7) this.db.exec('PRAGMA user_version=7;');
+    if (row.user_version < 8) this.db.exec('PRAGMA user_version=8;');
   }
   close(): void {
     if (!this.closed) {
@@ -340,6 +344,10 @@ export class StorageEngine {
           if (session.run.status === 'running') {
             session.run.status = 'cancelled';
             session.run.finishedAt = now;
+            if (session.autopilot?.runId === session.run.id) {
+              session.autopilot.status = 'cancelled';
+              session.autopilot.reason = '사용자가 중지했습니다.';
+            }
             const message = session.messages.find((m) => m.id === session.run?.messageId);
             if (message) {
               message.status = 'cancelled';
@@ -348,6 +356,8 @@ export class StorageEngine {
             }
           }
         } else if (command.type === 'save_plan') {
+          if (session.run?.status === 'running' && session.autopilot?.runId === session.run.id)
+            throw new AppError('BUSY', 'Autopilot을 중지한 뒤 실행 계획을 편집하세요.', 409);
           session.plan = command.plan;
         } else if (
           command.type === 'set_mode' ||
@@ -411,10 +421,25 @@ export class StorageEngine {
                 '초기 버전은 대화당 60회 요청까지 지원합니다. 새 대화를 시작하세요.',
               );
             const messageId = randomUUID();
+            const runId = randomUUID();
+            if (command.type === 'start_autopilot')
+              session.autopilot = prepareAutopilot(session, command.taskIds, command.limits, runId);
+            const content =
+              command.type === 'send_message'
+                ? command.content
+                : '목표 실행: ' +
+                  session.plan.goal +
+                  '\n' +
+                  session.autopilot!.taskIds.length +
+                  '개 작업 · 모델 ' +
+                  command.limits.modelCalls +
+                  '회 · ' +
+                  command.limits.minutes +
+                  '분 이내';
             session.messages.push({
               id: randomUUID(),
               role: 'user',
-              content: command.content,
+              content,
               createdAt: now,
               status: 'complete',
               error: null,
@@ -430,14 +455,18 @@ export class StorageEngine {
               usage: emptyUsage(session.config.provider),
             });
             session.run = {
-              id: randomUUID(),
+              id: runId,
               messageId,
               status: 'running',
               startedAt: now,
               finishedAt: null,
               ...(context ? { context } : {}),
             };
-            if (session.messages.length === 2) session.title = command.content.slice(0, 60);
+            if (session.messages.length === 2)
+              session.title =
+                command.type === 'start_autopilot'
+                  ? session.plan.goal.slice(0, 60)
+                  : content.slice(0, 60);
           }
         }
       }
@@ -459,12 +488,24 @@ export class StorageEngine {
       if (update.activities) message.activities = update.activities;
       if (update.continuation) message.continuation = update.continuation;
       if (update.context) session.run.context = update.context;
+      if (update.autopilot && update.autopilot.runId === update.runId)
+        session.autopilot = update.autopilot;
       if (update.usage && message.usage) message.usage = { ...message.usage, ...update.usage };
       if (update.status) {
         session.run.status = update.status;
         session.run.finishedAt = new Date().toISOString();
         message.status = update.status === 'completed' ? 'complete' : update.status;
         message.error = update.error ?? null;
+        if (session.autopilot?.runId === update.runId && session.autopilot.status === 'running') {
+          session.autopilot.status =
+            update.status === 'cancelled'
+              ? 'cancelled'
+              : update.status === 'interrupted'
+                ? 'interrupted'
+                : 'paused';
+          session.autopilot.reason =
+            update.error ?? '실행이 멈췄습니다. 기록을 확인한 뒤 다시 실행할 수 있습니다.';
+        }
         for (const activity of message.activities ?? []) {
           if (activity.status === 'running')
             activity.status = update.status === 'completed' ? 'completed' : update.status;

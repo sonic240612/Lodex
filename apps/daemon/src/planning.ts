@@ -31,11 +31,13 @@ export function proposePlan(argumentsJson: string, basePlan: Plan): PlanProposal
       ...basePlan,
       goal: draft.goal,
       criteria: draft.criteria,
+      verificationCommand: draft.verificationCommand,
       includeInContext: true,
       tasks: draft.tasks.map((task) => ({
         id: ids.get(task.key),
         title: task.title,
         criteria: task.criteria,
+        verificationCommand: task.verificationCommand,
         done: false,
         dependsOn: task.dependsOn.map((key) => ids.get(key) ?? key),
       })),

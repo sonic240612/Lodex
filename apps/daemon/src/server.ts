@@ -11,6 +11,8 @@ import {
   activityProposal,
   providerSchema,
   localUrlSchema,
+  prepareAutopilot,
+  autopilotPrompt,
   type Command,
   type InferenceProvider,
   type Session,
@@ -29,9 +31,11 @@ import {
   executionTool,
   inspectDocker,
   cleanupExecution,
+  executeCommand,
 } from '@lodex/tools';
 import { runAgent } from './agent-runner';
 import { planningTool } from './planning';
+import { verificationTools } from './autopilot';
 
 interface ServerOptions {
   token: string;
@@ -40,6 +44,7 @@ interface ServerOptions {
   openrouterKeySource?: SecretSource;
   envFilePath?: string;
   providerFactory?: (session: Session, key: string | null) => InferenceProvider;
+  commandExecutor?: typeof executeCommand;
 }
 async function readJson(request: IncomingMessage): Promise<unknown> {
   if (!request.headers['content-type']?.startsWith('application/json'))
@@ -107,6 +112,7 @@ export async function startServer(options: ServerOptions) {
         controller,
         context,
         ...(project ? { project } : {}),
+        ...(options.commandExecutor ? { commandExecutor: options.commandExecutor } : {}),
       });
     } catch {
       await store
@@ -134,7 +140,7 @@ export async function startServer(options: ServerOptions) {
       if (target.run && active.has(target.run.id) && target.run.status !== 'running')
         throw new AppError('BUSY', '중지한 실행을 정리하는 중입니다.', 409);
     }
-    if (command.type === 'send_message') {
+    if (command.type === 'send_message' || command.type === 'start_autopilot') {
       const session = await store.session(command.sessionId);
       for (const other of (await store.snapshot()).sessions) {
         if (
@@ -196,10 +202,19 @@ export async function startServer(options: ServerOptions) {
         tools.some((tool) => tool.function.name === 'read_file')
       )
         tools.push(executionTool);
-      context = compileContext(session, command.content, tools);
+      let content: string;
+      if (command.type === 'start_autopilot') {
+        const autopilot = prepareAutopilot(session, command.taskIds, command.limits);
+        tools.push(...verificationTools);
+        content = autopilotPrompt(autopilot);
+      } else content = command.content;
+      context = compileContext(session, content, tools);
     }
     const result = await store.apply(command, context?.manifest);
-    if (!result.replayed && command.type === 'send_message') {
+    if (
+      !result.replayed &&
+      (command.type === 'send_message' || command.type === 'start_autopilot')
+    ) {
       const abort = new AbortController();
       const task = execute(result.session, abort, context!);
       active.set(result.session.run!.id, { abort, task });

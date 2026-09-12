@@ -8,9 +8,10 @@ A desktop agent harness for local LLMs and OpenRouter.
 - Read project files, review changes, apply them, and undo them.
 - Switch between Plan and Build, review AI plans, and edit task criteria and dependencies.
 - Run commands in an opt-in Docker container, with collapsible output and cancellation.
+- Run local Autopilot with task dependencies, saved verification commands, and explicit budgets.
 - Adjust generation settings and see token usage, generation speed, and prefill speed.
 
-Early development. Windows x64 tested; macOS and Linux support is in progress.
+Early development. Windows x64 tested; macOS and Linux builds checked in CI.
 
 ## Quick start
 
@@ -33,6 +34,8 @@ npm run dev
 ## Commands
 
 Open a project conversation and expand **Command execution** in the plan panel. Select a local Linux Docker image with `/bin/sh`, check the engine and image, then enable project access. Commands run in Build mode. Network access is off by default; images are never downloaded automatically. Container integration is experimental; host shell and interactive PTY support are pending.
+
+For **Autopilot**, save task criteria and verification commands, enable the plan in model context, and choose the scope and budgets. Passing checks and manual checkboxes have separate records. File proposals pause for review; interrupted runs never restart automatically. Currently local models only.
 
 ## Packages
 

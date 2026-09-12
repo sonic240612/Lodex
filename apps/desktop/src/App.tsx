@@ -16,6 +16,7 @@ import { ProjectDialog } from './ProjectDialog';
 import { Markdown } from './Markdown';
 import { ConversationHistory } from './ConversationHistory';
 import { ExecutionPanel } from './ExecutionPanel';
+import { AutopilotPanel } from './AutopilotPanel';
 
 const providerName = (provider: string) =>
   provider === 'openrouter' ? 'OpenRouter' : provider === 'demo' ? '데모' : 'llama-server';
@@ -691,14 +692,7 @@ export function App() {
               </p>
             </details>
           )}
-          <div className="upcoming">
-            <Icon name="bolt" size={16} />
-            <div>
-              <strong>Autopilot</strong>
-              <p>목표 검증과 복구 기능을 구현한 뒤 연결합니다.</p>
-            </div>
-            <span className="small-badge">예정</span>
-          </div>
+          {session?.projectId && <AutopilotPanel key={session.id} session={session} />}
         </aside>
       )}
       {projectDialog && (
@@ -821,6 +815,18 @@ function PlanEditor({
         placeholder="어떤 결과로 완료를 확인할까요?"
         onChange={(event) => update({ ...draft, criteria: event.target.value })}
       />
+      <label className="section-label" htmlFor="goal-verification">
+        최종 검증 명령
+      </label>
+      <textarea
+        id="goal-verification"
+        className="goal-input"
+        rows={2}
+        maxLength={8000}
+        value={draft.verificationCommand ?? ''}
+        placeholder="예: npm test"
+        onChange={(event) => update({ ...draft, verificationCommand: event.target.value })}
+      />
       <label className="check-field plan-context-choice">
         <input
           type="checkbox"
@@ -907,6 +913,27 @@ function PlanEditor({
               </div>
               <details className="task-details">
                 <summary>완료 기준·선행 작업·순서</summary>
+                <label>
+                  작업 검증 명령
+                  <textarea
+                    className="goal-input"
+                    rows={2}
+                    maxLength={8000}
+                    aria-label={task.title + ' 검증 명령'}
+                    placeholder="예: npm test -- --run regression"
+                    value={task.verificationCommand ?? ''}
+                    onChange={(event) =>
+                      update({
+                        ...draft,
+                        tasks: draft.tasks.map((item) =>
+                          item.id === task.id
+                            ? { ...item, verificationCommand: event.target.value }
+                            : item,
+                        ),
+                      })
+                    }
+                  />
+                </label>
                 <textarea
                   aria-label={task.title + ' 완료 기준'}
                   className="goal-input"
@@ -998,7 +1025,8 @@ function PlanEditor({
         {saving ? '저장 중…' : dirty ? '계획 저장' : '저장됨'}
       </button>
       <p className="subtle-note">
-        완료 표시는 직접 관리합니다. 아직 에이전트가 목표를 자동 실행하거나 검증하지 않습니다.
+        체크박스는 직접 관리합니다. Autopilot 검증 기록은 별도로 표시됩니다. 검증 명령은 사용자가
+        정한 확인 범위만 검사합니다.
       </p>
       {dirty && (
         <button

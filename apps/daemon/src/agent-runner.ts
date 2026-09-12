@@ -8,11 +8,14 @@ import {
   type Session,
   type ToolCall,
   type Usage,
+  readyAutopilotTasks,
+  activityProposal,
 } from '@lodex/contracts';
 import { measureRequest, type CompiledContext } from '@lodex/context';
 import { runProjectTool, executeCommand } from '@lodex/tools';
 import type { Store } from '@lodex/storage';
 import { proposePlan } from './planning';
+import { verifyAutopilot } from './autopilot';
 
 export const MAX_MODEL_CALLS = 6;
 const MAX_TOOL_CALLS = 12;
@@ -95,10 +98,18 @@ export async function runAgent(options: {
   context: CompiledContext;
   controller: AbortController;
   project?: Project;
+  commandExecutor?: typeof executeCommand;
 }) {
   const { store, session, provider, context, controller, project } = options;
   const runId = session.run!.id;
-  const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(300000)]);
+  const autopilot =
+    session.autopilot?.runId === runId ? structuredClone(session.autopilot) : undefined;
+  const maxModels = autopilot?.limits.modelCalls ?? MAX_MODEL_CALLS;
+  const maxTools = autopilot?.limits.toolCalls ?? MAX_TOOL_CALLS;
+  const signal = AbortSignal.any([
+    controller.signal,
+    AbortSignal.timeout(autopilot ? autopilot.limits.minutes * 60000 : 300000),
+  ]);
   const activities: Activity[] = [];
   const continuation: InferenceMessage[] = [];
   const rounds: Partial<Usage>[] = [];
@@ -106,6 +117,9 @@ export async function runAgent(options: {
   let content = '',
     lastSave = 0,
     toolCount = 0;
+  let emptyRounds = 0,
+    repeatedResults = 0,
+    previousResult = '';
   const usage = () => aggregate(rounds, session.config.provider === 'openrouter');
   const save = async (terminal?: 'completed' | 'failed' | 'cancelled', error?: string) => {
     if (content.length > 262144 || Buffer.byteLength(JSON.stringify(activities)) > 262144)
@@ -117,13 +131,14 @@ export async function runAgent(options: {
       activities,
       continuation,
       usage: usage(),
+      ...(autopilot ? { autopilot } : {}),
       ...(terminal ? { status: terminal } : {}),
       ...(error ? { error } : {}),
     });
     lastSave = performance.now();
   };
   try {
-    for (let step = 0; step < MAX_MODEL_CALLS; step++) {
+    for (let step = 0; step < maxModels; step++) {
       signal.throwIfAborted();
       const request = {
         ...context.request,
@@ -134,7 +149,24 @@ export async function runAgent(options: {
         ...measureRequest(request),
         messageCount: request.messages.length,
       };
-      await store.updateRun({ sessionId: session.id, runId, context: manifest });
+      if (autopilot) {
+        if (
+          autopilot.reservedOutputTokens + session.config.maxTokens >
+          autopilot.limits.outputTokens
+        )
+          throw new AppError(
+            'OUTPUT_BUDGET',
+            '출력 토큰 예약 예산에 도달했습니다. 검증 완료로 표시하지 않고 멈췄습니다.',
+          );
+        autopilot.modelCalls++;
+        autopilot.reservedOutputTokens += session.config.maxTokens;
+      }
+      await store.updateRun({
+        sessionId: session.id,
+        runId,
+        context: manifest,
+        ...(autopilot ? { autopilot } : {}),
+      });
       signal.throwIfAborted();
       const assembler = new ToolCallAssembler();
       const cards = new Map<number, Activity>();
@@ -196,6 +228,13 @@ export async function runAgent(options: {
         if (performance.now() - lastSave > 180) await save();
       }
       if (!finished) throw new AppError('MISSING_FINISH', '정상 종료가 확인되지 않았습니다.');
+      if (
+        autopilot &&
+        typeof roundUsage.outputTokens === 'number' &&
+        Number.isFinite(roundUsage.outputTokens) &&
+        roundUsage.outputTokens >= 0
+      )
+        autopilot.reservedOutputTokens += roundUsage.outputTokens - session.config.maxTokens;
       if (thinking) thinking.status = 'completed';
       const calls = assembler.finish();
       const assistant: InferenceMessage = {
@@ -210,6 +249,22 @@ export async function runAgent(options: {
       if (finished === 'stop' && calls.length === 0) {
         continuation.push(assistant);
         signal.throwIfAborted();
+        if (autopilot) {
+          if (++emptyRounds >= 2)
+            throw new AppError(
+              'NO_PROGRESS',
+              '두 번 연속 도구 실행이나 검증 없이 응답이 끝났습니다. 진행 내용을 확인하세요.',
+            );
+          continuation.push({
+            role: 'user',
+            content:
+              'Autopilot is still active. Continue the ready tasks or explain the blocker; prose alone is not verification. Ready task IDs: ' +
+              JSON.stringify(readyAutopilotTasks(autopilot).map((t) => t.id)),
+          });
+          if (roundText) content += '\n\n';
+          await save();
+          continue;
+        }
         await save('completed');
         return;
       }
@@ -223,10 +278,10 @@ export async function runAgent(options: {
           'TOOLS_UNAVAILABLE',
           '프로젝트 도구가 허용되지 않아 실행하지 않았습니다. 프로젝트 선택과 전송 설정을 확인하세요.',
         );
-      if (step === MAX_MODEL_CALLS - 1 || toolCount + calls.length > MAX_TOOL_CALLS)
+      if ((!autopilot && step === maxModels - 1) || toolCount + calls.length > maxTools)
         throw new AppError(
           'STEP_LIMIT',
-          '실행 한도(모델 6회·도구 12회)에 도달했습니다. 진행 내용을 확인한 뒤 이어서 요청하세요.',
+          `실행 한도(모델 ${maxModels}회·도구 ${maxTools}회)에 도달했습니다. 진행 내용을 확인한 뒤 다시 실행하세요.`,
         );
       for (const call of calls) {
         if (usedIds.has(call.id))
@@ -243,8 +298,54 @@ export async function runAgent(options: {
             '이 요청에 제공되지 않은 도구라 실행하지 않았습니다.',
           );
         const card = cards.get(index)!;
+        const skipRemaining = () => {
+          for (let rest = index + 1; rest < calls.length; rest++) {
+            const skipped = cards.get(rest)!;
+            skipped.status = 'cancelled';
+            skipped.text = 'Autopilot이 끝나거나 검토 대기 상태가 되어 실행하지 않았습니다.';
+            continuation.push({
+              role: 'tool',
+              toolCallId: calls[rest]!.id,
+              content: JSON.stringify({ skipped: true, reason: skipped.text }),
+            });
+          }
+        };
+        if (autopilot) {
+          autopilot.toolCalls++;
+          await save();
+        }
         let result: string;
-        if (call.name === 'propose_plan') {
+        if (call.name === 'verify_task' || call.name === 'verify_goal') {
+          if (!autopilot || !project || !session.execution)
+            throw new AppError(
+              'AUTOPILOT_REQUIRED',
+              'Autopilot에서만 검증 도구를 사용할 수 있습니다.',
+            );
+          try {
+            const verification = await verifyAutopilot({
+              state: autopilot,
+              name: call.name,
+              argumentsJson: call.arguments,
+              project,
+              config: session.execution,
+              signal,
+              ...(options.commandExecutor ? { executor: options.commandExecutor } : {}),
+              record: async (execution) => {
+                card.execution = structuredClone(execution);
+                await store.recordExecution(session.id, card.id, execution);
+              },
+            });
+            result = JSON.stringify(verification);
+            if (verification.cleanupPending)
+              throw new AppError('CLEANUP_REQUIRED', '검증 컨테이너 정리가 필요합니다.');
+          } catch (error) {
+            if (card.execution?.cleanupPending) throw error;
+            result = JSON.stringify({
+              error: error instanceof AppError ? error.code : 'VERIFICATION_INPUT',
+              message: error instanceof AppError ? error.message : '검증 인자가 올바르지 않습니다.',
+            });
+          }
+        } else if (call.name === 'propose_plan') {
           try {
             card.planProposal = proposePlan(call.arguments, session.plan);
             result = JSON.stringify({
@@ -266,7 +367,7 @@ export async function runAgent(options: {
               '이 대화의 명령 실행이 허용되지 않았습니다.',
               403,
             );
-          const execution = await executeCommand({
+          const execution = await (options.commandExecutor ?? executeCommand)({
             project,
             config: session.execution,
             argumentsJson: call.arguments,
@@ -309,23 +410,87 @@ export async function runAgent(options: {
           );
         }
         signal.throwIfAborted();
-        card.text = result;
+        card.text = card.execution
+          ? JSON.stringify({
+              status: card.execution.status,
+              exitCode: card.execution.exitCode,
+              executionId: card.execution.id,
+            })
+          : result;
         card.status = 'error' in JSON.parse(result) ? 'failed' : 'completed';
-        continuation.push({ role: 'tool', content: result, toolCallId: call.id });
+        let contextResult = result;
+        if (card.execution) {
+          const data = JSON.parse(result) as {
+            output?: string;
+            truncated?: boolean;
+            fullOutputAvailableInActivity?: boolean;
+          };
+          const limit = session.config.eco ? 2400 : 6000;
+          if (data.output && data.output.length > limit) {
+            data.output =
+              data.output.slice(0, limit / 4) +
+              '\n[context excerpt; full captured output is in the activity card]\n' +
+              data.output.slice((-limit * 3) / 4);
+            data.truncated = true;
+            data.fullOutputAvailableInActivity = true;
+            contextResult = JSON.stringify(data);
+          }
+        }
+        continuation.push({ role: 'tool', content: contextResult, toolCallId: call.id });
         toolCount++;
         await save();
+        if (autopilot) {
+          emptyRounds = 0;
+          if (autopilot.status === 'completed') {
+            // Remaining calls in the same model response are never executed after completion.
+            skipRemaining();
+            content += '\n\n' + autopilot.reason;
+            await save('completed');
+            return;
+          }
+          if (activityProposal(card) || card.planProposal) {
+            skipRemaining();
+            autopilot.status = 'paused';
+            autopilot.reason = card.planProposal
+              ? '계획 제안을 검토한 뒤 다시 실행하세요.'
+              : '파일 수정안을 검토하고 적용한 뒤 다시 실행하세요.';
+            await save('completed');
+            return;
+          }
+          const signature =
+            call.name +
+            '\n' +
+            call.arguments +
+            '\n' +
+            (JSON.parse(result).error ? 'error' : result);
+          repeatedResults = signature === previousResult ? repeatedResults + 1 : 1;
+          previousResult = signature;
+          if (repeatedResults >= 3)
+            throw new AppError(
+              'REPEATED_RESULT',
+              '같은 요청과 결과가 세 번 반복되어 멈췄습니다. 원인을 확인하세요.',
+            );
+        }
       }
       if (roundText) content += '\n\n';
     }
+    throw new AppError(
+      'STEP_LIMIT',
+      '모델 호출 예산에 도달했습니다. 아직 검증을 완료하지 못했습니다.',
+    );
   } catch (error) {
     const cancelled = controller.signal.aborted;
     const message = cancelled
       ? '사용자가 응답을 중지했습니다.'
       : signal.aborted
-        ? '응답 대기 시간(5분)을 초과했습니다.'
+        ? '설정한 실행 시간을 초과했습니다.'
         : error instanceof AppError
           ? error.message
           : '모델 또는 프로젝트에 접근하지 못했습니다. 연결과 경로를 확인하세요.';
+    if (autopilot) {
+      autopilot.status = cancelled ? 'cancelled' : 'paused';
+      autopilot.reason = message;
+    }
     // Store remains authoritative: a persisted cancel always wins over a late update.
     await store.updateRun({
       sessionId: session.id,
@@ -333,6 +498,7 @@ export async function runAgent(options: {
       text: content.slice(0, 262144),
       activities: activities.map((a) => ({ ...a, text: a.text.slice(0, 32768) })),
       usage: usage(),
+      ...(autopilot ? { autopilot } : {}),
       status: cancelled ? 'cancelled' : 'failed',
       error: message,
     });

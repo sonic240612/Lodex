@@ -63,6 +63,7 @@ export function compileContext(
         instructions: plan.instructions,
         goal: plan.goal,
         criteria: plan.criteria,
+        verificationCommand: plan.verificationCommand,
         tasks: plan.tasks,
       }) +
       '\n\nCurrent request:\n' +

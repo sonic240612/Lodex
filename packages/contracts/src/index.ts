@@ -26,6 +26,7 @@ export const taskSchema = z.strictObject({
   title: z.string().trim().min(1).max(500),
   done: z.boolean(),
   criteria: z.string().trim().max(2000).optional(),
+  verificationCommand: z.string().trim().max(8000).optional(),
   dependsOn: z.array(idSchema).max(100).optional(),
 });
 export const planSchema = z
@@ -34,6 +35,7 @@ export const planSchema = z
     instructions: z.string().trim().max(4000).default(''),
     includeInContext: z.boolean().default(false),
     criteria: z.string().trim().max(4000).optional(),
+    verificationCommand: z.string().trim().max(8000).optional(),
     tasks: z
       .array(taskSchema)
       .max(100)
@@ -116,12 +118,14 @@ export interface CommandExecution {
 export const planDraftSchema = z.strictObject({
   goal: z.string().trim().min(1).max(4000),
   criteria: z.string().trim().min(1).max(4000),
+  verificationCommand: z.string().trim().max(8000).optional(),
   tasks: z
     .array(
       z.strictObject({
         key: z.string().regex(/^[a-zA-Z0-9_-]{1,40}$/),
         title: z.string().trim().min(1).max(500),
         criteria: z.string().trim().max(2000),
+        verificationCommand: z.string().trim().max(8000).optional(),
         dependsOn: z.array(z.string().max(40)).max(100),
       }),
     )
@@ -132,6 +136,27 @@ export interface PlanProposal {
   plan: Plan;
   basePlan: Plan;
   status: 'proposed' | 'adopted';
+}
+export const autopilotLimitsSchema = z.strictObject({
+  modelCalls: z.number().int().min(1).max(64).default(12),
+  toolCalls: z.number().int().min(1).max(128).default(36),
+  minutes: z.number().int().min(1).max(120).default(15),
+  outputTokens: z.number().int().min(1024).max(1048576).default(32768),
+});
+export interface AutopilotState {
+  runId: string;
+  status: 'running' | 'paused' | 'completed' | 'cancelled' | 'interrupted';
+  plan: Plan;
+  taskIds: string[];
+  completedTaskIds: string[];
+  wholeGoal: boolean;
+  evidence: { taskId: string | null; executionId: string; passed: boolean; at: string }[];
+  limits: z.infer<typeof autopilotLimitsSchema>;
+  modelCalls: number;
+  toolCalls: number;
+  reservedOutputTokens: number;
+  startedAt: string;
+  reason?: string;
 }
 const envelope = {
   protocolVersion: z.literal(PROTOCOL_VERSION),
@@ -181,6 +206,13 @@ export const commandSchema = z.discriminatedUnion('type', [
     ...target,
     type: z.literal('send_message'),
     content: z.string().trim().min(1).max(64000),
+  }),
+  z.strictObject({
+    ...envelope,
+    ...target,
+    type: z.literal('start_autopilot'),
+    taskIds: z.array(idSchema).max(100),
+    limits: autopilotLimitsSchema,
   }),
   z.strictObject({ ...envelope, ...target, type: z.literal('save_plan'), plan: planSchema }),
   z.strictObject({ ...envelope, ...target, type: z.literal('set_mode'), mode: modeSchema }),
@@ -331,6 +363,7 @@ export interface ContextManifest {
   eco: boolean;
 }
 export interface Session {
+  autopilot?: AutopilotState;
   execution?: ExecutionConfig;
   mode?: AgentMode;
   id: string;
@@ -439,4 +472,78 @@ export class AppError extends Error {
   ) {
     super(message);
   }
+}
+
+export function prepareAutopilot(
+  session: Session,
+  taskIds: string[],
+  limits: z.infer<typeof autopilotLimitsSchema>,
+  runId = '',
+): AutopilotState {
+  if (session.mode === 'plan' || session.execution?.backend !== 'docker' || !session.projectId)
+    throw new AppError(
+      'AUTOPILOT_POLICY',
+      'Build 모드와 프로젝트의 Docker 명령 실행 허용이 필요합니다.',
+    );
+  if (session.config.provider !== 'llama-server')
+    throw new AppError(
+      'AUTOPILOT_LOCAL_ONLY',
+      '현재 Autopilot은 로컬 모델에서 사용할 수 있습니다. OpenRouter 자동 실행은 비용 예약 기능 준비 후 지원합니다.',
+    );
+  const plan = planSchema.parse(session.plan);
+  if (!plan.goal || !plan.criteria || !plan.includeInContext || !plan.tasks.length)
+    throw new AppError(
+      'GOAL_REQUIRED',
+      '목표·완료 기준·할 일을 저장하고 모델 요청에 계획 포함을 켜세요.',
+    );
+  const selected = new Set(taskIds.length ? taskIds : plan.tasks.map((t) => t.id));
+  const include = (id: string) => {
+    const task = plan.tasks.find((t) => t.id === id);
+    if (!task) throw new AppError('TASK_NOT_FOUND', '선택한 작업이 현재 계획에 없습니다.');
+    for (const dependency of task.dependsOn ?? [])
+      if (!selected.has(dependency)) {
+        selected.add(dependency);
+        include(dependency);
+      }
+  };
+  for (const id of selected) include(id);
+  for (const task of plan.tasks.filter((t) => selected.has(t.id)))
+    if (!task.criteria?.trim() || !task.verificationCommand?.trim())
+      throw new AppError(
+        'VERIFICATION_REQUIRED',
+        '선택한 작업과 선행 작업마다 완료 기준과 검증 명령을 저장하세요.',
+      );
+  const wholeGoal = selected.size === plan.tasks.length;
+  if (!plan.verificationCommand?.trim())
+    throw new AppError('VERIFICATION_REQUIRED', '전체 목표의 최종 검증 명령을 저장하세요.');
+  return {
+    runId,
+    status: 'running',
+    plan,
+    taskIds: plan.tasks.filter((t) => selected.has(t.id)).map((t) => t.id),
+    completedTaskIds: [],
+    wholeGoal,
+    evidence: [],
+    limits,
+    modelCalls: 0,
+    toolCalls: 0,
+    reservedOutputTokens: 0,
+    startedAt: new Date().toISOString(),
+  };
+}
+export function readyAutopilotTasks(state: AutopilotState) {
+  return state.plan.tasks.filter(
+    (task) =>
+      state.taskIds.includes(task.id) &&
+      !state.completedTaskIds.includes(task.id) &&
+      (task.dependsOn ?? []).every((id) => state.completedTaskIds.includes(id)),
+  );
+}
+export function autopilotPrompt(state: AutopilotState) {
+  return (
+    'Execute the selected working plan within the configured budget. The user authorized this Autopilot run and the configured Docker project scope. Work on ready tasks only; use verify_task when a task is ready for its user-defined verification command. Never mark tasks complete in prose alone. After all selected tasks pass, call verify_goal. A proposed file change is not applied: pause for user review if needed. Stop and explain missing prerequisites.\nSelected task IDs: ' +
+    JSON.stringify(state.taskIds) +
+    '\nReady task IDs: ' +
+    JSON.stringify(readyAutopilotTasks(state).map((t) => t.id))
+  );
 }

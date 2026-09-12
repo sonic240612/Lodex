@@ -46,11 +46,17 @@ export function PlanReview({
     <div className="edit-review">
       <strong>{proposal.plan.goal}</strong>
       <p>{proposal.plan.criteria}</p>
+      {proposal.plan.verificationCommand && (
+        <pre aria-label="최종 검증 명령">{proposal.plan.verificationCommand}</pre>
+      )}
       <ol>
         {proposal.plan.tasks.map((task) => (
           <li key={task.id}>
             <strong>{task.title}</strong>
             <p>{task.criteria}</p>
+            {task.verificationCommand && (
+              <pre aria-label={task.title + ' 검증 명령'}>{task.verificationCommand}</pre>
+            )}
             {!!task.dependsOn?.length && (
               <small>
                 선행 작업:{' '}
