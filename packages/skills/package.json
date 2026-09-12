@@ -1,11 +1,11 @@
 {
-  "name": "@lodex/storage",
-  "private": true,
+  "name": "@lodex/skills",
   "version": "0.1.0",
+  "private": true,
   "type": "module",
   "exports": "./src/index.ts",
   "dependencies": {
     "@lodex/contracts": "0.1.0",
-    "@lodex/skills": "0.1.0"
+    "yaml": "2.9.1"
   }
 }

@@ -8,6 +8,35 @@ import {
   planSchema,
 } from './index';
 describe('command boundary', () => {
+  it('requires pinned unique skill selections and explicit cloud consent', () => {
+    const skill = { id: crypto.randomUUID(), revision: 'a'.repeat(64) };
+    const command = makeCommand({
+      type: 'configure_skills',
+      sessionId: crypto.randomUUID(),
+      expectedVersion: 1,
+      skills: [skill],
+      skillCloudConsent: false,
+    });
+    expect(commandSchema.safeParse(command).success).toBe(true);
+    expect(commandSchema.safeParse({ ...command, skillCloudConsent: undefined }).success).toBe(
+      false,
+    );
+    expect(commandSchema.safeParse({ ...command, expectedVersion: -1 }).success).toBe(false);
+    expect(commandSchema.safeParse({ ...command, skills: [skill, skill] }).success).toBe(false);
+    expect(
+      commandSchema.safeParse({ ...command, skills: [{ ...skill, revision: 'not-a-hash' }] })
+        .success,
+    ).toBe(false);
+    expect(
+      commandSchema.safeParse({ ...command, skills: [{ ...skill, path: 'SKILL.md' }] }).success,
+    ).toBe(false);
+    expect(
+      commandSchema.safeParse({
+        ...command,
+        skills: Array.from({ length: 17 }, () => ({ ...skill, id: crypto.randomUUID() })),
+      }).success,
+    ).toBe(false);
+  });
   it('requires a local provider and matching version reference for managed models', () => {
     const managedModelId = crypto.randomUUID();
     expect(modelConfigSchema.safeParse({ managedModelId }).success).toBe(false);

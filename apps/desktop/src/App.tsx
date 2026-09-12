@@ -18,8 +18,12 @@ import { Markdown } from './Markdown';
 import { ConversationHistory } from './ConversationHistory';
 import { ExecutionPanel } from './ExecutionPanel';
 import { AutopilotPanel } from './AutopilotPanel';
+import type { SkillSelectionSave } from './SkillManager';
 const ModelManager = lazy(() =>
   import('./ModelManager').then((module) => ({ default: module.ModelManager })),
+);
+const SkillManager = lazy(() =>
+  import('./SkillManager').then((module) => ({ default: module.SkillManager })),
 );
 
 const providerName = (provider: string) =>
@@ -31,6 +35,7 @@ export function App() {
   const session = workspace.sessions.find((s) => s.id === workspace.selectedId);
   const [settings, setSettings] = useState(false);
   const [modelManager, setModelManager] = useState(false);
+  const [skillManager, setSkillManager] = useState(false);
   const [projectDialog, setProjectDialog] = useState(false);
   const [showActivities, setShowActivities] = useState(() => {
     try {
@@ -210,6 +215,18 @@ export function App() {
     workspace.setConfig(config);
     setModelManager(false);
   }
+  async function applySkills(value: SkillSelectionSave) {
+    const target = session ?? (await createSession());
+    const result = await sendCommand({
+      type: 'configure_skills',
+      sessionId: target.id,
+      expectedVersion: value.expectedVersion ?? target.version,
+      skills: value.skills,
+      skillCloudConsent: value.skillCloudConsent,
+    });
+    workspace.upsert(result.session);
+    setSkillManager(false);
+  }
   async function changeMode(value: AgentMode) {
     if (!session) {
       setNewMode(value);
@@ -286,6 +303,10 @@ export function App() {
         <button className="nav-item" onClick={() => setModelManager(true)}>
           <Icon name="chip" size={18} />
           로컬 모델 관리
+        </button>
+        <button className="nav-item" onClick={() => setSkillManager(true)}>
+          <Icon name="bolt" size={18} />
+          스킬{session?.skills?.length ? ` · ${session.skills.length}` : ''}
         </button>
         <div className="history-caption">
           <span>프로젝트</span>
@@ -724,6 +745,18 @@ export function App() {
       {modelManager && (
         <Suspense fallback={<div role="status">모델 관리 화면을 여는 중…</div>}>
           <ModelManager onClose={() => setModelManager(false)} onChoose={chooseLocalModel} />
+        </Suspense>
+      )}
+      {skillManager && (
+        <Suspense fallback={<div role="status">스킬 관리 화면을 여는 중…</div>}>
+          <SkillManager
+            key={session?.id ?? 'new'}
+            session={session}
+            provider={config.provider}
+            connected={workspace.connected}
+            onClose={() => setSkillManager(false)}
+            onSave={applySkills}
+          />
         </Suspense>
       )}
       {projectDialog && (

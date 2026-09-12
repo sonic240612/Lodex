@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, readFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { Worker } from 'node:worker_threads';
@@ -10,9 +10,11 @@ import {
   deleteSessionsSchema,
   type Session,
   type LocalProfile,
+  type ContextManifest,
   engineSettingsSchema,
 } from '@lodex/contracts';
 import { Store } from './index';
+import { inspectSkillDirectory, readSkill } from '@lodex/skills';
 import {
   inspectProject,
   proposeEdit,
@@ -62,6 +64,331 @@ afterEach(async () => {
   }
 });
 describe('durable worker storage', () => {
+  it('retains catalog exposure after deselection and later runs with no skill reads', async () => {
+    const { store, path } = await db();
+    const root = join(dirname(path), 'catalog-skill');
+    await mkdir(root);
+    await writeFile(
+      join(root, 'SKILL.md'),
+      '---\nname: catalog\ndescription: Private workflow metadata.\n---\nUnread body.\n',
+    );
+    const skill = await store.saveRegisteredSkill(await inspectSkillDirectory(root));
+    let session = await create(store);
+    expect(session.hasSkillHistory).toBe(false);
+    session = (
+      await store.apply(
+        makeCommand({
+          type: 'configure_skills',
+          sessionId: session.id,
+          expectedVersion: session.version,
+          skills: [{ id: skill.id, revision: skill.revision }],
+          skillCloudConsent: true,
+        }),
+      )
+    ).session;
+    const context: ContextManifest = {
+      compilerVersion: 'context-v1',
+      sourceSessionVersion: session.version,
+      requestSha256: 'a'.repeat(64),
+      estimateSource: 'utf8_bytes_v1',
+      inputEstimateTokens: 1000,
+      outputReserveTokens: 2048,
+      safetyReserveTokens: 1639,
+      contextBudgetTokens: 32768,
+      serializedBytes: 950,
+      messageCount: 2,
+      historyMessageIds: [],
+      excludedMessageIds: [],
+      planIncluded: false,
+      eco: false,
+      skillCatalog: { includedIds: [skill.id], omittedIds: [], serializedBytes: 200 },
+    };
+    session = (
+      await store.apply(
+        makeCommand({
+          type: 'send_message',
+          sessionId: session.id,
+          expectedVersion: session.version,
+          content: 'Describe the catalog.',
+        }),
+        context,
+      )
+    ).session;
+    expect(session.hasSkillHistory).toBe(true);
+    session = await store.updateRun({
+      sessionId: session.id,
+      runId: session.run!.id,
+      status: 'completed',
+      text: 'Private workflow metadata.',
+    });
+    session = (
+      await store.apply(
+        makeCommand({
+          type: 'configure_skills',
+          sessionId: session.id,
+          expectedVersion: session.version,
+          skills: [],
+          skillCloudConsent: false,
+        }),
+      )
+    ).session;
+    session = (
+      await store.apply(
+        makeCommand({
+          type: 'send_message',
+          sessionId: session.id,
+          expectedVersion: session.version,
+          content: 'Continue locally.',
+        }),
+      )
+    ).session;
+    session = await store.updateRun({
+      sessionId: session.id,
+      runId: session.run!.id,
+      status: 'completed',
+      text: 'Continued.',
+    });
+    expect(session.run?.context).toBeUndefined();
+    expect(
+      session.messages.some((message) =>
+        message.activities?.some((activity) => activity.skillRead),
+      ),
+    ).toBe(false);
+    await close(store);
+    const reopened = await open(path);
+    expect(await reopened.session(session.id)).toMatchObject({
+      hasSkillHistory: true,
+      skillCloudConsent: false,
+      skills: [],
+    });
+  });
+  it('records a completed skill read after cancellation without reviving content or a deleted session', async () => {
+    const { store, path } = await db();
+    const root = join(dirname(path), 'cancelled-skill');
+    await mkdir(root);
+    await writeFile(
+      join(root, 'SKILL.md'),
+      '---\nname: cancelled\ndescription: Cancel audit fixture.\n---\nPrivate skill instructions.\n',
+    );
+    const skill = await store.saveRegisteredSkill(await inspectSkillDirectory(root));
+    let session = await create(store);
+    session = (
+      await store.apply(
+        makeCommand({
+          type: 'send_message',
+          sessionId: session.id,
+          expectedVersion: session.version,
+          content: 'Read.',
+        }),
+      )
+    ).session;
+    const activityId = crypto.randomUUID();
+    session = await store.updateRun({
+      sessionId: session.id,
+      runId: session.run!.id,
+      text: 'Partial response.',
+      activities: [
+        {
+          id: activityId,
+          kind: 'tool',
+          label: 'read_skill',
+          status: 'running',
+          text: '',
+        },
+      ],
+    });
+    const document = await readSkill(skill, 'model');
+    const cancelled = (
+      await store.apply(
+        makeCommand({ type: 'cancel_run', sessionId: session.id, runId: session.run!.id }),
+      )
+    ).session;
+    const recorded = await store.recordSkillRead(session.id, activityId, document.provenance);
+    expect(recorded.hasSkillHistory).toBe(true);
+    expect(recorded.run).toEqual(cancelled.run);
+    expect(recorded.messages.at(-1)?.content).toBe('Partial response.');
+    expect(recorded.messages.at(-1)?.continuation).toEqual(cancelled.messages.at(-1)?.continuation);
+    expect(recorded.messages.at(-1)?.activities?.[0]).toMatchObject({
+      status: 'cancelled',
+      text: '',
+      skillRead: document.provenance,
+    });
+    expect((await store.recordSkillRead(session.id, activityId, document.provenance)).version).toBe(
+      recorded.version,
+    );
+    await expect(
+      store.recordSkillRead(session.id, activityId, {
+        ...document.provenance,
+        sha256: '0'.repeat(64),
+      }),
+    ).rejects.toMatchObject({ code: 'SKILL_READ_CONFLICT' });
+    await close(store);
+    const reopened = await open(path);
+    expect(
+      (await reopened.session(session.id)).messages.at(-1)?.activities?.[0]?.skillRead,
+    ).toEqual(document.provenance);
+    await reopened.deleteSessions(
+      deleteSessionsSchema.parse({
+        protocolVersion: 1,
+        commandId: crypto.randomUUID(),
+        actor: 'desktop',
+        policyVersion: 1,
+        type: 'delete_sessions',
+        targets: [{ sessionId: session.id, expectedVersion: recorded.version }],
+      }),
+    );
+    await expect(
+      reopened.recordSkillRead(session.id, activityId, document.provenance),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    expect((await reopened.snapshot()).sessions).toEqual([]);
+  });
+  it('persists skill registrations with stable IDs, optimistic revisions and metadata-only removal', async () => {
+    const { store, path } = await db();
+    const root = join(dirname(path), 'registered-skill');
+    await mkdir(root);
+    const entry = join(root, 'SKILL.md');
+    await writeFile(
+      entry,
+      '---\nname: fixture\ndescription: Test skill.\n---\nFirst instructions.\n',
+    );
+    const saved = await store.saveRegisteredSkill(await inspectSkillDirectory(root));
+    await writeFile(
+      entry,
+      '---\nname: fixture\ndescription: Updated test skill.\n---\nUpdated instructions.\n',
+    );
+    const inspected = await inspectSkillDirectory(root);
+    const updated = await store.saveRegisteredSkill(inspected, saved.revision);
+    expect(updated.id).toBe(saved.id);
+    expect(updated.revision).not.toBe(saved.revision);
+    await expect(store.saveRegisteredSkill(inspected, saved.revision)).rejects.toMatchObject({
+      code: 'VERSION_CONFLICT',
+    });
+    await expect(store.saveRegisteredSkill(inspected)).rejects.toMatchObject({
+      code: 'VERSION_CONFLICT',
+    });
+    await expect(
+      store.saveRegisteredSkill(
+        { ...updated, source: { ...updated.source, rootIdentity: 'replacement' } },
+        updated.revision,
+      ),
+    ).rejects.toMatchObject({ code: 'SKILL_SOURCE' });
+    await expect(store.removeRegisteredSkill(saved.id, saved.revision)).rejects.toMatchObject({
+      code: 'VERSION_CONFLICT',
+    });
+    await close(store);
+    const reopened = await open(path);
+    expect(await reopened.registeredSkills()).toEqual([updated]);
+    await reopened.removeRegisteredSkill(updated.id, updated.revision);
+    expect(await reopened.registeredSkills()).toEqual([]);
+    expect(await readFile(entry, 'utf8')).toContain('Updated instructions.');
+  });
+  it('pins session skills, protects active selections and retains read provenance after consent revocation and removal', async () => {
+    const { store, path } = await db();
+    const root = join(dirname(path), 'selected-skill');
+    await mkdir(root);
+    await writeFile(
+      join(root, 'SKILL.md'),
+      '---\nname: selected\ndescription: Read selected instructions.\n---\nSkill body.\n',
+    );
+    const skill = await store.saveRegisteredSkill(await inspectSkillDirectory(root));
+    const selection = { id: skill.id, revision: skill.revision };
+    let session = await create(store);
+    expect(session.skills).toEqual([]);
+    expect(session.skillCloudConsent).toBe(false);
+    const configure = (
+      skills = [selection],
+      skillCloudConsent = true,
+      expectedVersion = session.version,
+    ) =>
+      makeCommand({
+        type: 'configure_skills',
+        sessionId: session.id,
+        expectedVersion,
+        skills,
+        skillCloudConsent,
+      });
+    await expect(
+      store.apply(configure([{ ...selection, revision: 'f'.repeat(64) }])),
+    ).rejects.toMatchObject({ code: 'SKILL_CHANGED' });
+    await expect(
+      store.apply(configure([{ ...selection, id: crypto.randomUUID() }])),
+    ).rejects.toMatchObject({ code: 'SKILL_NOT_FOUND' });
+    const previousVersion = session.version;
+    const selectionCommand = configure();
+    session = (await store.apply(selectionCommand)).session;
+    expect((await store.apply(selectionCommand)).replayed).toBe(true);
+    await expect(store.apply(configure([], false, previousVersion))).rejects.toMatchObject({
+      code: 'VERSION_CONFLICT',
+    });
+    session = (
+      await store.apply(
+        makeCommand({
+          type: 'send_message',
+          sessionId: session.id,
+          expectedVersion: session.version,
+          content: 'Read skill.',
+        }),
+      )
+    ).session;
+    await expect(store.apply(configure())).rejects.toMatchObject({ code: 'BUSY' });
+    await expect(store.removeRegisteredSkill(skill.id, skill.revision)).rejects.toMatchObject({
+      code: 'BUSY',
+    });
+    await expect(store.saveRegisteredSkill(skill, skill.revision)).rejects.toMatchObject({
+      code: 'BUSY',
+    });
+    const document = await readSkill(skill, 'model');
+    session = await store.updateRun({
+      sessionId: session.id,
+      runId: session.run!.id,
+      status: 'completed',
+      activities: [
+        {
+          id: crypto.randomUUID(),
+          kind: 'tool',
+          label: 'read_skill',
+          status: 'completed',
+          text: document.text,
+          skillRead: document.provenance,
+        },
+      ],
+    });
+    session = (await store.apply(configure([], false))).session;
+    await store.removeRegisteredSkill(skill.id, skill.revision);
+    await close(store);
+    const reopened = await open(path);
+    const restored = await reopened.session(session.id);
+    expect(restored.skills).toEqual([]);
+    expect(restored.skillCloudConsent).toBe(false);
+    expect(restored.messages.at(-1)?.activities?.[0]?.skillRead).toEqual(document.provenance);
+    expect(restored.messages.at(-1)?.activities?.[0]?.text).toBe(document.text);
+    expect(await reopened.registeredSkills()).toEqual([]);
+  });
+  it('rejects selecting registrations that prohibit model invocation', async () => {
+    const { store, path } = await db();
+    const root = join(dirname(path), 'manual-skill');
+    await mkdir(root);
+    await writeFile(
+      join(root, 'SKILL.md'),
+      '---\nname: manual\ndescription: Manual only.\ndisable-model-invocation: true\n---\nManual instructions.\n',
+    );
+    const skill = await store.saveRegisteredSkill(
+      await inspectSkillDirectory(root, { dialect: 'claude' }),
+    );
+    const session = await create(store);
+    await expect(
+      store.apply(
+        makeCommand({
+          type: 'configure_skills',
+          sessionId: session.id,
+          expectedVersion: session.version,
+          skills: [{ id: skill.id, revision: skill.revision }],
+          skillCloudConsent: false,
+        }),
+      ),
+    ).rejects.toMatchObject({ code: 'SKILL_INVOCATION' });
+    expect((await store.session(session.id)).skills).toEqual([]);
+  });
   it('persists versioned runtime settings and model metadata without deleting model files', async () => {
     const { store, path } = await db();
     const modelPath = join(dirname(path), 'fixture.gguf');
@@ -740,10 +1067,13 @@ describe('durable worker storage', () => {
             delete session.config.contextBudgetTokens;
             delete session.plan.instructions;
             delete session.plan.includeInContext;
+            delete session.skills;
+            delete session.skillCloudConsent;
+            delete session.hasSkillHistory;
             db.prepare('UPDATE ' + table + ' SET ' + column + '=? WHERE ' + column + '=?').run(JSON.stringify(value), row.body);
           }
         }
-        db.exec('DROP TABLE projects; DROP TABLE runtime_profiles; DROP TABLE runtime_settings; PRAGMA user_version=1;');
+        db.exec('DROP TABLE projects; DROP TABLE runtime_profiles; DROP TABLE runtime_settings; DROP TABLE skill_registrations; PRAGMA user_version=1;');
         db.close();
       `,
         { eval: true, workerData: path },
@@ -763,6 +1093,9 @@ describe('durable worker storage', () => {
     for (const session of sources) {
       expect(session.config.contextBudgetTokens).toBe(32768);
       expect(session.plan).toEqual(defaultPlan());
+      expect(session.skills).toEqual([]);
+      expect(session.skillCloudConsent).toBe(false);
+      expect(session.hasSkillHistory).toBe(false);
     }
   });
   it('deduplicates identical commands and rejects altered reuse', async () => {

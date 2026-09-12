@@ -10,6 +10,7 @@
 - Plan/Build 전환, AI 계획 검토, 작업별 완료 기준·선행 작업 편집
 - 선택형 Docker 명령 실행, 접을 수 있는 출력과 실행 중지
 - 선행 작업·검증 명령·예산을 따르는 로컬 Autopilot
+- 대화별 SKILL.md 폴더 선택과 필요한 지침만 읽기
 - 생성 설정 조절, 토큰 사용량·생성 속도·프리필 속도 표시
 
 개발 초기 단계 · Windows x64 실행 확인 · macOS/Linux CI 빌드 확인
@@ -39,18 +40,23 @@ npm run dev
 
 **Autopilot**은 작업별 완료 기준·검증 명령을 저장하고 모델 요청에 계획 포함을 켠 뒤, 실행 범위와 예산을 정해 시작하세요. 검사 통과와 수동 체크박스는 별도로 기록됩니다. 수정안은 검토를 기다리고, 중단된 실행은 자동 재시작하지 않습니다. 현재는 로컬 모델만 지원합니다.
 
+## 스킬
+
+`SKILL.md`가 있는 폴더를 가져오고 호환성 안내를 확인한 뒤 대화에서 선택하세요. 표준·Codex·Claude·pi 메타데이터는 화면에 표시된 범위에서 지원합니다. 가져오기로 스크립트·훅을 실행하거나 의존성을 설치하지 않습니다. OpenRouter로 스킬 내용을 보내려면 별도 동의가 필요합니다.
+
 ## 패키지
 
-| 패키지                                  | 역할                              |
-| --------------------------------------- | --------------------------------- |
-| [desktop](apps/desktop)                 | Tauri 앱과 React 화면             |
-| [daemon](apps/daemon)                   | 로컬 API와 에이전트 실행 루프     |
-| [providers](packages/providers)         | llama-server·OpenRouter 연결      |
-| [local-runtime](packages/local-runtime) | 모델 설정·엔진 프로세스·VRAM 예약 |
-| [tools](packages/tools)                 | 프로젝트 파일 도구와 변경 검토    |
-| [context](packages/context)             | 요청 구성과 컨텍스트 예산         |
-| [storage](packages/storage)             | SQLite 저장과 복구                |
-| [contracts](packages/contracts)         | 공통 타입과 입력 검증             |
+| 패키지                                  | 역할                                |
+| --------------------------------------- | ----------------------------------- |
+| [desktop](apps/desktop)                 | Tauri 앱과 React 화면               |
+| [daemon](apps/daemon)                   | 로컬 API와 에이전트 실행 루프       |
+| [providers](packages/providers)         | llama-server·OpenRouter 연결        |
+| [local-runtime](packages/local-runtime) | 모델 설정·엔진 프로세스·VRAM 예약   |
+| [tools](packages/tools)                 | 프로젝트 파일 도구와 변경 검토      |
+| [context](packages/context)             | 요청 구성과 컨텍스트 예산           |
+| [storage](packages/storage)             | SQLite 저장과 복구                  |
+| [contracts](packages/contracts)         | 공통 타입과 입력 검증               |
+| [skills](packages/skills)               | 스킬 메타데이터·지연 읽기·출처 기록 |
 
 ## 개발
 

@@ -1806,3 +1806,87 @@ input[type='checkbox'] {
   border-radius: 12px;
   background: var(--surface);
 }
+.skill-manager {
+  width: min(860px, calc(100vw - 40px));
+}
+.skill-manager .settings-body {
+  display: block;
+  max-height: 76vh;
+  overflow: auto;
+}
+.skill-manager section,
+.skill-manager form {
+  margin-bottom: 24px;
+}
+.skill-manager fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.skill-manager p,
+.skill-manager li,
+.skill-manager dl {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.65;
+}
+.skill-manager .skill-card {
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  margin: 12px 0;
+}
+.skill-manager .skill-source,
+.skill-manager .skill-revision,
+.skill-manager dd,
+.skill-manager li {
+  overflow-wrap: anywhere;
+}
+.skill-manager .skill-source,
+.skill-manager .skill-revision {
+  font-size: 11px;
+}
+.skill-manager select {
+  padding: 8px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.skill-manager details summary {
+  font-size: 12px;
+  cursor: pointer;
+  margin: 12px 0;
+}
+.skill-manager .skill-selection-list {
+  list-style: none;
+  margin: 12px 0;
+  padding: 0;
+}
+.skill-manager .skill-selection-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 0;
+}
+.skill-manager .skill-selection-list button {
+  white-space: nowrap;
+}
+.skill-manager .skill-consent {
+  align-items: flex-start;
+  margin: 16px 0;
+}
+.skill-manager .skill-consent input {
+  margin-top: 4px;
+}
+.skill-manager .skill-conflict {
+  padding: 12px;
+  margin: 12px 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.skill-manager .skill-conflict p {
+  margin-top: 0;
+}

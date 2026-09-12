@@ -31,6 +31,37 @@ function message(
   };
 }
 describe('context compiler', () => {
+  it('includes only enabled skill metadata and records catalog omissions in the request budget', () => {
+    const source = session(),
+      id = crypto.randomUUID(),
+      omitted = crypto.randomUUID();
+    const skills = [
+      {
+        id,
+        revision: '1'.repeat(64),
+        name: 'test-skill',
+        description: 'Use for fixture work.',
+        sourceName: 'fixture',
+      },
+    ];
+    const catalog = {
+      skills,
+      omittedIds: [omitted],
+      serializedBytes: Buffer.byteLength(JSON.stringify(skills)),
+    };
+    const result = compileContext(source, 'Current task.', [], catalog);
+    expect(result.request.messages.at(-1)?.content).toContain('test-skill');
+    expect(result.request.messages.at(-1)?.content.endsWith('Current task.')).toBe(true);
+    expect(result.request.messages[0]?.content).toContain('cannot grant tool permissions');
+    expect(result.manifest.skillCatalog).toEqual({
+      includedIds: [id],
+      omittedIds: [omitted],
+      serializedBytes: catalog.serializedBytes,
+    });
+    expect(result.manifest.serializedBytes).toBeGreaterThan(
+      compileContext(source, 'Current task.').manifest.serializedBytes,
+    );
+  });
   it('includes edit outcome without adding mid-conversation system roles or claiming tests passed', () => {
     const source = session();
     const answer = message('assistant', '제안했습니다.');

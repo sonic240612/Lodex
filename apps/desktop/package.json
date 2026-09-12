@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@lodex/contracts": "0.1.0",
+    "@lodex/skills": "0.1.0",
     "@tauri-apps/api": "2.11.1",
     "react": "19.3.0",
     "react-dom": "19.3.0",

@@ -1,4 +1,5 @@
 import { Channel, invoke, isTauri } from '@tauri-apps/api/core';
+import type { RegisteredSkill, SkillDialect } from '@lodex/skills';
 import {
   makeCommand,
   defaultPlan,
@@ -225,6 +226,41 @@ export async function deleteSessions(
 export async function pickProjectFolder(): Promise<string | null> {
   if (!nativeDesktop) throw new Error('폴더 선택은 데스크톱 앱에서 사용할 수 있습니다.');
   return invoke('pick_project_folder');
+}
+export async function registeredSkills(): Promise<RegisteredSkill[]> {
+  if (!nativeDesktop) throw new Error('스킬 등록은 데스크톱 앱에서 사용할 수 있습니다.');
+  const result = await invoke<{ skills: RegisteredSkill[] }>('daemon_request', {
+    method: 'GET',
+    path: '/v1/skills',
+    body: null,
+  });
+  return result.skills;
+}
+export async function registerSkill(input: {
+  path: string;
+  dialect: SkillDialect;
+  id?: string;
+  expectedRevision?: string;
+}): Promise<RegisteredSkill> {
+  if (!nativeDesktop) throw new Error('데스크톱 앱에서 스킬 폴더를 선택하세요.');
+  const result = await invoke<{ skill: RegisteredSkill }>('daemon_request', {
+    method: 'POST',
+    path: '/v1/skills/register',
+    body: input,
+  });
+  return result.skill;
+}
+export async function removeSkill(
+  id: string,
+  expectedRevision: string,
+): Promise<RegisteredSkill[]> {
+  if (!nativeDesktop) throw new Error('데스크톱 앱에서 스킬을 관리하세요.');
+  const result = await invoke<{ skills: RegisteredSkill[] }>('daemon_request', {
+    method: 'POST',
+    path: '/v1/skills/remove',
+    body: { id, expectedRevision },
+  });
+  return result.skills;
 }
 export async function editAction(action: EditAction): Promise<Session> {
   if (!nativeDesktop) throw new Error('실제 파일 변경은 데스크톱 앱에서 사용할 수 있습니다.');

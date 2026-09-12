@@ -1,5 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomUUID } from 'node:crypto';
+import type { RegisteredSkill } from '@lodex/skills';
 import {
   AppError,
   emptyUsage,
@@ -31,6 +32,7 @@ import {
   runtimeSettingsSchema,
   type RuntimeSettings,
   type LocalProfile,
+  skillSelectionsSchema,
 } from '@lodex/contracts';
 
 // Additive JSON fields are defaulted on all read paths, including old SSE events.
@@ -38,6 +40,16 @@ function hydrate(session: Session): Session {
   return {
     ...session,
     mode: session.mode ?? 'build',
+    skills: skillSelectionsSchema.parse(session.skills ?? []),
+    skillCloudConsent: session.skillCloudConsent ?? false,
+    hasSkillHistory:
+      session.hasSkillHistory ??
+      !!(
+        session.run?.context?.skillCatalog?.includedIds.length ||
+        session.messages.some((message) =>
+          message.activities?.some((activity) => activity.skillRead),
+        )
+      ),
     execution: executionConfigSchema.parse(session.execution ?? {}),
     projectId: session.projectId ?? null,
     config: modelConfigSchema.parse(session.config),
@@ -66,7 +78,7 @@ export class StorageEngine {
       'PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;',
     );
     const row = this.db.prepare('PRAGMA user_version').get() as { user_version: number };
-    if (row.user_version > 9) {
+    if (row.user_version > 10) {
       this.db.close();
       throw new AppError(
         'DATABASE_VERSION',
@@ -112,6 +124,13 @@ export class StorageEngine {
       CREATE TABLE runtime_profiles (id TEXT PRIMARY KEY, document TEXT NOT NULL);
       CREATE TABLE runtime_settings (id INTEGER PRIMARY KEY CHECK (id=1), document TEXT NOT NULL);
       PRAGMA user_version=9;
+      COMMIT;
+    `);
+    if (row.user_version < 10)
+      this.db.exec(`
+      BEGIN IMMEDIATE;
+      CREATE TABLE skill_registrations (id TEXT PRIMARY KEY, document TEXT NOT NULL);
+      PRAGMA user_version=10;
       COMMIT;
     `);
   }
@@ -180,6 +199,74 @@ export class StorageEngine {
         document: string;
       }[]
     ).map((r) => JSON.parse(r.document) as LocalProfile);
+  }
+  registeredSkills(): RegisteredSkill[] {
+    return (
+      this.db.prepare('SELECT document FROM skill_registrations ORDER BY rowid').all() as {
+        document: string;
+      }[]
+    ).map((row) => JSON.parse(row.document) as RegisteredSkill);
+  }
+  private assertSkillIdle(id: string): void {
+    const selectedByRunningSession = this.snapshot().sessions.some(
+      (session) =>
+        session.run?.status === 'running' && session.skills?.some((skill) => skill.id === id),
+    );
+    if (selectedByRunningSession)
+      throw new AppError('BUSY', '사용 중인 스킬은 응답이 끝나거나 중지된 뒤 변경하세요.', 409);
+  }
+  saveRegisteredSkill(skill: RegisteredSkill, expectedRevision?: string): RegisteredSkill {
+    return this.transaction(() => {
+      const registrations = this.registeredSkills();
+      const pathKey = (path: string) => (process.platform === 'win32' ? path.toLowerCase() : path);
+      const sameId = registrations.find((entry) => entry.id === skill.id);
+      const samePath = registrations.find(
+        (entry) => pathKey(entry.source.rootPath) === pathKey(skill.source.rootPath),
+      );
+      const previous = sameId ?? samePath;
+      if (
+        (sameId && samePath && sameId.id !== samePath.id) ||
+        (previous &&
+          (pathKey(previous.source.rootPath) !== pathKey(skill.source.rootPath) ||
+            previous.source.rootIdentity !== skill.source.rootIdentity))
+      )
+        throw new AppError(
+          'SKILL_SOURCE',
+          '등록한 스킬의 폴더가 교체되었거나 경로가 다릅니다. 기존 등록을 제거한 뒤 다시 가져오세요.',
+          409,
+        );
+      if (
+        (previous && previous.revision !== expectedRevision) ||
+        (!previous && expectedRevision !== undefined)
+      )
+        throw new AppError(
+          'VERSION_CONFLICT',
+          '스킬 등록 정보가 변경되었습니다. 목록을 다시 불러오세요.',
+          409,
+        );
+      if (previous) this.assertSkillIdle(previous.id);
+      const value = { ...skill, id: previous?.id ?? skill.id };
+      this.db
+        .prepare(
+          'INSERT INTO skill_registrations(id,document) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET document=excluded.document',
+        )
+        .run(value.id, JSON.stringify(value));
+      return value;
+    });
+  }
+  removeRegisteredSkill(id: string, expectedRevision: string): void {
+    this.transaction(() => {
+      const skill = this.registeredSkills().find((entry) => entry.id === id);
+      if (!skill) throw new AppError('SKILL_NOT_FOUND', '등록된 스킬을 찾을 수 없습니다.', 404);
+      if (skill.revision !== expectedRevision)
+        throw new AppError(
+          'VERSION_CONFLICT',
+          '스킬 등록 정보가 변경되었습니다. 목록을 다시 불러오세요.',
+          409,
+        );
+      this.assertSkillIdle(id);
+      this.db.prepare('DELETE FROM skill_registrations WHERE id=?').run(id);
+    });
   }
   saveLocalProfile(profile: LocalProfile, expectedVersion?: number): LocalProfile {
     return this.transaction(() => {
@@ -388,6 +475,9 @@ export class StorageEngine {
           updatedAt: now,
           config: command.config,
           mode: command.mode,
+          skills: [],
+          skillCloudConsent: false,
+          hasSkillHistory: false,
           execution: defaultExecutionConfig(),
           projectId: command.projectId,
           plan: defaultPlan(),
@@ -426,7 +516,8 @@ export class StorageEngine {
         } else if (
           command.type === 'set_mode' ||
           command.type === 'adopt_plan' ||
-          command.type === 'configure_execution'
+          command.type === 'configure_execution' ||
+          command.type === 'configure_skills'
         ) {
           if (
             session.run?.status === 'running' ||
@@ -436,7 +527,25 @@ export class StorageEngine {
           )
             throw new AppError('BUSY', '실행이 끝난 뒤 모드나 계획을 변경하세요.', 409);
           if (command.type === 'set_mode') session.mode = command.mode;
-          else if (command.type === 'configure_execution') {
+          else if (command.type === 'configure_skills') {
+            const skills = skillSelectionsSchema.parse(command.skills);
+            const registrations = this.registeredSkills();
+            for (const selection of skills) {
+              const registered = registrations.find((skill) => skill.id === selection.id);
+              if (!registered)
+                throw new AppError('SKILL_NOT_FOUND', '등록된 스킬을 찾을 수 없습니다.', 404);
+              if (registered.revision !== selection.revision)
+                throw new AppError(
+                  'SKILL_CHANGED',
+                  '선택한 스킬이 변경되었습니다. 다시 선택하세요.',
+                  409,
+                );
+              if (!registered.invocation.model)
+                throw new AppError('SKILL_INVOCATION', '모델 호출이 허용되지 않은 스킬입니다.');
+            }
+            session.skills = skills;
+            session.skillCloudConsent = command.skillCloudConsent;
+          } else if (command.type === 'configure_execution') {
             if (!session.projectId && command.execution.backend !== 'disabled')
               throw new AppError('PROJECT_REQUIRED', '명령 실행에는 프로젝트가 필요합니다.');
             session.execution = command.execution;
@@ -479,6 +588,7 @@ export class StorageEngine {
                 '입력을 구성한 대화 버전이 현재 상태와 다릅니다.',
                 409,
               );
+            if (context?.skillCatalog?.includedIds.length) session.hasSkillHistory = true;
             if (session.messages.length >= 120)
               throw new AppError(
                 'CONTEXT_LIMIT',
@@ -626,6 +736,45 @@ export class StorageEngine {
         throw new AppError('EXECUTION_NOT_FOUND', '명령 실행 기록을 찾을 수 없습니다.', 409);
       activity.execution = execution;
       this.persist(session); // Also accepts late cancellation results; never loses a container owner.
+      return session;
+    });
+  }
+  recordSkillRead(
+    sessionId: string,
+    activityId: string,
+    provenance: NonNullable<Activity['skillRead']>,
+  ): Session {
+    return this.transaction(() => {
+      const session = this.session(sessionId);
+      const activity = session.messages
+        .flatMap((message) => message.activities ?? [])
+        .find((entry) => entry.id === activityId);
+      if (
+        !activity ||
+        activity.kind !== 'tool' ||
+        !['read_skill', 'read_skill_resource'].includes(activity.label)
+      )
+        throw new AppError('SKILL_READ_NOT_FOUND', '스킬 읽기 활동을 찾을 수 없습니다.', 409);
+      if (activity.skillRead) {
+        if (
+          Object.keys(provenance).some(
+            (key) =>
+              activity.skillRead![key as keyof typeof provenance] !==
+              provenance[key as keyof typeof provenance],
+          )
+        )
+          throw new AppError(
+            'SKILL_READ_CONFLICT',
+            '이미 기록된 스킬 출처를 변경할 수 없습니다.',
+            409,
+          );
+        return session;
+      }
+      activity.skillRead = provenance;
+      session.hasSkillHistory = true;
+      // A read may finish just before cancel is committed. Keep its audit without
+      // changing the cancelled message, continuation, content or run status.
+      this.persist(session);
       return session;
     });
   }

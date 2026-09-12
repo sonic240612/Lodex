@@ -161,6 +161,7 @@ fn route_allowed(method: &str, path: &str) -> bool {
     match (method, path) {
         ("GET", "/v1/state")
         | ("GET", "/v1/runtime")
+        | ("GET", "/v1/skills")
         | ("POST", "/v1/commands")
         | ("POST", "/v1/projects")
         | ("POST", "/v1/sessions/delete")
@@ -168,6 +169,8 @@ fn route_allowed(method: &str, path: &str) -> bool {
         | ("POST", "/v1/runtime/profiles")
         | ("POST", "/v1/runtime/settings")
         | ("POST", "/v1/runtime/action")
+        | ("POST", "/v1/skills/register")
+        | ("POST", "/v1/skills/remove")
         | ("POST", "/v1/edits") => true,
         ("GET", value)
             if value.starts_with("/v1/models?") || value.starts_with("/v1/execution/check?") =>

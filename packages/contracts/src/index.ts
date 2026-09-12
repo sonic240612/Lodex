@@ -176,6 +176,18 @@ const envelope = {
   policyVersion: z.literal(1),
 };
 const target = { sessionId: idSchema, expectedVersion: z.number().int().nonnegative() };
+export const skillSelectionSchema = z.strictObject({
+  id: idSchema,
+  revision: z.string().regex(/^[a-f0-9]{64}$/),
+});
+export const skillSelectionsSchema = z
+  .array(skillSelectionSchema)
+  .max(16)
+  .refine(
+    (skills) => new Set(skills.map((skill) => skill.id)).size === skills.length,
+    '중복된 스킬 ID입니다.',
+  );
+export type SkillSelection = z.infer<typeof skillSelectionSchema>;
 export const deleteSessionsSchema = z
   .strictObject({
     ...envelope,
@@ -232,6 +244,13 @@ export const commandSchema = z.discriminatedUnion('type', [
     ...target,
     type: z.literal('configure_execution'),
     execution: executionConfigSchema,
+  }),
+  z.strictObject({
+    ...envelope,
+    ...target,
+    type: z.literal('configure_skills'),
+    skills: skillSelectionsSchema,
+    skillCloudConsent: z.boolean(),
   }),
   z.strictObject({ ...envelope, ...target, type: z.literal('adopt_plan'), activityId: idSchema }),
   z.strictObject({
@@ -330,6 +349,16 @@ export const editActionSchema = z.strictObject({
 });
 export type EditAction = z.infer<typeof editActionSchema>;
 export interface Activity {
+  skillRead?: {
+    skillId: string;
+    revision: string;
+    sourceName: string;
+    path: string;
+    sha256: string;
+    bytes: number;
+    entrySha256: string;
+    readAt: string;
+  };
   execution?: CommandExecution;
   planProposal?: PlanProposal;
   edit?: EditProposal;
@@ -358,6 +387,7 @@ export interface Run {
   context?: ContextManifest;
 }
 export interface ContextManifest {
+  skillCatalog?: { includedIds: string[]; omittedIds: string[]; serializedBytes: number };
   compilerVersion: 'context-v1';
   sourceSessionVersion: number;
   requestSha256: string;
@@ -374,6 +404,9 @@ export interface ContextManifest {
   eco: boolean;
 }
 export interface Session {
+  hasSkillHistory?: boolean;
+  skills?: SkillSelection[];
+  skillCloudConsent?: boolean;
   autopilot?: AutopilotState;
   execution?: ExecutionConfig;
   mode?: AgentMode;

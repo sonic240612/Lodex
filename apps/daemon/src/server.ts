@@ -41,7 +41,25 @@ import { runAgent } from './agent-runner';
 import { planningTool } from './planning';
 import { verificationTools } from './autopilot';
 import { RuntimeManager, type RuntimeLease } from '@lodex/local-runtime';
+import { inspectSkillDirectory, skillCatalog, type RegisteredSkill } from '@lodex/skills';
+import { skillTools } from './skills';
+import { z } from 'zod';
 declare const __dirname: string;
+const skillRegistrationInput = z
+  .strictObject({
+    path: z.string().min(1).max(4096),
+    dialect: z.enum(['standard', 'codex', 'claude', 'pi']).default('standard'),
+    id: z.uuid().optional(),
+    expectedRevision: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
+  })
+  .refine((value) => !!value.id === !!value.expectedRevision);
+const skillRemovalInput = z.strictObject({
+  id: z.uuid(),
+  expectedRevision: z.string().regex(/^[a-f0-9]{64}$/),
+});
 
 interface ServerOptions {
   token: string;
@@ -104,6 +122,7 @@ export async function startServer(options: ServerOptions) {
     session: Session,
     controller: AbortController,
     context: CompiledContext,
+    skills: RegisteredSkill[],
   ): Promise<void> {
     let lease: RuntimeLease | undefined;
     const autopilot = session.autopilot;
@@ -154,6 +173,7 @@ export async function startServer(options: ServerOptions) {
         provider,
         controller,
         context,
+        skills,
         ...(project ? { project } : {}),
         ...(options.commandExecutor ? { commandExecutor: options.commandExecutor } : {}),
       });
@@ -184,6 +204,7 @@ export async function startServer(options: ServerOptions) {
     const receipt = await store.receipt(command);
     if (receipt) return receipt;
     let context: CompiledContext | undefined;
+    let selectedSkills: RegisteredSkill[] = [];
     if (
       'sessionId' in command &&
       command.type !== 'create_session' &&
@@ -195,6 +216,37 @@ export async function startServer(options: ServerOptions) {
     }
     if (command.type === 'send_message' || command.type === 'start_autopilot') {
       const session = await store.session(command.sessionId);
+      const registrations = await store.registeredSkills();
+      selectedSkills = (session.skills ?? []).map((selection) => {
+        const skill = registrations.find((entry) => entry.id === selection.id);
+        if (!skill || skill.revision !== selection.revision)
+          throw new AppError(
+            'SKILL_CHANGED',
+            '선택한 스킬이 변경되거나 삭제되었습니다. 스킬 선택을 다시 확인하세요.',
+            409,
+          );
+        if (!skill.invocation.model)
+          throw new AppError(
+            'SKILL_INVOCATION',
+            '자동 호출을 허용하지 않는 스킬은 현재 대화 도구로 사용할 수 없습니다.',
+            403,
+          );
+        return skill;
+      });
+      if (
+        session.config.provider === 'openrouter' &&
+        !session.skillCloudConsent &&
+        (selectedSkills.length ||
+          session.hasSkillHistory ||
+          session.messages.some((message) =>
+            message.activities?.some((activity) => activity.skillRead),
+          ))
+      )
+        throw new AppError(
+          'SKILL_CLOUD_CONSENT',
+          '스킬 메타데이터와 읽은 내용을 OpenRouter로 보내려면 이 대화의 스킬 전송 동의가 필요합니다. 이전에 읽은 내용도 대화 기록에 남아 있습니다.',
+          403,
+        );
       if (session.config.managedModelId) {
         const profile = (await store.localProfiles()).find(
           (p) => p.id === session.config.managedModelId,
@@ -269,6 +321,7 @@ export async function startServer(options: ServerOptions) {
             )
           : [];
       tools.push(planningTool);
+      if (selectedSkills.length) tools.push(...skillTools);
       if (
         session.mode !== 'plan' &&
         session.execution?.backend === 'docker' &&
@@ -281,7 +334,14 @@ export async function startServer(options: ServerOptions) {
         tools.push(...verificationTools);
         content = autopilotPrompt(autopilot);
       } else content = command.content;
-      context = compileContext(session, content, tools);
+      context = compileContext(
+        session,
+        content,
+        tools,
+        selectedSkills.length
+          ? skillCatalog(selectedSkills, { maxBytes: session.config.eco ? 3000 : 6000 })
+          : undefined,
+      );
     }
     const result = await store.apply(command, context?.manifest);
     if (
@@ -289,7 +349,7 @@ export async function startServer(options: ServerOptions) {
       (command.type === 'send_message' || command.type === 'start_autopilot')
     ) {
       const abort = new AbortController();
-      const task = execute(result.session, abort, context!);
+      const task = execute(result.session, abort, context!, selectedSkills);
       active.set(result.session.run!.id, { abort, task });
     }
     if (command.type === 'cancel_run') active.get(command.runId)?.abort.abort();
@@ -316,6 +376,48 @@ export async function startServer(options: ServerOptions) {
           openrouterKeySource,
           envFilePath: options.envFilePath,
         });
+      } else if (request.method === 'GET' && url.pathname === '/v1/skills') {
+        json(response, 200, { skills: await store.registeredSkills() });
+      } else if (request.method === 'POST' && url.pathname === '/v1/skills/register') {
+        const parsed = skillRegistrationInput.safeParse(await readJson(request));
+        if (!parsed.success)
+          throw new AppError('SKILL_INPUT', '스킬 폴더와 등록 정보를 확인하세요.');
+        const input = parsed.data;
+        json(response, 200, {
+          skill: await serial(async () => {
+            if (input.id) {
+              const previous = (await store.registeredSkills()).find(
+                (skill) => skill.id === input.id,
+              );
+              if (!previous || previous.revision !== input.expectedRevision)
+                throw new AppError(
+                  'VERSION_CONFLICT',
+                  '스킬 정보가 변경되었습니다. 목록을 다시 불러오세요.',
+                  409,
+                );
+            }
+            const skill = await inspectSkillDirectory(input.path, {
+              dialect: input.dialect,
+              signal: AbortSignal.timeout(15000),
+            });
+            return store.saveRegisteredSkill(
+              { ...skill, ...(input.id ? { id: input.id } : {}) },
+              input.expectedRevision,
+            );
+          }),
+        });
+      } else if (request.method === 'POST' && url.pathname === '/v1/skills/remove') {
+        const parsed = skillRemovalInput.safeParse(await readJson(request));
+        if (!parsed.success)
+          throw new AppError('SKILL_INPUT', '삭제할 스킬의 등록 정보를 확인하세요.');
+        json(
+          response,
+          200,
+          await serial(async () => {
+            await store.removeRegisteredSkill(parsed.data.id, parsed.data.expectedRevision);
+            return { skills: await store.registeredSkills() };
+          }),
+        );
       } else if (request.method === 'GET' && url.pathname === '/v1/runtime') {
         json(response, 200, await runtime.snapshot());
       } else if (request.method === 'POST' && url.pathname === '/v1/runtime/profiles') {

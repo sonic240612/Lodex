@@ -1,4 +1,5 @@
 import { Worker } from 'node:worker_threads';
+import type { RegisteredSkill } from '@lodex/skills';
 import {
   AppError,
   type Command,
@@ -16,6 +17,7 @@ import {
   type CommandExecution,
   type RuntimeSettings,
   type LocalProfile,
+  type Activity,
 } from '@lodex/contracts';
 import type { RunUpdate } from './engine';
 export type { RunUpdate } from './engine';
@@ -81,6 +83,15 @@ export class Store {
   localProfiles(): Promise<LocalProfile[]> {
     return this.call('localProfiles');
   }
+  registeredSkills(): Promise<RegisteredSkill[]> {
+    return this.call('registeredSkills');
+  }
+  saveRegisteredSkill(skill: RegisteredSkill, expectedRevision?: string): Promise<RegisteredSkill> {
+    return this.call('saveRegisteredSkill', skill, expectedRevision);
+  }
+  removeRegisteredSkill(id: string, expectedRevision: string): Promise<void> {
+    return this.call('removeRegisteredSkill', id, expectedRevision);
+  }
   saveLocalProfile(profile: LocalProfile, expectedVersion?: number): Promise<LocalProfile> {
     return this.call('saveLocalProfile', profile, expectedVersion);
   }
@@ -117,6 +128,13 @@ export class Store {
     execution: CommandExecution,
   ): Promise<Session> {
     return this.call('recordExecution', sessionId, activityId, execution);
+  }
+  recordSkillRead(
+    sessionId: string,
+    activityId: string,
+    provenance: NonNullable<Activity['skillRead']>,
+  ): Promise<Session> {
+    return this.call('recordSkillRead', sessionId, activityId, provenance);
   }
   recordCreatedFile(
     sessionId: string,

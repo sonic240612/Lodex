@@ -16,6 +16,8 @@ import { runProjectTool, executeCommand } from '@lodex/tools';
 import type { Store } from '@lodex/storage';
 import { proposePlan } from './planning';
 import { verifyAutopilot } from './autopilot';
+import { runSkillTool } from './skills';
+import type { RegisteredSkill } from '@lodex/skills';
 
 export const MAX_MODEL_CALLS = 6;
 const MAX_TOOL_CALLS = 12;
@@ -99,6 +101,7 @@ export async function runAgent(options: {
   controller: AbortController;
   project?: Project;
   commandExecutor?: typeof executeCommand;
+  skills?: RegisteredSkill[];
 }) {
   const { store, session, provider, context, controller, project } = options;
   const runId = session.run!.id;
@@ -352,6 +355,18 @@ export async function runAgent(options: {
               message: error instanceof AppError ? error.message : '검증 인자가 올바르지 않습니다.',
             });
           }
+        } else if (call.name === 'read_skill' || call.name === 'read_skill_resource') {
+          result = await runSkillTool({
+            skills: options.skills ?? [],
+            name: call.name,
+            argumentsJson: call.arguments,
+            signal,
+            maxBytes: session.config.eco ? 12288 : 24576,
+            record: async (provenance) => {
+              card.skillRead = provenance;
+              await store.recordSkillRead(session.id, card.id, provenance);
+            },
+          });
         } else if (call.name === 'propose_plan') {
           try {
             card.planProposal = proposePlan(call.arguments, session.plan);

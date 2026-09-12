@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { access, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -135,7 +135,9 @@ async function checkSupervisor() {
   });
   child.stderr.resume();
   let engineStopped = false;
-  child.on('message', (message) => { if (message?.type === 'engine_stopped') engineStopped = true; });
+  child.on('message', (message) => {
+    if (message?.type === 'engine_stopped') engineStopped = true;
+  });
   const lines = createInterface({ input: child.stdout });
   let timeout;
   const ready = new Promise((resolve, reject) => {
@@ -189,12 +191,31 @@ try {
   });
   assert.equal(registered.status, 200);
   const { project } = await registered.json();
+  const skillPath = join(dataDir, 'bundled-fixture');
+  await mkdir(skillPath);
+  await writeFile(
+    join(skillPath, 'SKILL.md'),
+    '---\nname: bundled-fixture\ndescription: Bundled skill integration fixture.\n---\nRead the selected project carefully.\n',
+  );
+  const importedSkill = await app.request('/v1/skills/register', {
+    method: 'POST',
+    body: JSON.stringify({ path: skillPath, dialect: 'standard' }),
+  });
+  assert.equal(importedSkill.status, 200);
+  const { skill } = await importedSkill.json();
   let session = await app.command({
     type: 'create_session',
     sessionId: randomUUID(),
     title: '패키지 검증',
     config: { provider: 'demo', model: 'demo' },
     projectId: project.id,
+  });
+  session = await app.command({
+    type: 'configure_skills',
+    sessionId: session.id,
+    expectedVersion: session.version,
+    skills: [{ id: skill.id, revision: skill.revision }],
+    skillCloudConsent: false,
   });
   session = await app.command({
     type: 'save_plan',
@@ -224,6 +245,8 @@ try {
   assert.equal(session.projectId, project.id);
   assert.equal(session.plan.goal, '번들 런타임 복구 검증');
   assert.equal(session.plan.tasks[0].done, true);
+  assert.deepEqual(session.skills, [{ id: skill.id, revision: skill.revision }]);
+  assert.equal((await app.request('/v1/skills').then((r) => r.json())).skills[0].id, skill.id);
   session = await app.command({
     type: 'send_message',
     sessionId: session.id,
@@ -254,7 +277,7 @@ try {
   assert.equal((await app.state()).projects[0].id, project.id);
   await stop(app);
   console.log(
-    'PASS: dotenv without key exposure / bundled Node and engine supervisor / runtime settings / Korean-space paths / auth / projects / chat / cancel / plan persistence / pipe shutdown / crash recovery / durable deletion.',
+    'PASS: dotenv without key exposure / bundled Node and engine supervisor / runtime settings / skill registration and selection / Korean-space paths / auth / projects / chat / cancel / plan persistence / pipe shutdown / crash recovery / durable deletion.',
   );
 } finally {
   for (const child of children) {

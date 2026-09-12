@@ -9,6 +9,8 @@
     "@lodex/providers": "0.1.0",
     "@lodex/context": "0.1.0",
     "@lodex/tools": "0.1.0",
-    "@lodex/local-runtime": "0.1.0"
+    "@lodex/local-runtime": "0.1.0",
+    "@lodex/skills": "0.1.0",
+    "zod": "4.6.2"
   }
 }
