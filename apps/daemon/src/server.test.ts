@@ -326,7 +326,7 @@ describe('authenticated daemon integration', () => {
     const app = await setup(undefined, {
       openrouterKey: secret,
       openrouterKeySource: 'env_file',
-      envFilePath: 'C:/fixture/.env',
+      envFilePath: join(tmpdir(), 'lodex-metadata-' + crypto.randomUUID(), '.env'),
     });
     const state = await app.request('/v1/state').then((r) => r.json());
     expect(state.openrouterConfigured).toBe(true);
