@@ -6,7 +6,7 @@ import {
   type InferenceProvider,
   type Project,
   type Session,
-  type ToolCall,
+  type ModelConfig,
   type Usage,
   readyAutopilotTasks,
   activityProposal,
@@ -19,63 +19,14 @@ import { verifyAutopilot } from './autopilot';
 import { runSkillTool } from './skills';
 import type { RunMcp } from './mcp';
 import type { RegisteredSkill } from '@lodex/skills';
+import { parseDelegation, runSubagents } from './subagents';
 
 export const MAX_MODEL_CALLS = 6;
 const MAX_TOOL_CALLS = 12;
 
-export class ToolCallAssembler {
-  private calls = new Map<number, ToolCall>();
-  add(event: { index: number; id?: string; name?: string; arguments?: string }): ToolCall {
-    if (!Number.isInteger(event.index) || event.index < 0 || event.index > 3)
-      throw new AppError('TOOL_FORMAT', '도구 호출 번호가 잘못되었습니다.');
-    const call = this.calls.get(event.index) ?? { id: '', name: '', arguments: '' };
-    if (event.id && event.id !== call.id) call.id += event.id;
-    if (event.name) call.name += event.name;
-    if (event.arguments) call.arguments += event.arguments;
-    if (call.id.length > 200 || call.name.length > 100 || Buffer.byteLength(call.arguments) > 16384)
-      throw new AppError('TOOL_LIMIT', '도구 요청이 너무 큽니다.');
-    this.calls.set(event.index, call);
-    return call;
-  }
-  finish(): ToolCall[] {
-    const calls = [...this.calls.entries()].sort(([a], [b]) => a - b);
-    if (
-      calls.some(([index, call], position) => index !== position || !call.id || !call.name) ||
-      new Set(calls.map(([, call]) => call.id)).size !== calls.length
-    )
-      throw new AppError('TOOL_FORMAT', '완성되지 않았거나 중복된 도구 호출입니다.');
-    return calls.map(([, call]) => call);
-  }
-}
+import { ToolCallAssembler, mergeDetails } from './tool-stream';
+export { ToolCallAssembler } from './tool-stream';
 
-function mergeDetails(target: Record<string, unknown>[], value: unknown) {
-  if (!Array.isArray(value))
-    throw new AppError('REASONING_FORMAT', '지원하지 않는 reasoning 상태입니다.');
-  for (const raw of value) {
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw))
-      throw new AppError('REASONING_FORMAT', '잘못된 reasoning 상태입니다.');
-    const item = raw as Record<string, unknown>;
-    const index = item.index;
-    if (!Number.isInteger(index) || (index as number) < 0 || (index as number) > 127)
-      throw new AppError('REASONING_FORMAT', 'reasoning 상태에 유효한 index가 필요합니다.');
-    let old = target.find((v) => v.index === index);
-    if (!old) {
-      old = {};
-      target.push(old);
-    }
-    for (const [key, field] of Object.entries(item)) {
-      if (['text', 'summary', 'data'].includes(key) && typeof field === 'string')
-        old[key] = String(old[key] ?? '') + field;
-      else {
-        if (old[key] !== undefined && JSON.stringify(old[key]) !== JSON.stringify(field))
-          throw new AppError('REASONING_FORMAT', 'reasoning 상태의 식별자가 변경되었습니다.');
-        old[key] = field;
-      }
-    }
-  }
-  if (Buffer.byteLength(JSON.stringify(target)) > 131072)
-    throw new AppError('REASONING_LIMIT', 'reasoning 상태 저장 한도를 초과했습니다.');
-}
 function aggregate(rounds: Partial<Usage>[], cloud: boolean): Partial<Usage> {
   const sum = (key: 'inputTokens' | 'outputTokens' | 'costUsd') =>
     rounds.every((r) => typeof r[key] === 'number')
@@ -104,13 +55,14 @@ export async function runAgent(options: {
   commandExecutor?: typeof executeCommand;
   skills?: RegisteredSkill[];
   mcp?: RunMcp;
+  subagents?: { config: ModelConfig; provider: InferenceProvider };
 }) {
   const { store, session, provider, context, controller, project } = options;
   const runId = session.run!.id;
   const autopilot =
     session.autopilot?.runId === runId ? structuredClone(session.autopilot) : undefined;
-  const maxModels = autopilot?.limits.modelCalls ?? MAX_MODEL_CALLS;
-  const maxTools = autopilot?.limits.toolCalls ?? MAX_TOOL_CALLS;
+  const maxModels = autopilot?.limits.modelCalls ?? (options.subagents ? 12 : MAX_MODEL_CALLS);
+  const maxTools = autopilot?.limits.toolCalls ?? (options.subagents ? 24 : MAX_TOOL_CALLS);
   const signal = AbortSignal.any([
     controller.signal,
     AbortSignal.timeout(
@@ -128,11 +80,32 @@ export async function runAgent(options: {
   const usedIds = new Set<string>();
   let content = '',
     lastSave = 0,
-    toolCount = 0;
+    toolCount = 0,
+    modelCount = 0;
   let emptyRounds = 0,
     repeatedResults = 0,
     previousResult = '';
-  const usage = () => aggregate(rounds, session.config.provider === 'openrouter');
+  const usage = () => ({
+    ...aggregate(
+      [
+        ...rounds,
+        ...activities.flatMap((activity) =>
+          (activity.subagents ?? [])
+            .filter((child) => child.modelCalls > 0)
+            .map((child) => child.usage ?? {}),
+        ),
+      ],
+      session.config.provider === 'openrouter' ||
+        activities.some((activity) =>
+          activity.subagents?.some(
+            (child) => child.modelCalls > 0 && child.provider === 'openrouter',
+          ),
+        ),
+    ),
+    decodeTps: rounds.at(-1)?.decodeTps ?? null,
+    prefillTps: rounds.at(-1)?.prefillTps ?? null,
+    ttftMs: rounds[0]?.ttftMs ?? null,
+  });
   const save = async (terminal?: 'completed' | 'failed' | 'cancelled', error?: string) => {
     if (content.length > 262144 || Buffer.byteLength(JSON.stringify(activities)) > 262144)
       throw new AppError('OUTPUT_LIMIT', '응답 또는 활동 기록 한도를 초과했습니다.');
@@ -149,6 +122,33 @@ export async function runAgent(options: {
     });
     lastSave = performance.now();
   };
+  const reserveModelCall = async (config: ModelConfig) => {
+    signal.throwIfAborted();
+    if (modelCount >= maxModels)
+      throw new AppError('STEP_LIMIT', '부모·서브에이전트의 공유 모델 호출 예산에 도달했습니다.');
+    if (
+      autopilot &&
+      autopilot.reservedOutputTokens + config.maxTokens > autopilot.limits.outputTokens
+    )
+      throw new AppError(
+        'OUTPUT_BUDGET',
+        '부모·서브에이전트의 공유 출력 토큰 예산에 도달했습니다.',
+      );
+    modelCount++;
+    if (autopilot) {
+      autopilot.modelCalls++;
+      autopilot.reservedOutputTokens += config.maxTokens;
+    }
+    await save();
+  };
+  const reserveToolCall = async () => {
+    signal.throwIfAborted();
+    if (toolCount >= maxTools)
+      throw new AppError('STEP_LIMIT', '부모·서브에이전트의 공유 도구 호출 예산에 도달했습니다.');
+    toolCount++;
+    if (autopilot) autopilot.toolCalls++;
+    await save();
+  };
   try {
     for (let step = 0; step < maxModels; step++) {
       signal.throwIfAborted();
@@ -161,18 +161,7 @@ export async function runAgent(options: {
         ...measureRequest(request),
         messageCount: request.messages.length,
       };
-      if (autopilot) {
-        if (
-          autopilot.reservedOutputTokens + session.config.maxTokens >
-          autopilot.limits.outputTokens
-        )
-          throw new AppError(
-            'OUTPUT_BUDGET',
-            '출력 토큰 예약 예산에 도달했습니다. 검증 완료로 표시하지 않고 멈췄습니다.',
-          );
-        autopilot.modelCalls++;
-        autopilot.reservedOutputTokens += session.config.maxTokens;
-      }
+      await reserveModelCall(session.config);
       await store.updateRun({
         sessionId: session.id,
         runId,
@@ -291,7 +280,7 @@ export async function runAgent(options: {
           'TOOLS_UNAVAILABLE',
           '프로젝트 도구가 허용되지 않아 실행하지 않았습니다. 프로젝트 선택과 전송 설정을 확인하세요.',
         );
-      if ((!autopilot && step === maxModels - 1) || toolCount + calls.length > maxTools)
+      if ((!autopilot && modelCount === maxModels) || toolCount + calls.length > maxTools)
         throw new AppError(
           'STEP_LIMIT',
           `실행 한도(모델 ${maxModels}회·도구 ${maxTools}회)에 도달했습니다. 진행 내용을 확인한 뒤 다시 실행하세요.`,
@@ -323,12 +312,23 @@ export async function runAgent(options: {
             });
           }
         };
-        if (autopilot) {
-          autopilot.toolCalls++;
-          await save();
-        }
+        await reserveToolCall();
         let result: string;
-        if (call.name === 'verify_task' || call.name === 'verify_goal') {
+        if (call.name === 'delegate_tasks') {
+          if (!options.subagents)
+            throw new AppError('SUBAGENTS_DISABLED', '서브에이전트가 활성화되지 않았습니다.');
+          result = await runSubagents(parseDelegation(call.arguments), {
+            ...options.subagents,
+            ...(project ? { project } : {}),
+            signal,
+            reserveModelCall: () => reserveModelCall(options.subagents!.config),
+            reserveToolCall,
+            onUpdate: async (records) => {
+              card.subagents = records;
+              await save();
+            },
+          });
+        } else if (call.name === 'verify_task' || call.name === 'verify_goal') {
           if (!autopilot || !project || !session.execution)
             throw new AppError(
               'AUTOPILOT_REQUIRED',
@@ -478,7 +478,6 @@ export async function runAgent(options: {
           }
         }
         continuation.push({ role: 'tool', content: contextResult, toolCallId: call.id });
-        toolCount++;
         await save();
         if (autopilot) {
           emptyRounds = 0;

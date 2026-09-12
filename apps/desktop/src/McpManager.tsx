@@ -1,8 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
 import type { McpSelection, Session } from '@lodex/contracts';
 import type { McpImport, McpRegistration } from '@lodex/mcp';
-import { importMcp, nativeDesktop, registeredMcp, registerMcp, removeMcp } from './bridge';
+import {
+  importMcp,
+  nativeDesktop,
+  previewMcpContent,
+  registeredMcp,
+  registerMcp,
+  removeMcp,
+  type McpContentPreview,
+} from './bridge';
 import { Icon } from './icons';
+import { McpOAuthPanel } from './McpOAuthPanel';
 
 export interface McpSelectionSave {
   mcp: McpSelection[];
@@ -22,18 +31,140 @@ const example = JSON.stringify(
   null,
   2,
 );
+
+function McpContentEntry({
+  name,
+  source,
+  description,
+  parameters,
+  supported,
+  issue,
+  disabled,
+  attachDisabledReason,
+  preview,
+  onPreview,
+  onInvalidate,
+  onAttach,
+}: {
+  name: string;
+  source: string;
+  description: string | undefined;
+  parameters: { name: string; description?: string | undefined; required?: boolean | undefined }[];
+  supported: boolean;
+  issue: string | undefined;
+  disabled: boolean;
+  attachDisabledReason: string | undefined;
+  preview: McpContentPreview | undefined;
+  onPreview: (arguments_: Record<string, string>) => void;
+  onInvalidate: () => void;
+  onAttach: (preview: McpContentPreview) => void;
+}) {
+  const [arguments_, setArguments] = useState<Record<string, string>>({});
+  const [expired, setExpired] = useState(false);
+  const argumentValue = (name: string) =>
+    Object.hasOwn(arguments_, name) ? (arguments_[name] ?? '') : '';
+  useEffect(() => {
+    if (!preview) {
+      setExpired(false);
+      return;
+    }
+    const remaining = Date.parse(preview.expiresAt) - Date.now();
+    setExpired(!Number.isFinite(remaining) || remaining <= 0);
+    if (!Number.isFinite(remaining) || remaining <= 0) return;
+    const timer = setTimeout(() => setExpired(true), remaining);
+    return () => clearTimeout(timer);
+  }, [preview]);
+  const missing = parameters.some(
+    (parameter) => parameter.required && !argumentValue(parameter.name).trim(),
+  );
+  return (
+    <div className="mcp-content-entry">
+      <strong>{name}</strong>
+      <p className="skill-source">{source}</p>
+      {description && <p>{description}</p>}
+      <fieldset disabled={disabled || !supported}>
+        {parameters.map((parameter) => (
+          <label className="field" key={parameter.name}>
+            <span>
+              {parameter.name}
+              {parameter.required ? ' · 필수' : ''}
+            </span>
+            {parameter.description && <small>{parameter.description}</small>}
+            <input
+              type="text"
+              required={parameter.required === true}
+              maxLength={4096}
+              value={argumentValue(parameter.name)}
+              onChange={(event) => {
+                setArguments((current) => ({ ...current, [parameter.name]: event.target.value }));
+                onInvalidate();
+              }}
+            />
+          </label>
+        ))}
+        <button
+          type="button"
+          disabled={missing}
+          onClick={() =>
+            onPreview(
+              Object.fromEntries(
+                Object.entries(arguments_).filter(([, value]) => value.length > 0),
+              ),
+            )
+          }
+        >
+          {preview ? '다시 읽기' : '내용 미리보기'}
+        </button>
+      </fieldset>
+      {issue && <p className="form-error">{issue}</p>}
+      {preview && (
+        <div className="mcp-content-preview" aria-label={`${name} 미리보기`}>
+          <p className="skill-source">
+            {preview.kind === 'resource' ? '리소스' : '프롬프트'} · {preview.entryKey} ·{' '}
+            {preview.bytes.toLocaleString()} bytes
+            <br />
+            읽은 시간 {new Date(preview.readAt).toLocaleString()}
+          </p>
+          <pre tabIndex={0}>{preview.text}</pre>
+          <p>위 내용을 확인한 뒤 첨부하면 다음 요청부터 대화의 참고 자료로 전달됩니다.</p>
+          {attachDisabledReason && <p role="status">{attachDisabledReason}</p>}
+          {expired && (
+            <p className="form-error">미리보기가 만료되었습니다. 다시 읽은 뒤 첨부하세요.</p>
+          )}
+          <button
+            className="primary-button"
+            type="button"
+            disabled={disabled || !!attachDisabledReason || expired}
+            onClick={() => onAttach(preview)}
+          >
+            확인한 내용 첨부
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function McpManager({
   session,
   provider,
   connected,
   onClose,
   onSave,
+  onAttach,
+  onRemoveAttachment,
 }: {
   session: Session | undefined;
   provider: string;
   connected: boolean;
   onClose: () => void;
   onSave: (value: McpSelectionSave) => Promise<void>;
+  onAttach: (
+    preview: McpContentPreview,
+    cloudConsent: boolean,
+    expectedVersion: number | undefined,
+  ) => Promise<void>;
+  onRemoveAttachment: (id: string, expectedVersion: number | undefined) => Promise<void>;
 }) {
   const dialog = useRef<HTMLDialogElement>(null),
     mounted = useRef(false),
@@ -46,6 +177,7 @@ export function McpManager({
   const [source, setSource] = useState(''),
     [candidates, setCandidates] = useState<McpImport[]>([]);
   const [previous, setPrevious] = useState<McpRegistration>();
+  const [preview, setPreview] = useState<McpContentPreview>();
   const [approved, setApproved] = useState(false),
     [busy, setBusy] = useState(false),
     [error, setError] = useState(''),
@@ -53,6 +185,13 @@ export function McpManager({
   const unavailable = !nativeDesktop || !connected || !loaded;
   const running = session?.run?.status === 'running';
   const conflict = session?.version !== baseVersion;
+  const attachments = session?.mcpAttachments ?? [];
+  const attachDisabledReason =
+    attachments.length >= 8
+      ? '첨부는 최대 8개입니다. 기존 첨부를 제거한 뒤 추가하세요.'
+      : provider === 'openrouter' && !consent
+        ? '위에서 OpenRouter 전송에 동의한 뒤 첨부할 수 있습니다.'
+        : undefined;
   const stale = selected.some((selection) => {
     const server = servers.find((server) => server.id === selection.serverId);
     const tool = server?.tools.find((tool) => tool.name === selection.toolName);
@@ -93,6 +232,15 @@ export function McpManager({
         if (mounted.current) {
           setServers(next);
           setLoaded(true);
+          setPreview((current) =>
+            current &&
+            next.some(
+              (server) =>
+                server.id === current.serverId && server.revision === current.serverRevision,
+            )
+              ? current
+              : undefined,
+          );
         }
       }
     } catch (failure) {
@@ -108,6 +256,35 @@ export function McpManager({
     setCandidates([]);
     setApproved(false);
     setError('');
+  }
+  function readContent(
+    server: McpRegistration,
+    kind: 'resource' | 'prompt',
+    entryKey: string,
+    entryRevision: string,
+    arguments_: Record<string, string>,
+  ) {
+    void operation(async () => {
+      setPreview(undefined);
+      const value = await previewMcpContent({
+        serverId: server.id,
+        serverRevision: server.revision,
+        kind,
+        entryKey,
+        entryRevision,
+        ...(kind === 'prompt' ? { arguments: arguments_ } : {}),
+      });
+      if (mounted.current) setPreview(value);
+    });
+  }
+  function attachContent(value: McpContentPreview) {
+    void operation(async () => {
+      await onAttach(value, provider === 'openrouter' && consent, baseVersion);
+      if (mounted.current) {
+        setPreview(undefined);
+        setStatus('확인한 내용을 대화에 첨부했습니다.');
+      }
+    });
   }
   return (
     <dialog
@@ -133,7 +310,7 @@ export function McpManager({
           </h3>
           <p>
             선택한 도구는 Build 모드에서 모델이 호출할 수 있습니다. Plan 모드와 Autopilot에서는 MCP
-            실행을 지원하지 않습니다.
+            도구를 호출하지 않습니다.
           </p>
           <p>
             서버는 파일이나 외부 서비스에 접근할 수 있습니다. 도구 설명과 권한을 확인하고 필요한
@@ -147,6 +324,7 @@ export function McpManager({
                 setSelected(session?.mcp ?? []);
                 setConsent(session?.mcpCloudConsent ?? false);
                 setBaseVersion(session?.version);
+                setPreview(undefined);
               }}
             >
               저장된 선택 불러오기
@@ -180,8 +358,8 @@ export function McpManager({
                   onChange={(event) => setConsent(event.target.checked)}
                 />
                 <span>
-                  MCP 도구 설명과 결과를 OpenRouter 및 모델 제공자에게 전송하는 데 동의합니다. 이전
-                  대화에 남은 내용도 포함합니다.
+                  MCP 도구 설명·결과와 첨부한 내용을 OpenRouter 및 모델 제공자에게 전송하는 데
+                  동의합니다. 이전 대화에 남은 내용도 포함합니다.
                 </span>
               </label>
             )}
@@ -209,6 +387,50 @@ export function McpManager({
             </button>
           </fieldset>
         </section>
+        <section aria-label="대화에 첨부한 MCP 자료">
+          <h3>첨부한 자료 · {attachments.length}/8</h3>
+          <p>
+            리소스와 프롬프트는 아래에서 직접 미리 보고 첨부할 수 있습니다. Plan과 Build 모두 첨부
+            시점의 내용을 사용하며 서버의 변경 사항을 자동으로 가져오지 않습니다.
+          </p>
+          {!attachments.length && <p>첨부한 자료가 없습니다.</p>}
+          {attachments.map((attachment) => (
+            <article className="skill-card mcp-attachment" key={attachment.id}>
+              <strong>
+                {servers.find((server) => server.id === attachment.serverId)?.config.name ??
+                  '저장된 서버 자료'}
+              </strong>
+              <p className="skill-source">
+                {attachment.kind === 'resource' ? '리소스' : '프롬프트'} · {attachment.entryKey}
+                <br />
+                {attachment.bytes.toLocaleString()} bytes ·{' '}
+                {new Date(attachment.readAt).toLocaleString()}
+              </p>
+              <details>
+                <summary>첨부한 내용 보기</summary>
+                <pre tabIndex={0}>{attachment.text}</pre>
+              </details>
+              <button
+                type="button"
+                disabled={busy || unavailable || running || conflict}
+                onClick={() =>
+                  void operation(async () => {
+                    await onRemoveAttachment(attachment.id, baseVersion);
+                    if (mounted.current)
+                      setStatus(
+                        '첨부 자료를 제거했습니다. 이전 대화에 전송된 내용은 남아 있습니다.',
+                      );
+                  })
+                }
+              >
+                첨부 제거
+              </button>
+            </article>
+          ))}
+          {attachments.length >= 8 && (
+            <p role="status">새 자료를 첨부하려면 기존 첨부를 제거하세요.</p>
+          )}
+        </section>
         <section className="skill-catalog" aria-label="등록한 MCP 서버">
           <div className="edit-actions">
             <h3>등록한 서버</h3>
@@ -228,7 +450,8 @@ export function McpManager({
               </p>
               <small>
                 {server.config.transport} · {server.protocol ?? '버전 미확인'} · 도구{' '}
-                {server.tools.length}개
+                {server.tools.length}개 · 리소스 {server.resources?.length ?? 0}개 · 프롬프트{' '}
+                {server.prompts?.length ?? 0}개
               </small>
               {server.tools.map((tool) => {
                 const selection = selected.find(
@@ -282,6 +505,105 @@ export function McpManager({
                   </div>
                 );
               })}
+              <details className="mcp-content-catalog">
+                <summary>리소스·프롬프트 찾아보기</summary>
+                <p>
+                  미리보기를 누르면 등록한 서버에 연결해 내용을 읽습니다. stdio 프로그램이
+                  실행되거나 HTTP 서버에 요청이 전달될 수 있습니다.
+                </p>
+                {server.resources === undefined && server.prompts === undefined ? (
+                  <p>이 서버를 다시 검사하면 리소스와 프롬프트 목록을 가져옵니다.</p>
+                ) : (
+                  <>
+                    <h4>리소스</h4>
+                    {!server.resources?.length && <p>등록된 리소스가 없습니다.</p>}
+                    {server.resources?.map((resource) => {
+                      const current =
+                        preview?.serverId === server.id &&
+                        preview.kind === 'resource' &&
+                        preview.entryKey === resource.uri
+                          ? preview
+                          : undefined;
+                      return (
+                        <McpContentEntry
+                          key={server.revision + resource.uri}
+                          name={resource.name}
+                          source={
+                            resource.uri +
+                            (resource.definition.mimeType
+                              ? ` · ${resource.definition.mimeType}`
+                              : '')
+                          }
+                          description={resource.definition.description}
+                          parameters={[]}
+                          supported={resource.supported}
+                          issue={resource.issue}
+                          disabled={busy || unavailable || running || conflict}
+                          attachDisabledReason={attachDisabledReason}
+                          preview={current}
+                          onPreview={(arguments_) =>
+                            readContent(
+                              server,
+                              'resource',
+                              resource.uri,
+                              resource.revision,
+                              arguments_,
+                            )
+                          }
+                          onInvalidate={() => {
+                            if (current) setPreview(undefined);
+                          }}
+                          onAttach={attachContent}
+                        />
+                      );
+                    })}
+                    <h4>프롬프트</h4>
+                    {!server.prompts?.length && <p>등록된 프롬프트가 없습니다.</p>}
+                    {server.prompts?.map((prompt) => {
+                      const current =
+                        preview?.serverId === server.id &&
+                        preview.kind === 'prompt' &&
+                        preview.entryKey === prompt.name
+                          ? preview
+                          : undefined;
+                      return (
+                        <McpContentEntry
+                          key={server.revision + prompt.name}
+                          name={prompt.name}
+                          source="서버 프롬프트"
+                          description={prompt.definition.description}
+                          parameters={prompt.definition.arguments ?? []}
+                          supported={prompt.supported}
+                          issue={prompt.issue}
+                          disabled={busy || unavailable || running || conflict}
+                          attachDisabledReason={attachDisabledReason}
+                          preview={current}
+                          onPreview={(arguments_) =>
+                            readContent(server, 'prompt', prompt.name, prompt.revision, arguments_)
+                          }
+                          onInvalidate={() => {
+                            if (current) setPreview(undefined);
+                          }}
+                          onAttach={attachContent}
+                        />
+                      );
+                    })}
+                    {!!server.resourceTemplates?.length && (
+                      <>
+                        <h4>리소스 템플릿</h4>
+                        <p>주소에 매개변수를 넣는 리소스 템플릿은 아직 지원하지 않습니다.</p>
+                        {server.resourceTemplates.map((template) => (
+                          <div className="mcp-content-entry" key={template.uriTemplate}>
+                            <strong>{template.name}</strong>
+                            <p className="skill-source">{template.uriTemplate}</p>
+                            {template.issue && <p>{template.issue}</p>}
+                          </div>
+                        ))}
+                      </>
+                    )}
+                  </>
+                )}
+              </details>
               <div className="edit-actions">
                 <button disabled={busy || unavailable || running} onClick={() => edit(server)}>
                   설정 편집·다시 검사
@@ -292,6 +614,7 @@ export function McpManager({
                     void operation(async () => {
                       await removeMcp(server);
                       if (previous?.id === server.id) edit();
+                      if (preview?.serverId === server.id) setPreview(undefined);
                     }, true)
                   }
                 >
@@ -381,7 +704,7 @@ export function McpManager({
                           await registerMcp(candidate.config!, previous);
                           edit();
                           setStatus(
-                            '연결 검사 후 등록했습니다. 위 목록에서 사용할 도구를 선택하세요.',
+                            '연결 검사 후 등록했습니다. 위 목록에서 도구를 선택하거나 자료를 미리 보세요.',
                           );
                         }, true)
                       }
@@ -393,10 +716,11 @@ export function McpManager({
             )}
           </fieldset>
           <p>
-            현재 도구 호출을 지원합니다. OAuth 로그인, resources·prompts, 참조·정규식·format이
-            필요한 입력 형식은 후속 단계입니다.
+            첨부는 텍스트 리소스와 프롬프트를 지원합니다. 이미지·파일 데이터와 리소스 템플릿,
+            참조·정규식·format이 필요한 도구 입력 형식은 지원하지 않습니다.
           </p>
         </section>
+        <McpOAuthPanel connected={connected} />
         {error && (
           <p className="form-error" role="alert">
             {error}

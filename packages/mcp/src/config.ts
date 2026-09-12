@@ -57,6 +57,15 @@ export const mcpConfigSchema = z.discriminatedUnion('transport', [
       }
     }, 'HTTPS 또는 사설 HTTP endpoint가 필요합니다. URL에 인증 정보·쿼리를 넣지 마세요.'),
     headers: references.default({}),
+    oauth: z
+      .strictObject({
+        clientId: z
+          .string()
+          .min(1)
+          .max(512)
+          .refine((value) => !/[\0\r\n]/.test(value)),
+      })
+      .optional(),
   }),
 ]);
 export type McpConfig = z.infer<typeof mcpConfigSchema>;
@@ -80,7 +89,15 @@ export function validateConfig(value: unknown): McpConfig {
       throw new AppError('MCP_PROTOCOL', 'stdio는 legacy 또는 2026-07-28 버전을 직접 선택하세요.');
     if (Object.keys(config.env).some((key) => deniedEnvironment.test(key)))
       throw new AppError('MCP_ENV', '실행기 동작을 바꾸는 환경 변수는 전달할 수 없습니다.');
-  } else if (Object.keys(config.headers).some((key) => deniedHeaders.test(key)))
+  } else if (
+    config.oauth &&
+    Object.keys(config.headers).some((key) => key.toLowerCase() === 'authorization')
+  )
+    throw new AppError(
+      'MCP_AUTH_CONFIG',
+      'OAuth와 Authorization 헤더를 동시에 설정할 수 없습니다.',
+    );
+  else if (Object.keys(config.headers).some((key) => deniedHeaders.test(key)))
     throw new AppError('MCP_HEADERS', '전송 프로토콜이 관리하는 헤더는 지정할 수 없습니다.');
   return config;
 }

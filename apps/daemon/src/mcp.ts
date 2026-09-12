@@ -5,6 +5,7 @@ import {
   mcpToolName,
   type McpRegistration,
   type SecretResolver,
+  type McpConfig,
 } from '@lodex/mcp';
 
 export function selectedMcpTools(session: Session, registrations: McpRegistration[]) {
@@ -28,11 +29,13 @@ export function selectedMcpTools(session: Session, registrations: McpRegistratio
 /** Connections belong to one run. No shared capabilities or automatic replay. */
 export class RunMcp {
   private connections = new Map<string, McpConnection>();
+  private tokens = new Map<string, string | undefined>();
   constructor(
     private options: {
       selections: { selection: McpSelection; server: McpRegistration }[];
       supervisorPath: string;
       resolveSecret: SecretResolver;
+      resolveOAuthToken?: (config: McpConfig, signal: AbortSignal) => Promise<string | undefined>;
     },
   ) {}
   async call(options: {
@@ -59,6 +62,15 @@ export class RunMcp {
       throw new AppError('MCP_ARGUMENTS', 'MCP 인자는 16 KiB 이하의 JSON 객체여야 합니다.');
     }
     let connection = this.connections.get(selected.server.id);
+    const oauthToken = await this.options.resolveOAuthToken?.(
+      selected.server.config,
+      options.signal,
+    );
+    if (connection && oauthToken !== this.tokens.get(selected.server.id)) {
+      await connection.close();
+      this.connections.delete(selected.server.id);
+      connection = undefined;
+    }
     if (!connection) {
       connection = await McpConnection.connect({
         config: selected.server.config,
@@ -66,8 +78,10 @@ export class RunMcp {
         supervisorPath: this.options.supervisorPath,
         resolveSecret: this.options.resolveSecret,
         signal: options.signal,
+        oauthToken,
       });
       this.connections.set(selected.server.id, connection);
+      this.tokens.set(selected.server.id, oauthToken);
     }
     const audit: NonNullable<Activity['mcpCall']> = {
       ...selected.selection,
@@ -112,6 +126,7 @@ export class RunMcp {
       [...this.connections.values()].map((connection) => connection.close()),
     );
     this.connections.clear();
+    this.tokens.clear();
     if (results.some((result) => result.status === 'rejected'))
       throw new AppError(
         'MCP_CLOSE_UNKNOWN',

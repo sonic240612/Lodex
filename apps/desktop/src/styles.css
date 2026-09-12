@@ -1904,3 +1904,113 @@ input[type='checkbox'] {
 .mcp-manager .primary-button {
   margin: 8px 8px 8px 0;
 }
+.mcp-manager .mcp-content-entry {
+  border-top: 1px solid var(--border);
+  padding: 16px 0;
+  overflow-wrap: anywhere;
+}
+.mcp-manager .mcp-content-entry .field {
+  margin: 12px 0;
+}
+.mcp-manager .mcp-content-entry input {
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+}
+.mcp-manager .mcp-content-entry .field small {
+  color: var(--muted);
+  line-height: 1.5;
+}
+.mcp-manager .mcp-content-preview {
+  margin-top: 16px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.mcp-manager .mcp-content-preview pre,
+.mcp-manager .mcp-attachment pre {
+  max-height: 320px;
+  overflow: auto;
+  padding: 12px;
+  background: var(--surface);
+  border-radius: 8px;
+  line-height: 1.65;
+}
+.mcp-manager .mcp-content-catalog h4 {
+  font-size: 13px;
+  margin: 20px 0 8px;
+}
+
+.routing-modal {
+  width: min(680px, calc(100vw - 32px));
+  padding: 0;
+}
+.routing-modal > header,
+.routing-modal footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 24px;
+  gap: 12px;
+}
+.routing-modal h2 {
+  margin: 0;
+  font-size: 20px;
+}
+.routing-modal .settings-content {
+  max-height: 65vh;
+  overflow-y: auto;
+  padding: 0 24px;
+}
+.routing-modal .check-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+.routing-modal .check-row input {
+  width: auto;
+  margin: 3px 0;
+}
+.routing-role {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+  margin: 18px 0;
+}
+.routing-role legend {
+  padding: 0 8px;
+  font-weight: 600;
+}
+.routing-role label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 12px 0;
+  font-size: 13px;
+}
+.routing-role input,
+.routing-role select {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 9px;
+  color: inherit;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+.routing-role .check-row {
+  flex-direction: row;
+}
+.routing-numbers {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 14px;
+}
+.subagent-records {
+  margin: 12px;
+}
+.subagent-records summary > span:nth-child(2) {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}

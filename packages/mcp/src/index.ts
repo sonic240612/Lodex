@@ -4,6 +4,9 @@ import {
   Client,
   StreamableHTTPClientTransport,
   type Tool,
+  type Resource,
+  type ResourceTemplateType as ResourceTemplate,
+  type Prompt,
   type Transport,
   type JsonSchemaType,
   type jsonSchemaValidator,
@@ -16,6 +19,7 @@ import { validateConfig, resolveReferences, type McpConfig, type SecretResolver 
 export { validateConfig, mcpConfigSchema } from './config';
 export type { McpConfig, SecretResolver } from './config';
 export { importMcpConfigurations, type McpImport } from './import';
+export * from './oauth';
 
 export interface McpTool {
   name: string;
@@ -23,6 +27,44 @@ export interface McpTool {
   definition: Tool;
   supported: boolean;
   issue?: string;
+}
+export interface McpResource {
+  uri: string;
+  name: string;
+  revision: string;
+  definition: Resource;
+  supported: boolean;
+  issue?: string;
+}
+export interface McpPrompt {
+  name: string;
+  revision: string;
+  definition: Prompt;
+  supported: boolean;
+  issue?: string;
+}
+export interface McpResourceTemplate {
+  uriTemplate: string;
+  name: string;
+  revision: string;
+  definition: ResourceTemplate;
+  supported: false;
+  issue: string;
+}
+export interface McpContent {
+  kind: 'resource' | 'prompt';
+  text: string;
+  messages?: { role: 'user' | 'assistant'; text: string }[];
+  provenance: {
+    serverId: string;
+    serverRevision: string;
+    kind: 'resource' | 'prompt';
+    entryKey: string;
+    entryRevision: string;
+    sha256: string;
+    bytes: number;
+    readAt: string;
+  };
 }
 export interface McpRegistration {
   id: string;
@@ -32,6 +74,9 @@ export interface McpRegistration {
   server: { name: string; version: string } | null;
   protocol: string | null;
   tools: McpTool[];
+  resources?: McpResource[];
+  prompts?: McpPrompt[];
+  resourceTemplates?: McpResourceTemplate[];
   inspectedAt: string;
 }
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -124,6 +169,95 @@ function redact<T>(value: T, secrets: string[]): T {
     text = text.replaceAll(JSON.stringify(secret).slice(1, -1), '[redacted]');
   return JSON.parse(text) as T;
 }
+function checkCatalog<T>(entries: T[], key: (entry: T) => string) {
+  boundedShape(entries, 131072);
+  if (entries.length > 128 || new Set(entries.map(key)).size !== entries.length)
+    throw new AppError('MCP_CATALOG', 'MCP 목록 개수 제한 또는 중복 식별자를 확인하세요.');
+}
+function textMimeType(value?: string) {
+  if (!value) return true;
+  const mime = value.split(';', 1)[0]!.trim().toLowerCase();
+  return (
+    mime.startsWith('text/') ||
+    [
+      'application/json',
+      'application/xml',
+      'application/yaml',
+      'application/x-yaml',
+      'application/javascript',
+      'application/sql',
+    ].includes(mime) ||
+    /^application\/[a-z0-9.+-]+\+(?:json|xml)$/.test(mime)
+  );
+}
+function catalogKey(value: string) {
+  return value.length > 0 && value.length <= 4096 && !/[\u0000-\u001f\u007f]/.test(value);
+}
+function resourceCatalog(listed: Resource[], secrets: string[]): McpResource[] {
+  checkCatalog(listed, (item) => item.uri);
+  return listed.map((definition) => {
+    const clean = redact(definition, secrets);
+    const issue =
+      !catalogKey(definition.uri) || clean.uri !== definition.uri
+        ? '리소스 URI를 안전하게 사용할 수 없습니다.'
+        : !textMimeType(definition.mimeType)
+          ? '텍스트 리소스만 읽을 수 있습니다.'
+          : undefined;
+    return {
+      uri: clean.uri,
+      name: clean.name,
+      revision: hash(definition),
+      definition: clean,
+      supported: !issue,
+      ...(issue ? { issue } : {}),
+    };
+  });
+}
+function promptCatalog(listed: Prompt[], secrets: string[]): McpPrompt[] {
+  checkCatalog(listed, (item) => item.name);
+  return listed.map((definition) => {
+    const clean = redact(definition, secrets),
+      args = definition.arguments ?? [];
+    const issue =
+      !catalogKey(definition.name) ||
+      clean.name !== definition.name ||
+      args.length > 32 ||
+      new Set(args.map((arg) => arg.name)).size !== args.length ||
+      args.some((arg) => !catalogKey(arg.name) || arg.name.length > 128) ||
+      hash(clean.arguments ?? []) !== hash(definition.arguments ?? [])
+        ? '프롬프트 이름 또는 인자 정의를 안전하게 사용할 수 없습니다.'
+        : undefined;
+    return {
+      name: clean.name,
+      revision: hash(definition),
+      definition: clean,
+      supported: !issue,
+      ...(issue ? { issue } : {}),
+    };
+  });
+}
+function templateCatalog(listed: ResourceTemplate[], secrets: string[]): McpResourceTemplate[] {
+  checkCatalog(listed, (item) => item.uriTemplate);
+  return listed.map((definition) => {
+    const clean = redact(definition, secrets);
+    return {
+      uriTemplate: clean.uriTemplate,
+      name: clean.name,
+      revision: hash(definition),
+      definition: clean,
+      supported: false,
+      issue: '매개변수가 필요한 리소스 템플릿은 아직 읽을 수 없습니다.',
+    };
+  });
+}
+function contentLimit(requested?: number) {
+  if (
+    requested !== undefined &&
+    (!Number.isInteger(requested) || requested < 1 || requested > 24576)
+  )
+    throw new AppError('MCP_SIZE', 'MCP 텍스트 제한은 1~24576바이트여야 합니다.');
+  return requested ?? 24576;
+}
 function endpointFetch(endpoint: string, signal: AbortSignal) {
   const expected = new URL(endpoint).href;
   const fetcher = localUrlSchema.safeParse(endpoint).success ? privateServerFetch : fetch;
@@ -178,6 +312,7 @@ function endpointFetch(endpoint: string, signal: AbortSignal) {
 export class McpConnection {
   private closed = false;
   private invalidated = false;
+  private contentInvalidated = false;
   private validation = validators();
   private constructor(
     private client: Client,
@@ -188,6 +323,12 @@ export class McpConnection {
     client.setNotificationHandler('notifications/tools/list_changed', () => {
       this.invalidated = true;
     });
+    client.setNotificationHandler('notifications/resources/list_changed', () => {
+      this.contentInvalidated = true;
+    });
+    client.setNotificationHandler('notifications/prompts/list_changed', () => {
+      this.contentInvalidated = true;
+    });
   }
   static async connect(options: {
     config: McpConfig;
@@ -195,6 +336,7 @@ export class McpConnection {
     resolveSecret: SecretResolver;
     signal: AbortSignal;
     expected?: McpRegistration;
+    oauthToken?: string | undefined;
   }): Promise<McpConnection> {
     const config = validateConfig(options.config);
     options.signal.throwIfAborted();
@@ -209,6 +351,13 @@ export class McpConnection {
         'MCP 실행 설정 또는 파일이 등록 이후 변경되었습니다. 다시 연결 검사하세요.',
       );
     const { values, secrets } = await resolveReferences(config, options.resolveSecret);
+    if (config.transport === 'http' && 'oauth' in config && config.oauth) {
+      const token = options.oauthToken;
+      if (!token || token.length > 8192 || /[\u0000\r\n]/.test(token))
+        throw new AppError('MCP_AUTH', 'MCP 서버에 로그인한 뒤 다시 연결하세요.');
+      values.Authorization = 'Bearer ' + token;
+      secrets.push(token);
+    }
     options.signal.throwIfAborted();
     const client = new Client(
       { name: 'lodex', version: '0.1.0' },
@@ -275,6 +424,38 @@ export class McpConnection {
           ...(issue ? { issue } : {}),
         };
       });
+      const capabilities = client.getServerCapabilities();
+      const listOptions = { signal: options.signal, timeout: 15000, cacheMode: 'bypass' as const };
+      // Old registrations remain tool-only until the user explicitly inspects them again.
+      const resources =
+        capabilities?.resources && (!options.expected || options.expected.resources !== undefined)
+          ? resourceCatalog((await client.listResources(undefined, listOptions)).resources, secrets)
+          : undefined;
+      const resourceTemplates =
+        capabilities?.resources &&
+        (!options.expected || options.expected.resourceTemplates !== undefined)
+          ? templateCatalog(
+              (await client.listResourceTemplates(undefined, listOptions)).resourceTemplates,
+              secrets,
+            )
+          : undefined;
+      const prompts =
+        capabilities?.prompts && (!options.expected || options.expected.prompts !== undefined)
+          ? promptCatalog((await client.listPrompts(undefined, listOptions)).prompts, secrets)
+          : undefined;
+      const catalogRevisions = {
+        ...(resources !== undefined
+          ? { resources: resources.map((item) => [item.uri, item.revision]) }
+          : {}),
+        ...(resourceTemplates !== undefined
+          ? {
+              resourceTemplates: resourceTemplates.map((item) => [item.uriTemplate, item.revision]),
+            }
+          : {}),
+        ...(prompts !== undefined
+          ? { prompts: prompts.map((item) => [item.name, item.revision]) }
+          : {}),
+      };
       const registration: McpRegistration = {
         id: options.expected?.id ?? randomUUID(),
         config,
@@ -282,11 +463,15 @@ export class McpConnection {
           config,
           identity,
           tools: tools.map((tool) => [tool.name, tool.revision]),
+          ...catalogRevisions,
         }),
         ...(identity ? { executableIdentity: identity } : {}),
         server: redact(client.getServerVersion() ?? null, secrets),
         protocol: client.getNegotiatedProtocolVersion() ?? null,
         tools,
+        ...(resources !== undefined ? { resources } : {}),
+        ...(resourceTemplates !== undefined ? { resourceTemplates } : {}),
+        ...(prompts !== undefined ? { prompts } : {}),
         inspectedAt: new Date().toISOString(),
       };
       if (options.expected && registration.revision !== options.expected.revision)
@@ -309,6 +494,222 @@ export class McpConnection {
     }
   }
   private abortCleanup = () => {};
+  private checkContent(serverRevision: string, signal: AbortSignal) {
+    signal.throwIfAborted();
+    if (
+      this.closed ||
+      this.invalidated ||
+      this.contentInvalidated ||
+      serverRevision !== this.registration.revision
+    )
+      throw new AppError(
+        'MCP_CATALOG_CHANGED',
+        'MCP 서버 또는 자료 목록이 변경되었습니다. 다시 연결 검사하세요.',
+      );
+  }
+  private content(
+    kind: McpContent['kind'],
+    entryKey: string,
+    entryRevision: string,
+    text: string,
+    maxBytes: number,
+    messages?: McpContent['messages'],
+  ): McpContent {
+    const bytes = Buffer.byteLength(text);
+    if (bytes > maxBytes)
+      throw new AppError('MCP_SIZE', 'MCP 텍스트가 선택한 크기 제한을 초과했습니다.');
+    return {
+      kind,
+      text,
+      ...(messages ? { messages } : {}),
+      provenance: {
+        serverId: this.registration.id,
+        serverRevision: this.registration.revision,
+        kind,
+        entryKey,
+        entryRevision,
+        sha256: createHash('sha256').update(text).digest('hex'),
+        bytes,
+        readAt: new Date().toISOString(),
+      },
+    };
+  }
+  async readResource(options: {
+    serverRevision: string;
+    uri: string;
+    revision: string;
+    signal: AbortSignal;
+    maxBytes?: number;
+  }): Promise<McpContent> {
+    this.checkContent(options.serverRevision, options.signal);
+    const limit = contentLimit(options.maxBytes);
+    const chosen = this.registration.resources?.find(
+      (item) => item.uri === options.uri && item.revision === options.revision,
+    );
+    if (!chosen?.supported)
+      throw new AppError('MCP_RESOURCE', '검토한 텍스트 리소스와 버전이 아닙니다.');
+    try {
+      const current = resourceCatalog(
+        (
+          await this.client.listResources(undefined, {
+            signal: options.signal,
+            timeout: 15000,
+            cacheMode: 'bypass',
+          })
+        ).resources,
+        this.secrets,
+      );
+      if (
+        hash(current.map((item) => [item.uri, item.revision])) !==
+        hash(this.registration.resources!.map((item) => [item.uri, item.revision]))
+      ) {
+        this.contentInvalidated = true;
+        throw new AppError(
+          'MCP_CATALOG_CHANGED',
+          'MCP 리소스 목록이 변경되었습니다. 다시 검토하세요.',
+        );
+      }
+      this.checkContent(options.serverRevision, options.signal);
+      const result = await this.client.readResource(
+        { uri: chosen.uri },
+        {
+          signal: options.signal,
+          timeout: 30000,
+          cacheMode: 'bypass',
+        },
+      );
+      this.checkContent(options.serverRevision, options.signal);
+      boundedShape(result, 131072);
+      if (
+        !Array.isArray(result.contents) ||
+        result.contents.length < 1 ||
+        result.contents.length > 64 ||
+        result.contents.some(
+          (item) =>
+            item.uri !== chosen.uri ||
+            !('text' in item) ||
+            typeof item.text !== 'string' ||
+            'blob' in item ||
+            !textMimeType(item.mimeType),
+        )
+      )
+        throw new AppError(
+          'MCP_CONTENT',
+          '선택한 URI의 텍스트만 읽을 수 있습니다. 바이너리와 다른 URI의 자료는 첨부하지 않습니다.',
+        );
+      const clean = redact(result.contents, this.secrets);
+      return this.content(
+        'resource',
+        chosen.uri,
+        chosen.revision,
+        clean.map((item) => ('text' in item ? item.text : '')).join('\n\n'),
+        limit,
+      );
+    } catch (error) {
+      if (options.signal.aborted) options.signal.throwIfAborted();
+      if (error instanceof AppError) throw error;
+      throw new AppError(
+        'MCP_CONTENT_FAILED',
+        'MCP 리소스를 읽지 못했습니다. 자동으로 다시 요청하지 않습니다.',
+      );
+    }
+  }
+  async getPrompt(options: {
+    serverRevision: string;
+    name: string;
+    revision: string;
+    arguments?: Record<string, string>;
+    signal: AbortSignal;
+    maxBytes?: number;
+  }): Promise<McpContent> {
+    this.checkContent(options.serverRevision, options.signal);
+    const limit = contentLimit(options.maxBytes);
+    const chosen = this.registration.prompts?.find(
+      (item) => item.name === options.name && item.revision === options.revision,
+    );
+    if (!chosen?.supported) throw new AppError('MCP_PROMPT', '검토한 프롬프트와 버전이 아닙니다.');
+    const args = options.arguments ?? {},
+      definitions = chosen.definition.arguments ?? [];
+    boundedShape(args, 8192);
+    if (
+      !args ||
+      typeof args !== 'object' ||
+      Array.isArray(args) ||
+      Object.entries(args).some(
+        ([name, value]) =>
+          typeof value !== 'string' || !definitions.some((arg) => arg.name === name),
+      ) ||
+      definitions.some((arg) => arg.required && !Object.hasOwn(args, arg.name))
+    )
+      throw new AppError('MCP_ARGUMENTS', '프롬프트 인자의 이름과 필수 항목을 확인하세요.');
+    try {
+      const current = promptCatalog(
+        (
+          await this.client.listPrompts(undefined, {
+            signal: options.signal,
+            timeout: 15000,
+            cacheMode: 'bypass',
+          })
+        ).prompts,
+        this.secrets,
+      );
+      if (
+        hash(current.map((item) => [item.name, item.revision])) !==
+        hash(this.registration.prompts!.map((item) => [item.name, item.revision]))
+      ) {
+        this.contentInvalidated = true;
+        throw new AppError(
+          'MCP_CATALOG_CHANGED',
+          'MCP 프롬프트 목록이 변경되었습니다. 다시 검토하세요.',
+        );
+      }
+      this.checkContent(options.serverRevision, options.signal);
+      const result = await this.client.getPrompt(
+        { name: chosen.name, arguments: args },
+        {
+          signal: options.signal,
+          timeout: 30000,
+        },
+      );
+      this.checkContent(options.serverRevision, options.signal);
+      boundedShape(result, 131072);
+      if (
+        !Array.isArray(result.messages) ||
+        result.messages.length < 1 ||
+        result.messages.length > 64 ||
+        result.messages.some(
+          (message) =>
+            !['user', 'assistant'].includes(message.role) ||
+            message.content.type !== 'text' ||
+            typeof message.content.text !== 'string',
+        )
+      )
+        throw new AppError(
+          'MCP_CONTENT',
+          '텍스트 프롬프트만 첨부할 수 있습니다. 이미지·오디오·리소스 링크는 지원하지 않습니다.',
+        );
+      const clean = redact(result.messages, this.secrets);
+      const messages = clean.map((message) => ({
+        role: message.role,
+        text: message.content.type === 'text' ? message.content.text : '',
+      }));
+      return this.content(
+        'prompt',
+        chosen.name,
+        chosen.revision,
+        messages.map((message) => `[${message.role}]\n${message.text}`).join('\n\n'),
+        limit,
+        messages,
+      );
+    } catch (error) {
+      if (options.signal.aborted) options.signal.throwIfAborted();
+      if (error instanceof AppError) throw error;
+      throw new AppError(
+        'MCP_CONTENT_FAILED',
+        'MCP 프롬프트를 가져오지 못했습니다. 자동으로 다시 요청하지 않습니다.',
+      );
+    }
+  }
   async call(options: {
     name: string;
     revision: string;

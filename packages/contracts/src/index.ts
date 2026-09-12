@@ -1,37 +1,18 @@
 import { z } from 'zod';
-import { localUrlSchema } from './network';
+import {
+  agentRoutingConfigSchema,
+  modelConfigSchema,
+  resolveModelConfig,
+  type AgentRoutingConfig,
+  type ModelConfig,
+  type ProviderId,
+} from './routing';
 export { localUrlSchema, isPrivateServerAddress } from './network';
 export * from './runtime';
+export * from './routing';
 
 export const PROTOCOL_VERSION = 1 as const;
 export const idSchema = z.uuid();
-export const providerSchema = z.enum(['llama-server', 'openrouter', 'demo']);
-export type ProviderId = z.infer<typeof providerSchema>;
-
-export const modelConfigSchema = z
-  .strictObject({
-    provider: providerSchema.default('llama-server'),
-    model: z.string().trim().max(200).default(''),
-    baseUrl: localUrlSchema.default('http://127.0.0.1:8080/v1'),
-    temperature: z.number().min(0).max(2).default(0.7),
-    topP: z.number().gt(0).max(1).default(0.95),
-    maxTokens: z.number().int().min(1).max(32768).default(2048),
-    contextBudgetTokens: z.number().int().min(1024).max(2097152).default(32768),
-    cloudConsent: z.boolean().default(false),
-    projectCloudConsent: z.boolean().default(false),
-    eco: z.boolean().default(false),
-    managedModelId: z.uuid().optional(),
-    managedModelVersion: z.number().int().positive().optional(),
-  })
-  .refine(
-    (config) =>
-      config.managedModelId === undefined
-        ? config.managedModelVersion === undefined
-        : config.provider === 'llama-server' && config.managedModelVersion !== undefined,
-    '관리 모델은 llama-server 공급자와 모델 설정 버전이 필요합니다.',
-  );
-export type ModelConfig = z.infer<typeof modelConfigSchema>;
-export const defaultModelConfig = (): ModelConfig => modelConfigSchema.parse({});
 export const taskSchema = z.strictObject({
   id: idSchema,
   title: z.string().trim().min(1).max(500),
@@ -204,6 +185,29 @@ export const mcpSelectionsSchema = z
     '중복된 MCP 도구입니다.',
   );
 export type McpSelection = z.infer<typeof mcpSelectionSchema>;
+export const mcpAttachmentSchema = z.strictObject({
+  id: idSchema,
+  serverId: idSchema,
+  serverRevision: z.string().regex(/^[a-f0-9]{64}$/),
+  kind: z.enum(['resource', 'prompt']),
+  entryKey: z.string().min(1).max(4096),
+  entryRevision: z.string().regex(/^[a-f0-9]{64}$/),
+  text: z.string().max(24576),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  bytes: z.number().int().min(0).max(24576),
+  readAt: z.iso.datetime(),
+});
+export type McpContextAttachment = z.infer<typeof mcpAttachmentSchema>;
+export type McpContentPreview = McpContextAttachment & { expiresAt: string };
+export const mcpContentInputSchema = z.strictObject({
+  serverId: idSchema,
+  serverRevision: z.string().regex(/^[a-f0-9]{64}$/),
+  kind: z.enum(['resource', 'prompt']),
+  entryKey: z.string().min(1).max(4096),
+  entryRevision: z.string().regex(/^[a-f0-9]{64}$/),
+  arguments: z.record(z.string().min(1).max(256), z.string().max(4096)).optional(),
+});
+export type McpContentInput = z.infer<typeof mcpContentInputSchema>;
 export const deleteSessionsSchema = z
   .strictObject({
     ...envelope,
@@ -231,6 +235,7 @@ export const commandSchema = z.discriminatedUnion('type', [
     sessionId: idSchema,
     title: z.string().trim().min(1).max(120),
     config: modelConfigSchema,
+    routing: agentRoutingConfigSchema.optional(),
     projectId: idSchema.nullable().default(null),
     mode: modeSchema.default('build'),
   }),
@@ -239,6 +244,12 @@ export const commandSchema = z.discriminatedUnion('type', [
     ...target,
     type: z.literal('configure_session'),
     config: modelConfigSchema,
+  }),
+  z.strictObject({
+    ...envelope,
+    ...target,
+    type: z.literal('configure_routing'),
+    routing: agentRoutingConfigSchema,
   }),
   z.strictObject({
     ...envelope,
@@ -282,6 +293,19 @@ export const commandSchema = z.discriminatedUnion('type', [
     sessionId: idSchema,
     runId: idSchema,
   }),
+  z.strictObject({
+    ...envelope,
+    ...target,
+    type: z.literal('attach_mcp_content'),
+    previewId: idSchema,
+    mcpCloudConsent: z.boolean(),
+  }),
+  z.strictObject({
+    ...envelope,
+    ...target,
+    type: z.literal('remove_mcp_content'),
+    attachmentId: idSchema,
+  }),
 ]);
 export type Command = z.infer<typeof commandSchema>;
 export type CommandInput =
@@ -323,6 +347,7 @@ export const emptyUsage = (provider: ProviderId): Usage => ({
   ttftMs: null,
 });
 export interface Message {
+  inferenceConfig?: ModelConfig;
   id: string;
   role: 'user' | 'assistant';
   content: string;
@@ -332,6 +357,20 @@ export interface Message {
   usage: Usage | null;
   activities?: Activity[];
   continuation?: InferenceMessage[];
+}
+export interface SubagentRecord {
+  id: string;
+  task: string;
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
+  provider: ProviderId;
+  model: string;
+  startedAt?: string;
+  finishedAt?: string;
+  text: string;
+  error?: string;
+  modelCalls: number;
+  toolCalls: number;
+  usage?: Partial<Usage>;
 }
 export interface EditProposal {
   offset?: number;
@@ -372,6 +411,7 @@ export const editActionSchema = z.strictObject({
 });
 export type EditAction = z.infer<typeof editActionSchema>;
 export interface Activity {
+  subagents?: SubagentRecord[];
   mcpCall?: {
     serverId: string;
     serverRevision: string;
@@ -420,6 +460,7 @@ export interface Run {
   context?: ContextManifest;
 }
 export interface ContextManifest {
+  mcpAttachmentIds?: string[];
   mcpTools?: string[];
   skillCatalog?: { includedIds: string[]; omittedIds: string[]; serializedBytes: number };
   compilerVersion: 'context-v1';
@@ -438,6 +479,8 @@ export interface ContextManifest {
   eco: boolean;
 }
 export interface Session {
+  routing?: AgentRoutingConfig;
+  mcpAttachments?: McpContextAttachment[];
   mcp?: McpSelection[];
   mcpCloudConsent?: boolean;
   hasMcpHistory?: boolean;
@@ -566,7 +609,7 @@ export function prepareAutopilot(
       'AUTOPILOT_POLICY',
       'Build 모드와 프로젝트의 Docker 명령 실행 허용이 필요합니다.',
     );
-  if (session.config.provider !== 'llama-server')
+  if (resolveModelConfig(session).provider !== 'llama-server')
     throw new AppError(
       'AUTOPILOT_LOCAL_ONLY',
       '현재 Autopilot은 로컬 모델에서 사용할 수 있습니다. OpenRouter 자동 실행은 비용 예약 기능 준비 후 지원합니다.',

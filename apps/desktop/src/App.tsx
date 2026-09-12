@@ -8,6 +8,8 @@ import {
   type Session,
   type AgentMode,
   type LocalProfile,
+  type AgentRoutingConfig,
+  resolveModelConfig,
 } from '@lodex/contracts';
 import { models, nativeDesktop, saveKey, sendCommand, snapshot, subscribe } from './bridge';
 import { Icon, Logo } from './icons';
@@ -20,6 +22,7 @@ import { ExecutionPanel } from './ExecutionPanel';
 import { AutopilotPanel } from './AutopilotPanel';
 import type { SkillSelectionSave } from './SkillManager';
 import type { McpSelectionSave } from './McpManager';
+import type { McpContentPreview } from '@lodex/contracts';
 const McpManager = lazy(() =>
   import('./McpManager').then((module) => ({ default: module.McpManager })),
 );
@@ -28,6 +31,9 @@ const ModelManager = lazy(() =>
 );
 const SkillManager = lazy(() =>
   import('./SkillManager').then((module) => ({ default: module.SkillManager })),
+);
+const RoutingSettings = lazy(() =>
+  import('./RoutingSettings').then((module) => ({ default: module.RoutingSettings })),
 );
 
 const providerName = (provider: string) =>
@@ -39,6 +45,7 @@ export function App() {
   const session = workspace.sessions.find((s) => s.id === workspace.selectedId);
   const [settings, setSettings] = useState(false);
   const [modelManager, setModelManager] = useState(false);
+  const [routingSettings, setRoutingSettings] = useState(false);
   const [skillManager, setSkillManager] = useState(false);
   const [mcpManager, setMcpManager] = useState(false);
   const [projectDialog, setProjectDialog] = useState(false);
@@ -66,7 +73,13 @@ export function App() {
   const [light, setLight] = useState(false);
   const end = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
-  const config = session?.config ?? workspace.config;
+  const config = session ? resolveModelConfig(session) : workspace.config;
+  const contextProvider =
+    config.provider === 'openrouter' ||
+    (session?.routing?.subagentsEnabled &&
+      (session.routing.subagent ?? session.config).provider === 'openrouter')
+      ? 'openrouter'
+      : config.provider;
   const running = session?.run?.status === 'running';
   const project = workspace.projects.find((p) => p.id === workspace.selectedProjectId);
   const visibleSessions = workspace.sessions.filter(
@@ -134,12 +147,16 @@ export function App() {
   useEffect(() => {
     end.current?.scrollIntoView({ behavior: running ? 'instant' : 'smooth', block: 'end' });
   }, [session?.id, session?.messages.at(-1)?.content, running]);
-  async function createSession(modelConfig = workspace.config): Promise<Session> {
+  async function createSession(
+    modelConfig = workspace.config,
+    routing = session?.routing,
+  ): Promise<Session> {
     const result = await sendCommand({
       type: 'create_session',
       sessionId: crypto.randomUUID(),
       title: '새 대화',
       config: modelConfig,
+      ...(routing ? { routing } : {}),
       projectId: workspace.selectedProjectId,
       mode,
     });
@@ -203,6 +220,20 @@ export function App() {
     }
     setSettings(false);
   }
+  async function applyRouting(routing: AgentRoutingConfig) {
+    if (!session || session.messages.length)
+      await createSession(session?.config ?? workspace.config, routing);
+    else {
+      const result = await sendCommand({
+        type: 'configure_routing',
+        sessionId: session.id,
+        expectedVersion: session.version,
+        routing,
+      });
+      workspace.upsert(result.session);
+    }
+    setRoutingSettings(false);
+  }
   async function chooseLocalModel(profile: LocalProfile) {
     const config: ModelConfig = {
       ...workspace.config,
@@ -216,7 +247,7 @@ export function App() {
       cloudConsent: false,
       projectCloudConsent: false,
     };
-    await createSession(config);
+    await createSession(config, { subagentsEnabled: false });
     workspace.setConfig(config);
     setModelManager(false);
   }
@@ -240,6 +271,33 @@ export function App() {
       expectedVersion: value.expectedVersion ?? target.version,
       mcp: value.mcp,
       mcpCloudConsent: value.mcpCloudConsent,
+    });
+    workspace.upsert(result.session);
+    setMcpManager(false);
+  }
+  async function attachMcp(
+    preview: McpContentPreview,
+    consent: boolean,
+    expectedVersion: number | undefined,
+  ) {
+    const target = session ?? (await createSession());
+    const result = await sendCommand({
+      type: 'attach_mcp_content',
+      sessionId: target.id,
+      expectedVersion: expectedVersion ?? target.version,
+      previewId: preview.id,
+      mcpCloudConsent: consent,
+    });
+    workspace.upsert(result.session);
+    setMcpManager(false);
+  }
+  async function removeMcpAttachment(id: string, expectedVersion: number | undefined) {
+    if (!session) return;
+    const result = await sendCommand({
+      type: 'remove_mcp_content',
+      sessionId: session.id,
+      expectedVersion: expectedVersion ?? session.version,
+      attachmentId: id,
     });
     workspace.upsert(result.session);
     setMcpManager(false);
@@ -320,6 +378,10 @@ export function App() {
         <button className="nav-item" onClick={() => setModelManager(true)}>
           <Icon name="chip" size={18} />
           로컬 모델 관리
+        </button>
+        <button className="nav-item" onClick={() => setRoutingSettings(true)}>
+          <Icon name="bolt" size={18} />
+          역할별 모델{session?.routing?.subagentsEnabled ? ' · 서브에이전트' : ''}
         </button>
         <button className="nav-item" onClick={() => setSkillManager(true)}>
           <Icon name="bolt" size={18} />
@@ -773,7 +835,7 @@ export function App() {
           <SkillManager
             key={session?.id ?? 'new'}
             session={session}
-            provider={config.provider}
+            provider={contextProvider}
             connected={workspace.connected}
             onClose={() => setSkillManager(false)}
             onSave={applySkills}
@@ -784,10 +846,12 @@ export function App() {
         <Suspense fallback={null}>
           <McpManager
             session={session}
-            provider={config.provider}
+            provider={contextProvider}
             connected={workspace.connected}
             onClose={() => setMcpManager(false)}
             onSave={applyMcp}
+            onAttach={attachMcp}
+            onRemoveAttachment={removeMcpAttachment}
           />
         </Suspense>
       )}
@@ -804,12 +868,24 @@ export function App() {
       )}
       {settings && (
         <Settings
-          config={config}
+          config={session?.config ?? workspace.config}
           hasMessages={!!session?.messages.length}
           running={!!running}
           onClose={() => setSettings(false)}
           onSave={applyConfig}
         />
+      )}
+      {routingSettings && (
+        <Suspense fallback={null}>
+          <RoutingSettings
+            base={session?.config ?? workspace.config}
+            routing={session?.routing}
+            hasMessages={!!session?.messages.length}
+            running={!!running}
+            onClose={() => setRoutingSettings(false)}
+            onSave={applyRouting}
+          />
+        </Suspense>
       )}
     </div>
   );

@@ -1,6 +1,7 @@
 import { Channel, invoke, isTauri } from '@tauri-apps/api/core';
 import type { RegisteredSkill, SkillDialect } from '@lodex/skills';
 import type { McpConfig, McpRegistration, McpImport } from '@lodex/mcp';
+import type { OAuthPreparation, OAuthStatus } from '@lodex/mcp';
 import {
   makeCommand,
   defaultPlan,
@@ -21,8 +22,47 @@ import {
   type LocalProfileInput,
   type LocalProfile,
   type RuntimeSettings,
+  type McpContentInput,
+  type McpContentPreview,
 } from '@lodex/contracts';
 export const nativeDesktop = isTauri();
+export type { McpContentPreview } from '@lodex/contracts';
+export async function previewMcpContent(input: McpContentInput): Promise<McpContentPreview> {
+  return invoke('daemon_request', { method: 'POST', path: '/v1/mcp/content', body: input });
+}
+export async function prepareMcpOAuth(input: {
+  resourceUrl: string;
+  clientId: string;
+  scopes?: string[];
+  authorizationServer?: string;
+}): Promise<OAuthPreparation> {
+  return invoke('daemon_request', { method: 'POST', path: '/v1/mcp/oauth/prepare', body: input });
+}
+export async function beginMcpOAuth(
+  preparation: OAuthPreparation,
+): Promise<{ id: string; authorizationUrl: string; redirectUri: string; expiresAt: number }> {
+  return invoke('daemon_request', {
+    method: 'POST',
+    path: '/v1/mcp/oauth/begin',
+    body: { preparationId: preparation.id, approvedOrigins: preparation.origins },
+  });
+}
+export async function statusMcpOAuth(id: string): Promise<OAuthStatus> {
+  return invoke('daemon_request', { method: 'POST', path: '/v1/mcp/oauth/status', body: { id } });
+}
+export async function cancelMcpOAuth(id: string): Promise<OAuthStatus> {
+  return invoke('daemon_request', { method: 'POST', path: '/v1/mcp/oauth/cancel', body: { id } });
+}
+export async function disconnectMcpOAuth(resourceUrl: string, clientId: string): Promise<void> {
+  await invoke('daemon_request', {
+    method: 'POST',
+    path: '/v1/mcp/oauth/disconnect',
+    body: { resourceUrl, clientId },
+  });
+}
+export async function openMcpLogin(url: string): Promise<void> {
+  await invoke('open_external', { url });
+}
 export async function registeredMcp(): Promise<McpRegistration[]> {
   const result = await invoke<{ servers: McpRegistration[] }>('daemon_request', {
     method: 'GET',
@@ -90,6 +130,7 @@ async function previewCommand(command: Command): Promise<CommandResult> {
       createdAt: now,
       updatedAt: now,
       config: { ...command.config, provider: 'demo', model: 'demo' },
+      ...(command.routing ? { routing: command.routing } : {}),
       mode: command.mode,
       projectId: command.projectId,
       plan: defaultPlan(),
@@ -112,6 +153,10 @@ async function previewCommand(command: Command): Promise<CommandResult> {
       if (!proposal || proposal.status !== 'proposed') throw new Error('검토할 계획이 없습니다.');
       session.plan = proposal.plan;
       proposal.status = 'adopted';
+    } else if (command.type === 'configure_routing') {
+      if (session.messages.length)
+        throw new Error('역할별 모델 설정을 바꾸려면 새 대화를 만드세요.');
+      session.routing = command.routing;
     } else if (command.type === 'configure_session')
       session.config = { ...command.config, provider: 'demo', model: 'demo' };
     else if (command.type === 'send_message') {

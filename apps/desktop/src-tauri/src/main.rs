@@ -175,6 +175,12 @@ fn route_allowed(method: &str, path: &str) -> bool {
         | ("POST", "/v1/mcp/import")
         | ("POST", "/v1/mcp/register")
         | ("POST", "/v1/mcp/remove")
+        | ("POST", "/v1/mcp/content")
+        | ("POST", "/v1/mcp/oauth/prepare")
+        | ("POST", "/v1/mcp/oauth/begin")
+        | ("POST", "/v1/mcp/oauth/status")
+        | ("POST", "/v1/mcp/oauth/cancel")
+        | ("POST", "/v1/mcp/oauth/disconnect")
         | ("POST", "/v1/edits") => true,
         ("GET", value)
             if value.starts_with("/v1/models?") || value.starts_with("/v1/execution/check?") =>
@@ -264,7 +270,10 @@ async fn daemon_request(
         .bearer_auth(token)
         .timeout(Duration::from_secs(if path == "/v1/runtime/action" {
             200
-        } else if path == "/v1/mcp/register" {
+        } else if path == "/v1/mcp/register"
+            || path == "/v1/mcp/content"
+            || path == "/v1/mcp/oauth/prepare"
+        {
             45
         } else {
             30

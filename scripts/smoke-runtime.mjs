@@ -209,8 +209,13 @@ try {
     `
     require('node:readline').createInterface({input:process.stdin}).on('line', line => {
       const m = JSON.parse(line); if (m.id === undefined) return;
-      const result = m.method === 'initialize' ? { protocolVersion:'2025-11-25', capabilities:{tools:{}}, serverInfo:{name:'bundled-fixture',version:'1'} }
-        : m.method === 'tools/list' ? {tools:[{name:'fixture_echo',inputSchema:{type:'object',properties:{}}}]} : {};
+      const result = m.method === 'initialize' ? { protocolVersion:'2025-11-25', capabilities:{tools:{},resources:{},prompts:{}}, serverInfo:{name:'bundled-fixture',version:'1'} }
+        : m.method === 'tools/list' ? {tools:[{name:'fixture_echo',inputSchema:{type:'object',properties:{}}}]}
+        : m.method === 'resources/list' ? {resources:[{uri:'fixture://guide',name:'Guide',mimeType:'text/plain'}]}
+        : m.method === 'resources/templates/list' ? {resourceTemplates:[]}
+        : m.method === 'resources/read' ? {contents:[{uri:'fixture://guide',mimeType:'text/plain',text:'Bundled resource fixture'}]}
+        : m.method === 'prompts/list' ? {prompts:[{name:'review'}]}
+        : m.method === 'prompts/get' ? {messages:[{role:'user',content:{type:'text',text:'Bundled prompt fixture'}}]} : {};
       process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result})+'\\n');
     });
     process.stdin.on('end',()=>process.exit(0));
@@ -233,6 +238,21 @@ try {
   const mcpPayload = await mcpResponse.json();
   assert.equal(mcpResponse.status, 200, JSON.stringify(mcpPayload));
   const mcpServer = mcpPayload.server;
+  assert.equal(mcpServer.resources.length, 1);
+  assert.equal(mcpServer.prompts.length, 1);
+  const previewResponse = await app.request('/v1/mcp/content', {
+    method: 'POST',
+    body: JSON.stringify({
+      serverId: mcpServer.id,
+      serverRevision: mcpServer.revision,
+      kind: 'resource',
+      entryKey: 'fixture://guide',
+      entryRevision: mcpServer.resources[0].revision,
+    }),
+  });
+  assert.equal(previewResponse.status, 200);
+  const resourcePreview = await previewResponse.json();
+  assert.equal(resourcePreview.text, 'Bundled resource fixture');
   let session = await app.command({
     type: 'create_session',
     sessionId: randomUUID(),
@@ -246,6 +266,13 @@ try {
     expectedVersion: session.version,
     skills: [{ id: skill.id, revision: skill.revision }],
     skillCloudConsent: false,
+  });
+  session = await app.command({
+    type: 'attach_mcp_content',
+    sessionId: session.id,
+    expectedVersion: session.version,
+    previewId: resourcePreview.id,
+    mcpCloudConsent: false,
   });
   const mcpSelection = [
     {
@@ -292,6 +319,7 @@ try {
   assert.equal(session.plan.tasks[0].done, true);
   assert.deepEqual(session.skills, [{ id: skill.id, revision: skill.revision }]);
   assert.deepEqual(session.mcp, mcpSelection);
+  assert.equal(session.mcpAttachments[0].text, 'Bundled resource fixture');
   assert.equal((await app.request('/v1/mcp').then((r) => r.json())).servers[0].id, mcpServer.id);
   assert.equal((await app.request('/v1/skills').then((r) => r.json())).skills[0].id, skill.id);
   session = await app.command({

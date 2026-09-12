@@ -39,6 +39,29 @@ export function ActivityCards({
                     : statusText[activity.status]}
             </small>
           </summary>
+          {activity.subagents && (
+            <div className="subagent-records" aria-label="서브에이전트 작업">
+              {activity.subagents.map((child) => (
+                <details className="activity-card" key={child.id}>
+                  <summary>
+                    <span className={'activity-dot ' + child.status} />
+                    <span>{child.task}</span>
+                    <small>
+                      {child.status === 'queued' ? '대기 중' : statusText[child.status]}
+                    </small>
+                  </summary>
+                  <div className="activity-section">
+                    <span>
+                      {child.provider} · {child.model} · 모델 {child.modelCalls}회 · 도구{' '}
+                      {child.toolCalls}회
+                    </span>
+                    <pre>{child.text || '결과 대기 중…'}</pre>
+                    {child.error && <p role="alert">{child.error}</p>}
+                  </div>
+                </details>
+              ))}
+            </div>
+          )}
           {activity.mcpCall && (
             <div className="activity-section">
               <span>MCP · {activity.mcpCall.toolName}</span>

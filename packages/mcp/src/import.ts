@@ -57,6 +57,7 @@ export function importMcpConfigurations(text: string, defaultCwd?: string): McpI
       'url',
       'headers',
       'disabled',
+      'oauth',
     ]);
     if (Object.keys(value).some((key) => !allowed.has(key)))
       issues.push('지원하지 않는 설정 필드가 있습니다. 가져오기를 생략했습니다.');
@@ -77,6 +78,7 @@ export function importMcpConfigurations(text: string, defaultCwd?: string): McpI
             transport,
             url: value.url,
             headers: refs(value.headers),
+            ...(value.oauth ? { oauth: value.oauth } : {}),
             protocol: value.protocol ?? 'auto',
           };
     try {

@@ -7,6 +7,8 @@ import {
   emptyUsage,
   defaultPlan,
   modelConfigSchema,
+  agentRoutingConfigSchema,
+  resolveModelConfig,
   planSchema,
   type Command,
   type CommandResult,
@@ -35,6 +37,8 @@ import {
   type LocalProfile,
   skillSelectionsSchema,
   mcpSelectionsSchema,
+  mcpAttachmentSchema,
+  type McpContextAttachment,
 } from '@lodex/contracts';
 
 // Additive JSON fields are defaulted on all read paths, including old SSE events.
@@ -42,8 +46,10 @@ function hydrate(session: Session): Session {
   return {
     ...session,
     mode: session.mode ?? 'build',
+    routing: agentRoutingConfigSchema.parse(session.routing ?? {}),
     mcp: mcpSelectionsSchema.parse(session.mcp ?? []),
     mcpCloudConsent: session.mcpCloudConsent ?? false,
+    mcpAttachments: (session.mcpAttachments ?? []).map((value) => mcpAttachmentSchema.parse(value)),
     hasMcpHistory:
       session.hasMcpHistory ??
       !!(
@@ -63,6 +69,12 @@ function hydrate(session: Session): Session {
     execution: executionConfigSchema.parse(session.execution ?? {}),
     projectId: session.projectId ?? null,
     config: modelConfigSchema.parse(session.config),
+    messages: session.messages.map((message) => ({
+      ...message,
+      ...(message.inferenceConfig
+        ? { inferenceConfig: modelConfigSchema.parse(message.inferenceConfig) }
+        : {}),
+    })),
     plan: planSchema.parse(session.plan),
   };
 }
@@ -88,7 +100,7 @@ export class StorageEngine {
       'PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;',
     );
     const row = this.db.prepare('PRAGMA user_version').get() as { user_version: number };
-    if (row.user_version > 11) {
+    if (row.user_version > 13) {
       this.db.close();
       throw new AppError(
         'DATABASE_VERSION',
@@ -150,6 +162,8 @@ export class StorageEngine {
       PRAGMA user_version=11;
       COMMIT;
     `);
+    if (row.user_version < 12) this.db.exec('PRAGMA user_version=12;');
+    if (row.user_version < 13) this.db.exec('PRAGMA user_version=13;');
   }
   close(): void {
     if (!this.closed) {
@@ -514,7 +528,11 @@ export class StorageEngine {
       }),
     );
   }
-  apply(command: Command, context?: ContextManifest): CommandResult {
+  apply(
+    command: Command,
+    context?: ContextManifest,
+    attachment?: McpContextAttachment,
+  ): CommandResult {
     return this.transaction(() => {
       const previous = this.receipt(command);
       if (previous) return previous;
@@ -533,6 +551,7 @@ export class StorageEngine {
           createdAt: now,
           updatedAt: now,
           config: command.config,
+          routing: agentRoutingConfigSchema.parse(command.routing ?? {}),
           mode: command.mode,
           skills: [],
           skillCloudConsent: false,
@@ -566,6 +585,13 @@ export class StorageEngine {
               message.status = 'cancelled';
               for (const activity of message.activities ?? []) {
                 if (activity.status === 'running') activity.status = 'cancelled';
+                for (const child of activity.subagents ?? []) {
+                  if (child.status === 'queued' || child.status === 'running') {
+                    child.status = 'cancelled';
+                    child.finishedAt = now;
+                    child.error = '상위 실행이 중지되었습니다.';
+                  }
+                }
                 if (activity.mcpCall?.status === 'running') {
                   activity.mcpCall.status = 'unknown';
                   activity.mcpCall.error =
@@ -583,7 +609,9 @@ export class StorageEngine {
           command.type === 'adopt_plan' ||
           command.type === 'configure_execution' ||
           command.type === 'configure_skills' ||
-          command.type === 'configure_mcp'
+          command.type === 'configure_mcp' ||
+          command.type === 'attach_mcp_content' ||
+          command.type === 'remove_mcp_content'
         ) {
           if (
             session.run?.status === 'running' ||
@@ -593,7 +621,49 @@ export class StorageEngine {
           )
             throw new AppError('BUSY', '실행이 끝난 뒤 모드나 계획을 변경하세요.', 409);
           if (command.type === 'set_mode') session.mode = command.mode;
-          else if (command.type === 'configure_mcp') {
+          else if (command.type === 'attach_mcp_content') {
+            const parsed = mcpAttachmentSchema.safeParse(attachment);
+            if (!parsed.success || parsed.data.id !== command.previewId)
+              throw new AppError(
+                'MCP_PREVIEW',
+                '검토한 MCP 미리보기가 필요합니다. 다시 불러오세요.',
+                409,
+              );
+            const value = parsed.data;
+            if (
+              Buffer.byteLength(value.text) !== value.bytes ||
+              createHash('sha256').update(value.text).digest('hex') !== value.sha256
+            )
+              throw new AppError('MCP_CONTENT', 'MCP 내용과 출처가 일치하지 않습니다.');
+            const previous = session.mcpAttachments ?? [];
+            if (previous.some((entry) => entry.id === value.id))
+              throw new AppError('MCP_DUPLICATE', '이미 첨부한 내용입니다.', 409);
+            if (
+              previous.length >= 8 ||
+              previous.reduce((total, entry) => total + entry.bytes, value.bytes) > 65536
+            )
+              throw new AppError(
+                'MCP_CONTENT_LIMIT',
+                'MCP 첨부는 최대 8개, 합계 64 KiB까지 사용할 수 있습니다.',
+              );
+            if (
+              (resolveModelConfig(session).provider === 'openrouter' ||
+                (session.routing?.subagentsEnabled &&
+                  (session.routing.subagent ?? session.config).provider === 'openrouter')) &&
+              !command.mcpCloudConsent
+            )
+              throw new AppError(
+                'MCP_CLOUD_CONSENT',
+                'MCP 첨부 내용의 OpenRouter 전송 동의가 필요합니다.',
+                403,
+              );
+            session.mcpAttachments = [...previous, value];
+            session.mcpCloudConsent = command.mcpCloudConsent;
+          } else if (command.type === 'remove_mcp_content') {
+            session.mcpAttachments = (session.mcpAttachments ?? []).filter(
+              (value) => value.id !== command.attachmentId,
+            );
+          } else if (command.type === 'configure_mcp') {
             const selections = mcpSelectionsSchema.parse(command.mcp);
             for (const selection of selections) {
               const server = this.registeredMcp().find((entry) => entry.id === selection.serverId);
@@ -654,7 +724,18 @@ export class StorageEngine {
         } else {
           if (session.run?.status === 'running')
             throw new AppError('BUSY', '현재 응답이 끝나거나 중지된 뒤 변경하세요.', 409);
-          if (command.type === 'configure_session') {
+          if (command.type === 'configure_routing') {
+            if (
+              session.messages.length &&
+              JSON.stringify(session.routing) !== JSON.stringify(command.routing)
+            )
+              throw new AppError(
+                'NEW_SESSION_REQUIRED',
+                '역할별 모델 설정을 바꾸려면 새 대화를 만드세요.',
+                409,
+              );
+            session.routing = command.routing;
+          } else if (command.type === 'configure_session') {
             // Switching providers cannot silently send a local conversation to the cloud.
             if (
               session.messages.length &&
@@ -675,6 +756,7 @@ export class StorageEngine {
               );
             if (context?.skillCatalog?.includedIds.length) session.hasSkillHistory = true;
             if (context?.mcpTools?.length) session.hasMcpHistory = true;
+            if (context?.mcpAttachmentIds?.length) session.hasMcpHistory = true;
             if (session.messages.length >= 120)
               throw new AppError(
                 'CONTEXT_LIMIT',
@@ -712,7 +794,8 @@ export class StorageEngine {
               createdAt: now,
               status: 'streaming',
               error: null,
-              usage: emptyUsage(session.config.provider),
+              usage: emptyUsage(resolveModelConfig(session).provider),
+              inferenceConfig: resolveModelConfig(session),
             });
             session.run = {
               id: runId,
@@ -767,6 +850,13 @@ export class StorageEngine {
             update.error ?? '실행이 멈췄습니다. 기록을 확인한 뒤 다시 실행할 수 있습니다.';
         }
         for (const activity of message.activities ?? []) {
+          for (const child of activity.subagents ?? []) {
+            if (child.status === 'queued' || child.status === 'running') {
+              child.status = update.status === 'cancelled' ? 'cancelled' : 'interrupted';
+              child.finishedAt = session.run.finishedAt!;
+              child.error = '상위 실행이 종료되어 중단되었습니다. 자동 재실행하지 않았습니다.';
+            }
+          }
           if (activity.mcpCall?.status === 'running') {
             activity.mcpCall.status = 'unknown';
             activity.mcpCall.error =

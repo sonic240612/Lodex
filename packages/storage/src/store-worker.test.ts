@@ -64,6 +64,68 @@ afterEach(async () => {
   }
 });
 describe('durable worker storage', () => {
+  it('persists role model identity and interrupts child work after reopening without replay', async () => {
+    let { store, path } = await db();
+    const config = { ...defaultModelConfig(), model: 'base' };
+    const created = await store.apply(
+      makeCommand({
+        type: 'create_session',
+        sessionId: crypto.randomUUID(),
+        title: 'routing',
+        config,
+        mode: 'plan',
+        routing: { subagentsEnabled: true, plan: { ...config, model: 'planner' } },
+      }),
+    );
+    const started = await store.apply(
+      makeCommand({
+        type: 'send_message',
+        sessionId: created.session.id,
+        expectedVersion: created.session.version,
+        content: 'task',
+      }),
+    );
+    await store.updateRun({
+      sessionId: started.session.id,
+      runId: started.session.run!.id,
+      activities: [
+        {
+          id: crypto.randomUUID(),
+          kind: 'tool',
+          label: 'delegate_tasks',
+          status: 'running',
+          text: '',
+          subagents: [
+            {
+              id: crypto.randomUUID(),
+              task: 'child task',
+              status: 'running',
+              provider: 'llama-server',
+              model: 'base',
+              text: 'partial',
+              modelCalls: 1,
+              toolCalls: 0,
+            },
+          ],
+        },
+      ],
+    });
+    await close(store);
+    store = await open(path);
+    const recovered = await store.session(created.session.id);
+    expect(recovered.config.model).toBe('base');
+    expect(recovered.routing?.plan?.model).toBe('planner');
+    expect(recovered.messages.at(-1)?.inferenceConfig?.model).toBe('planner');
+    expect(recovered.messages.at(-1)?.activities?.[0]?.subagents?.[0]).toMatchObject({
+      status: 'interrupted',
+      text: 'partial',
+      modelCalls: 1,
+    });
+    const seq = (await store.snapshot()).lastSeq;
+    await close(store);
+    store = await open(path);
+    expect((await store.snapshot()).lastSeq).toBe(seq);
+  });
   it('recovers unfinished MCP effects without replay and retains late audit without reviving cancellation', async () => {
     let { store, path } = await db();
     let session = await create(store);

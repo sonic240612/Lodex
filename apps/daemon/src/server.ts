@@ -20,6 +20,10 @@ import {
   type Command,
   type InferenceProvider,
   type Session,
+  mcpContentInputSchema,
+  type McpContextAttachment,
+  resolveModelConfig,
+  type ModelConfig,
 } from '@lodex/contracts';
 import { Store } from '@lodex/storage';
 import { ChatCompletionProvider, DemoProvider } from '@lodex/providers';
@@ -40,12 +44,22 @@ import {
 import { runAgent } from './agent-runner';
 import { planningTool } from './planning';
 import { verificationTools } from './autopilot';
-import { RuntimeManager, type RuntimeLease } from '@lodex/local-runtime';
+import { RuntimeManager } from '@lodex/local-runtime';
 import { inspectSkillDirectory, skillCatalog, type RegisteredSkill } from '@lodex/skills';
 import { skillTools } from './skills';
-import { McpConnection, importMcpConfigurations, mcpConfigSchema } from '@lodex/mcp';
+import {
+  McpConnection,
+  importMcpConfigurations,
+  mcpConfigSchema,
+  McpOAuthManager,
+  type McpConfig,
+} from '@lodex/mcp';
 import { RunMcp, selectedMcpTools } from './mcp';
 import { loadMcpSecret } from './secrets';
+import { McpContentPreviews } from './mcp-content';
+import { OAuthEnvStore } from './oauth-store';
+import { InferenceScheduler } from './inference-scheduler';
+import { subagentTool } from './subagents';
 import { z } from 'zod';
 declare const __dirname: string;
 const skillRegistrationInput = z
@@ -99,6 +113,13 @@ function json(response: ServerResponse, status: number, body: unknown): void {
   });
   response.end(JSON.stringify(body));
 }
+function operationSignal(response: ServerResponse, shutdown: AbortSignal): AbortSignal {
+  const disconnected = new AbortController();
+  response.once('close', () => {
+    if (!response.writableEnded) disconnected.abort();
+  });
+  return AbortSignal.any([shutdown, disconnected.signal, AbortSignal.timeout(30000)]);
+}
 export async function startServer(options: ServerOptions) {
   const { store } = options;
   const mcpSupervisorPath =
@@ -107,7 +128,32 @@ export async function startServer(options: ServerOptions) {
       ? join(__dirname, 'mcp-supervisor.cjs')
       : resolve('apps/daemon/dist/mcp-supervisor.cjs'));
   const resolveMcpSecret = async (name: string) => (await loadMcpSecret(name, options)) ?? null;
+  const oauthStore = options.envFilePath ? new OAuthEnvStore(options.envFilePath) : undefined;
+  const oauth = oauthStore ? new McpOAuthManager({ tokenStore: oauthStore }) : undefined;
+  const requireOAuth = () => {
+    if (!oauth)
+      throw new AppError('OAUTH_STORAGE', 'OAuth 저장에 사용할 앱 .env 경로가 필요합니다.');
+    return oauth;
+  };
+  const resolveOAuthToken = async (
+    config: McpConfig,
+    signal: AbortSignal,
+  ): Promise<string | undefined> => {
+    if (config.transport !== 'http' || !config.oauth) return undefined;
+    const token = await requireOAuth().accessToken(
+      { resourceUrl: config.url, clientId: config.oauth.clientId },
+      signal,
+    );
+    if (!token)
+      throw new AppError(
+        'MCP_OAUTH_REQUIRED',
+        '이 서버에 OAuth 로그인이 필요합니다. MCP 설정에서 로그인하세요.',
+        401,
+      );
+    return token;
+  };
   const shutdown = new AbortController();
+  const contentPreviews = new McpContentPreviews();
   const runtime = new RuntimeManager(
     store,
     options.supervisorPath ??
@@ -116,6 +162,17 @@ export async function startServer(options: ServerOptions) {
         : resolve('apps/daemon/dist/supervisor.cjs')),
   );
   let openrouterKey = options.openrouterKey ?? null;
+  function validateInferenceConfig(config: ModelConfig) {
+    if (config.provider !== 'demo' && !config.model)
+      throw new AppError('MODEL_REQUIRED', '먼저 역할에 사용할 모델 ID를 설정하세요.');
+    if (config.provider === 'openrouter') {
+      if (!config.cloudConsent)
+        throw new AppError('CLOUD_CONSENT', '이 역할의 OpenRouter 전송 동의가 필요합니다.', 403);
+      if (!openrouterKey)
+        throw new AppError('KEY_REQUIRED', '설정에서 OpenRouter API 키를 저장하세요.');
+    }
+  }
+  const inference = new InferenceScheduler(runtime, () => openrouterKey, options.providerFactory);
   let openrouterKeySource: SecretSource =
     options.openrouterKeySource ?? (openrouterKey ? 'os_keychain' : 'none');
   const active = new Map<string, { abort: AbortController; task: Promise<void> }>();
@@ -136,7 +193,8 @@ export async function startServer(options: ServerOptions) {
     skills: RegisteredSkill[],
     mcpSelections: ReturnType<typeof selectedMcpTools>,
   ): Promise<void> {
-    let lease: RuntimeLease | undefined;
+    const childConfig = session.routing?.subagent ?? session.config;
+    session = { ...session, config: resolveModelConfig(session) };
     const autopilot = session.autopilot;
     const loadSignal =
       autopilot && autopilot.runId === session.run?.id
@@ -151,30 +209,8 @@ export async function startServer(options: ServerOptions) {
           ])
         : controller.signal;
     try {
-      if (session.config.provider === 'llama-server' && session.config.managedModelId) {
-        lease = await runtime.acquire(
-          session.config.managedModelId,
-          loadSignal,
-          session.config.managedModelVersion,
-        );
-        session = {
-          ...session,
-          config: { ...session.config, model: lease.model, baseUrl: lease.baseUrl },
-        };
-        context = { ...context, request: { ...context.request, config: session.config } };
-      }
-      const provider =
-        options.providerFactory?.(
-          session,
-          session.config.provider === 'openrouter' ? openrouterKey : (lease?.key ?? null),
-        ) ??
-        (session.config.provider === 'demo'
-          ? new DemoProvider()
-          : new ChatCompletionProvider(
-              session.config.provider,
-              session.config.baseUrl,
-              session.config.provider === 'openrouter' ? openrouterKey : (lease?.key ?? null),
-            ));
+      loadSignal.throwIfAborted();
+      const provider = inference.provider(session);
       const project =
         session.projectId && context.request.tools?.length
           ? await store.project(session.projectId)
@@ -186,10 +222,19 @@ export async function startServer(options: ServerOptions) {
         controller,
         context,
         skills,
+        ...(session.routing?.subagentsEnabled
+          ? {
+              subagents: {
+                config: childConfig,
+                provider: inference.provider({ ...session, config: childConfig }),
+              },
+            }
+          : {}),
         mcp: new RunMcp({
           selections: mcpSelections,
           supervisorPath: mcpSupervisorPath,
           resolveSecret: resolveMcpSecret,
+          resolveOAuthToken,
         }),
         ...(project ? { project } : {}),
         ...(options.commandExecutor ? { commandExecutor: options.commandExecutor } : {}),
@@ -210,16 +255,25 @@ export async function startServer(options: ServerOptions) {
         })
         .catch(() => undefined);
     } finally {
-      try {
-        await lease?.release();
-      } finally {
-        active.delete(session.run!.id);
-      }
+      active.delete(session.run!.id);
     }
   }
   async function command(command: Command) {
     const receipt = await store.receipt(command);
     if (receipt) return receipt;
+    let attachment: McpContextAttachment | undefined;
+    if (command.type === 'attach_mcp_content') {
+      attachment = contentPreviews.get(command.previewId);
+      if (
+        (await store.registeredMcp()).find((server) => server.id === attachment!.serverId)
+          ?.revision !== attachment.serverRevision
+      )
+        throw new AppError(
+          'MCP_CHANGED',
+          '서버 등록이 변경되었습니다. MCP 내용을 다시 확인하세요.',
+          409,
+        );
+    }
     let context: CompiledContext | undefined;
     let selectedSkills: RegisteredSkill[] = [];
     let mcpSelections: ReturnType<typeof selectedMcpTools> = [];
@@ -233,11 +287,38 @@ export async function startServer(options: ServerOptions) {
         throw new AppError('BUSY', '중지한 실행을 정리하는 중입니다.', 409);
     }
     if (command.type === 'send_message' || command.type === 'start_autopilot') {
-      const session = await store.session(command.sessionId);
+      const stored = await store.session(command.sessionId);
+      const session = { ...stored, config: resolveModelConfig(stored) };
+      const configs = [session.config];
+      const childConfig = session.routing?.subagent ?? stored.config;
+      if (session.routing?.subagentsEnabled) configs.push(childConfig);
+      const usesCloud = configs.some((config) => config.provider === 'openrouter');
+      const hasProjectHistory = session.messages.some((message) =>
+        message.activities?.some(
+          (activity) =>
+            activity.subagents?.length ||
+            activity.execution ||
+            activity.edit ||
+            activity.changes ||
+            ['read_file', 'list_files', 'search_text'].includes(activity.label),
+        ),
+      );
       if (
-        session.config.provider === 'openrouter' &&
+        session.projectId &&
+        (session.routing?.subagentsEnabled || hasProjectHistory) &&
+        configs.some((config) => config.provider === 'openrouter' && !config.projectCloudConsent)
+      )
+        throw new AppError(
+          'PROJECT_CLOUD_CONSENT',
+          '프로젝트 작업 결과가 전달되는 모든 OpenRouter 역할에 프로젝트 전송 동의가 필요합니다.',
+          403,
+        );
+      if (
+        usesCloud &&
         !session.mcpCloudConsent &&
-        (session.hasMcpHistory || (session.mode !== 'plan' && session.mcp?.length))
+        (session.hasMcpHistory ||
+          session.mcpAttachments?.length ||
+          (session.mode !== 'plan' && session.mcp?.length))
       )
         throw new AppError(
           'MCP_CLOUD_CONSENT',
@@ -269,7 +350,7 @@ export async function startServer(options: ServerOptions) {
         return skill;
       });
       if (
-        session.config.provider === 'openrouter' &&
+        usesCloud &&
         !session.skillCloudConsent &&
         (selectedSkills.length ||
           session.hasSkillHistory ||
@@ -282,26 +363,43 @@ export async function startServer(options: ServerOptions) {
           '스킬 메타데이터와 읽은 내용을 OpenRouter로 보내려면 이 대화의 스킬 전송 동의가 필요합니다. 이전에 읽은 내용도 대화 기록에 남아 있습니다.',
           403,
         );
-      if (session.config.managedModelId) {
-        const profile = (await store.localProfiles()).find(
-          (p) => p.id === session.config.managedModelId,
-        );
-        if (
-          session.config.provider !== 'llama-server' ||
-          !profile ||
-          profile.version !== session.config.managedModelVersion
-        )
-          throw new AppError(
-            'MODEL_PROFILE_CHANGED',
-            '관리 모델 설정이 바뀌었거나 삭제되었습니다. 모델 목록에서 새 대화를 만드세요.',
-            409,
-          );
-        if (session.config.contextBudgetTokens > profile.settings.contextSize)
-          throw new AppError(
-            'ENGINE_CONTEXT_LIMIT',
-            '앱 컨텍스트 예산은 관리 엔진의 컨텍스트 길이 이하여야 합니다.',
-          );
+      for (const config of configs) {
+        if (config.managedModelId) {
+          const profile = (await store.localProfiles()).find((p) => p.id === config.managedModelId);
+          if (
+            config.provider !== 'llama-server' ||
+            !profile ||
+            profile.version !== config.managedModelVersion
+          )
+            throw new AppError(
+              'MODEL_PROFILE_CHANGED',
+              '관리 모델 설정이 바뀌었거나 삭제되었습니다. 모델 목록에서 새 대화를 만드세요.',
+              409,
+            );
+          if (config.contextBudgetTokens > profile.settings.contextSize)
+            throw new AppError(
+              'ENGINE_CONTEXT_LIMIT',
+              '앱 컨텍스트 예산은 관리 엔진의 컨텍스트 길이 이하여야 합니다.',
+            );
+        }
+        validateInferenceConfig(config);
       }
+      if (
+        session.routing?.subagentsEnabled &&
+        session.projectId &&
+        childConfig.provider === 'openrouter' &&
+        !childConfig.projectCloudConsent
+      )
+        throw new AppError(
+          'PROJECT_CLOUD_CONSENT',
+          '서브에이전트에 프로젝트 작업을 맡기려면 해당 역할의 프로젝트 전송 동의가 필요합니다.',
+          403,
+        );
+      if (command.type === 'start_autopilot' && usesCloud)
+        throw new AppError(
+          'AUTOPILOT_LOCAL_ONLY',
+          'OpenRouter 역할이 포함된 Autopilot은 비용 예산 기능 준비 후 지원합니다.',
+        );
       for (const other of (await store.snapshot()).sessions) {
         if (
           session.projectId &&
@@ -321,14 +419,6 @@ export async function startServer(options: ServerOptions) {
           '대화가 변경되었습니다. 최신 상태를 불러온 뒤 다시 시도하세요.',
           409,
         );
-      if (session.config.provider !== 'demo' && !session.config.model)
-        throw new AppError('MODEL_REQUIRED', '먼저 모델 ID를 설정하세요.');
-      if (session.config.provider === 'openrouter') {
-        if (!session.config.cloudConsent)
-          throw new AppError('CLOUD_CONSENT', '이 대화의 OpenRouter 전송 동의가 필요합니다.', 403);
-        if (!openrouterKey)
-          throw new AppError('KEY_REQUIRED', '설정에서 OpenRouter API 키를 저장하세요.');
-      }
       if (active.size >= 4)
         throw new AppError(
           'CONCURRENCY_LIMIT',
@@ -339,7 +429,7 @@ export async function startServer(options: ServerOptions) {
         const state = await store.snapshot();
         if (
           state.sessions.some(
-            (s) => s.run?.status === 'running' && s.config.provider === 'llama-server',
+            (s) => s.run?.status === 'running' && resolveModelConfig(s).provider === 'llama-server',
           )
         )
           throw new AppError(
@@ -356,6 +446,7 @@ export async function startServer(options: ServerOptions) {
             )
           : [];
       tools.push(planningTool);
+      if (session.routing?.subagentsEnabled) tools.push(subagentTool);
       tools.push(...mcpSelections.map((value) => value.definition));
       if (selectedSkills.length) tools.push(...skillTools);
       if (
@@ -371,7 +462,7 @@ export async function startServer(options: ServerOptions) {
         content = autopilotPrompt(autopilot);
       } else content = command.content;
       context = compileContext(
-        session,
+        stored,
         content,
         tools,
         selectedSkills.length
@@ -379,7 +470,9 @@ export async function startServer(options: ServerOptions) {
           : undefined,
       );
     }
-    const result = await store.apply(command, context?.manifest);
+    const result = await store.apply(command, context?.manifest, attachment);
+    if (command.type === 'attach_mcp_content' && !result.replayed)
+      contentPreviews.consume(command.previewId);
     if (
       !result.replayed &&
       (command.type === 'send_message' || command.type === 'start_autopilot')
@@ -414,6 +507,109 @@ export async function startServer(options: ServerOptions) {
         });
       } else if (request.method === 'GET' && url.pathname === '/v1/mcp') {
         json(response, 200, { servers: await store.registeredMcp() });
+      } else if (request.method === 'POST' && url.pathname === '/v1/mcp/content') {
+        const parsed = mcpContentInputSchema.safeParse(await readJson(request));
+        if (!parsed.success)
+          throw new AppError('MCP_CONTENT_INPUT', 'MCP 리소스·프롬프트 선택을 확인하세요.');
+        const signal = operationSignal(response, shutdown.signal);
+        json(
+          response,
+          200,
+          await serial(async () => {
+            const registration = (await store.registeredMcp()).find(
+              (server) => server.id === parsed.data.serverId,
+            );
+            if (!registration || registration.revision !== parsed.data.serverRevision)
+              throw new AppError('MCP_CHANGED', 'MCP 서버 정보가 변경되었습니다.', 409);
+            if (
+              (await store.snapshot()).sessions.some(
+                (session) =>
+                  session.mcp?.some((selection) => selection.serverId === registration.id) &&
+                  session.run &&
+                  (session.run.status === 'running' || active.has(session.run.id)),
+              )
+            )
+              throw new AppError('BUSY', '이 MCP 서버의 실행이 끝난 뒤 내용을 불러오세요.', 409);
+            signal.throwIfAborted();
+            return contentPreviews.create(
+              parsed.data,
+              async () =>
+                McpConnection.connect({
+                  config: registration.config,
+                  expected: registration,
+                  resolveSecret: resolveMcpSecret,
+                  supervisorPath: mcpSupervisorPath,
+                  signal,
+                  oauthToken: await resolveOAuthToken(registration.config, signal),
+                }),
+              signal,
+            );
+          }),
+        );
+      } else if (request.method === 'POST' && url.pathname === '/v1/mcp/oauth/prepare') {
+        const input = z
+          .strictObject({
+            resourceUrl: z.string().min(1).max(4096),
+            clientId: z.string().min(1).max(512),
+            scopes: z.array(z.string().min(1).max(256)).max(64).optional(),
+            authorizationServer: z.string().min(1).max(4096).optional(),
+          })
+          .safeParse(await readJson(request));
+        if (!input.success)
+          throw new AppError('OAUTH_INPUT', '서버 주소·client ID·scope를 확인하세요.');
+        json(
+          response,
+          200,
+          await requireOAuth().prepare(input.data, operationSignal(response, shutdown.signal)),
+        );
+      } else if (request.method === 'POST' && url.pathname === '/v1/mcp/oauth/begin') {
+        const input = z
+          .strictObject({
+            preparationId: z.uuid(),
+            approvedOrigins: z.array(z.string().max(4096)).min(1).max(8),
+          })
+          .safeParse(await readJson(request));
+        if (!input.success)
+          throw new AppError('OAUTH_INPUT', '검토한 OAuth 주소의 승인이 필요합니다.');
+        json(response, 200, await requireOAuth().begin(input.data));
+      } else if (
+        request.method === 'POST' &&
+        ['/v1/mcp/oauth/status', '/v1/mcp/oauth/cancel'].includes(url.pathname)
+      ) {
+        const input = z.strictObject({ id: z.uuid() }).safeParse(await readJson(request));
+        if (!input.success) throw new AppError('OAUTH_INPUT', 'OAuth 로그인 ID가 필요합니다.');
+        if (url.pathname.endsWith('/cancel')) await requireOAuth().cancel(input.data.id);
+        json(response, 200, requireOAuth().status(input.data.id));
+      } else if (request.method === 'POST' && url.pathname === '/v1/mcp/oauth/disconnect') {
+        const input = z
+          .strictObject({
+            resourceUrl: z.string().min(1).max(4096),
+            clientId: z.string().min(1).max(512),
+          })
+          .safeParse(await readJson(request));
+        if (!input.success)
+          throw new AppError('OAUTH_INPUT', 'OAuth 서버 주소와 client ID가 필요합니다.');
+        await serial(async () => {
+          const matching = new Set(
+            (await store.registeredMcp())
+              .filter(
+                (server) =>
+                  server.config.transport === 'http' &&
+                  server.config.oauth?.clientId === input.data.clientId &&
+                  new URL(server.config.url).href === new URL(input.data.resourceUrl).href,
+              )
+              .map((server) => server.id),
+          );
+          const runs = (await store.snapshot()).sessions
+            .filter((session) => session.mcp?.some((selection) => matching.has(selection.serverId)))
+            .flatMap((session) =>
+              session.run && active.has(session.run.id) ? [active.get(session.run.id)!] : [],
+            );
+          for (const run of runs) run.abort.abort();
+          await requireOAuth().disconnect(input.data);
+          await Promise.allSettled(runs.map((run) => run.task));
+        });
+        json(response, 200, { disconnected: true });
       } else if (request.method === 'POST' && url.pathname === '/v1/mcp/import') {
         const parsed = z
           .strictObject({ text: z.string().max(131072), cwd: z.string().max(4096).optional() })
@@ -438,8 +634,10 @@ export async function startServer(options: ServerOptions) {
         if (!parsed.success)
           throw new AppError('MCP_CONFIG', 'MCP 연결 설정과 실행 허용을 확인하세요.');
         const input = parsed.data;
+        const signal = operationSignal(response, shutdown.signal);
         json(response, 200, {
           server: await serial(async () => {
+            signal.throwIfAborted();
             if (
               input.id &&
               (await store.snapshot()).sessions.some(
@@ -466,12 +664,14 @@ export async function startServer(options: ServerOptions) {
               );
             const connection = await McpConnection.connect({
               config: input.config,
+              oauthToken: await resolveOAuthToken(input.config, signal),
               supervisorPath: mcpSupervisorPath,
               resolveSecret: resolveMcpSecret,
-              signal: AbortSignal.any([shutdown.signal, AbortSignal.timeout(30000)]),
+              signal,
             });
             const registration = connection.registration;
             await connection.close();
+            signal.throwIfAborted();
             return store.saveRegisteredMcp(
               { ...registration, ...(input.id ? { id: input.id } : {}) },
               input.expectedRevision,
@@ -806,6 +1006,7 @@ export async function startServer(options: ServerOptions) {
     async close() {
       closing = true;
       shutdown.abort();
+      await oauth?.close();
       for (const run of active.values()) run.abort.abort();
       await runtime.close();
       await queue;

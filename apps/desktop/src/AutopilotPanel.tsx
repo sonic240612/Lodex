@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { autopilotLimitsSchema, type Session } from '@lodex/contracts';
+import { autopilotLimitsSchema, resolveModelConfig, type Session } from '@lodex/contracts';
 import { nativeDesktop, sendCommand, snapshot } from './bridge';
 import { useWorkspace } from './state';
 
@@ -17,7 +17,11 @@ export function AutopilotPanel({ session }: { session: Session }) {
     !running &&
     !busy &&
     session.mode !== 'plan' &&
-    session.config.provider === 'llama-server' &&
+    resolveModelConfig(session).provider === 'llama-server' &&
+    !(
+      session.routing?.subagentsEnabled &&
+      (session.routing.subagent ?? session.config).provider === 'openrouter'
+    ) &&
     session.execution?.backend === 'docker';
   async function start() {
     setBusy(true);

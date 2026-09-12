@@ -31,6 +31,34 @@ function message(
   };
 }
 describe('context compiler', () => {
+  it('uses role config and removes opaque reasoning only across model identities', () => {
+    const source = session();
+    source.config.model = 'old';
+    source.routing = { subagentsEnabled: false, plan: { ...source.config, model: 'new' } };
+    source.mode = 'plan';
+    const answer = message('assistant', 'visible answer');
+    answer.continuation = [
+      {
+        role: 'assistant',
+        content: 'inspect',
+        reasoningContent: 'private old state',
+        reasoningDetails: [{ index: 0, data: 'opaque' }],
+        toolCalls: [{ id: 'read', name: 'read_file', arguments: '{}' }],
+      },
+      { role: 'tool', content: 'evidence', toolCallId: 'read' },
+      { role: 'assistant', content: 'visible answer' },
+    ];
+    source.messages = [answer];
+    const routed = compileContext(source, 'next').request;
+    expect(routed.config.model).toBe('new');
+    expect(JSON.stringify(routed.messages)).not.toContain('opaque');
+    expect(routed.messages[1]?.toolCalls?.[0]?.id).toBe('read');
+    expect(routed.messages[2]?.content).toBe('evidence');
+    source.mode = 'build';
+    expect(JSON.stringify(compileContext(source, 'next').request.messages)).toContain('opaque');
+    answer.inferenceConfig = { ...source.config, model: 'different' };
+    expect(JSON.stringify(compileContext(source, 'next').request.messages)).not.toContain('opaque');
+  });
   it('includes only enabled skill metadata and records catalog omissions in the request budget', () => {
     const source = session(),
       id = crypto.randomUUID(),
