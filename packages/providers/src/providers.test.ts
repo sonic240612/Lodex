@@ -50,17 +50,15 @@ describe('SSE protocol', () => {
 });
 describe('provider adapters', () => {
   it('separates structured thinking and preserves tool/reasoning wire fields', async () => {
-    const fetcher = vi
-      .fn<typeof fetch>()
-      .mockResolvedValue(
-        response(
-          data({
-            choices: [{ delta: { reasoning_content: '생각', content: '<think>생각</think>답변' } }],
-          }) +
-            data({ choices: [{ delta: {}, finish_reason: 'stop' }] }) +
-            'data: [DONE]\n\n',
-        ),
-      );
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      response(
+        data({
+          choices: [{ delta: { reasoning_content: '생각', content: '<think>생각</think>답변' } }],
+        }) +
+          data({ choices: [{ delta: {}, finish_reason: 'stop' }] }) +
+          'data: [DONE]\n\n',
+      ),
+    );
     const input: InferenceRequest = {
       config: { ...defaultModelConfig(), model: 'fixture' },
       messages: [
@@ -181,7 +179,20 @@ describe('provider adapters', () => {
     );
     const events = await collect(
       provider.generate(
-        { ...request(), config: { ...request().config, provider: 'openrouter' } },
+        {
+          ...request(),
+          config: { ...request().config, provider: 'openrouter' },
+          tools: [
+            {
+              type: 'function',
+              function: {
+                name: 'read_file',
+                description: 'Read a file',
+                parameters: { type: 'object' },
+              },
+            },
+          ],
+        },
         signal(),
       ),
     );
@@ -194,6 +205,7 @@ describe('provider adapters', () => {
       allow_fallbacks: false,
     });
     expect(body).not.toHaveProperty('stream_options');
+    expect(body).not.toHaveProperty('parallel_tool_calls');
     expect(init?.redirect).toBe('error');
     expect(events).toContainEqual({
       type: 'usage',
@@ -270,6 +282,51 @@ describe('provider adapters', () => {
         ),
       ),
     ).rejects.toThrow('HTTP 401');
+  });
+  it.each([
+    ['No endpoints found that support tool use', '도구 호출'],
+    ['No endpoints found with data_collection deny', '데이터 수집 금지'],
+    ['No endpoints found supporting requested parameters', '생성 설정'],
+    ['Model not found', '모델 ID를 찾을 수 없습니다'],
+  ])('explains an OpenRouter 404 without leaking %s', async (reason, expected) => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ error: { message: reason + ' private-secret' } }), {
+        status: 404,
+      }),
+    );
+    const run = collect(
+      new ChatCompletionProvider('openrouter', '', 'fixture-secret', fetcher).generate(
+        request(),
+        signal(),
+      ),
+    );
+    await expect(run).rejects.toThrow(expected);
+    await expect(run).rejects.not.toThrow('private-secret');
+  });
+  it('uses an actionable 404 fallback for malformed provider errors', async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response('bad json', { status: 404 }));
+    await expect(
+      collect(
+        new ChatCompletionProvider('openrouter', '', 'fixture-secret', fetcher).generate(
+          {
+            ...request(),
+            tools: [
+              {
+                type: 'function',
+                function: {
+                  name: 'read_file',
+                  description: 'Read a file',
+                  parameters: { type: 'object' },
+                },
+              },
+            ],
+          },
+          signal(),
+        ),
+      ),
+    ).rejects.toThrow('도구 지원 모델');
   });
   it('preserves unknown model capability values', async () => {
     const fetcher = vi

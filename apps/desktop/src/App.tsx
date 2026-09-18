@@ -1514,11 +1514,24 @@ function Settings({
                 </div>
                 <datalist id="model-catalog">
                   {catalog.map((model) => (
-                    <option value={model.id} key={model.id}>
+                    <option
+                      value={model.id}
+                      key={model.id}
+                      label={`${model.name}${model.tools === false ? ' · 도구 미지원' : model.tools ? ' · 도구 지원' : ''}`}
+                    >
                       {model.name}
                     </option>
                   ))}
                 </datalist>
+                {draft.provider === 'openrouter' && catalog.length > 0 && draft.model && (
+                  <small>
+                    {catalog.find((model) => model.id === draft.model)?.tools === false
+                      ? '이 모델은 도구 호출을 지원하지 않습니다. 프로젝트 도구를 쓰는 Build 작업에는 도구 지원 모델을 선택하세요.'
+                      : !catalog.some((model) => model.id === draft.model)
+                        ? '현재 목록에 없는 ID입니다. OpenRouter 모델 ID를 다시 확인하세요.'
+                        : '목록에 있는 모델 ID입니다. 도구 지원 여부는 모델별로 다릅니다.'}
+                  </small>
+                )}
               </label>
             ) : (
               <div className="demo-notice">

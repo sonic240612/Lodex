@@ -21,6 +21,41 @@ const object = (value: unknown): Record<string, unknown> =>
     : {};
 const number = (value: unknown): number | null =>
   typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+async function openRouterHttpError(response: Response, toolsRequested: boolean): Promise<string> {
+  if (response.status !== 404)
+    return '모델 요청 실패 (HTTP ' + response.status + '). OpenRouter 계정·키·사용량을 확인하세요.';
+
+  // Inspect only the error category. Provider bodies may contain private request details.
+  let reason = '';
+  try {
+    const reader = response.body?.getReader();
+    if (reader) {
+      const decoder = new TextDecoder();
+      let body = '';
+      while (body.length < 4096) {
+        const part = await reader.read();
+        if (part.done) break;
+        body += decoder.decode(part.value, { stream: true });
+      }
+      if (body.length >= 4096) await reader.cancel();
+      const message = object(object(JSON.parse(body)).error).message;
+      if (typeof message === 'string') reason = message.toLowerCase();
+    }
+  } catch {
+    // Malformed/unavailable error bodies must not replace the useful HTTP status.
+  }
+  if (/tool (use|calling)|support.*tools/.test(reason))
+    return 'OpenRouter 404: 이 모델에는 도구 호출을 지원하는 엔드포인트가 없습니다. 모델 연결의 목록 조회에서 도구 지원 모델을 선택하세요.';
+  if (/data.collection|data.policy|privacy|zero.data.retention|\bzdr\b/.test(reason))
+    return 'OpenRouter 404: 데이터 수집 금지 정책을 만족하는 제공자가 없습니다. 다른 모델을 선택하거나 OpenRouter 제공자 설정을 확인하세요.';
+  if (/parameter|temperature|top_p|max_tokens/.test(reason))
+    return 'OpenRouter 404: 현재 생성 설정을 모두 지원하는 제공자가 없습니다. 다른 모델을 선택하세요.';
+  if (/model.*(not found|does not exist|unknown|invalid)|invalid model|unknown model/.test(reason))
+    return 'OpenRouter 404: 모델 ID를 찾을 수 없습니다. 모델 연결의 목록 조회에서 정확한 ID를 선택하세요.';
+  return toolsRequested
+    ? 'OpenRouter 404: 모델 ID가 잘못되었거나 도구 호출·생성 설정·데이터 수집 금지 정책을 만족하는 제공자가 없습니다. 모델 연결의 목록 조회에서 도구 지원 모델을 선택하세요.'
+    : 'OpenRouter 404: 모델 ID가 잘못되었거나 생성 설정·데이터 수집 금지 정책을 만족하는 제공자가 없습니다. 모델 연결의 목록 조회에서 모델을 다시 선택하세요.';
+}
 export class ChatCompletionProvider implements InferenceProvider {
   private baseUrl: string;
   private fetcher: Fetch;
@@ -128,7 +163,11 @@ export class ChatCompletionProvider implements InferenceProvider {
             : {}),
         })),
         ...(request.tools?.length
-          ? { tools: request.tools, tool_choice: 'auto', parallel_tool_calls: false }
+          ? {
+              tools: request.tools,
+              tool_choice: 'auto',
+              ...(this.kind === 'llama-server' ? { parallel_tool_calls: false } : {}),
+            }
           : {}),
         stream: true,
         temperature: config.temperature,
@@ -148,7 +187,9 @@ export class ChatCompletionProvider implements InferenceProvider {
     if (!response.ok)
       throw new AppError(
         'PROVIDER_HTTP',
-        '모델 요청 실패 (HTTP ' + response.status + '). 주소·모델 ID·연결 설정을 확인하세요.',
+        this.kind === 'openrouter'
+          ? await openRouterHttpError(response, !!request.tools?.length)
+          : '모델 요청 실패 (HTTP ' + response.status + '). 주소·모델 ID·연결 설정을 확인하세요.',
         502,
       );
     if (!response.body || !response.headers.get('content-type')?.includes('text/event-stream'))
