@@ -604,16 +604,6 @@ export function App() {
               <span className="model-name">{config.model || '모델 연결'}</span>
               <Icon name="down" size={15} />
             </button>
-            <button
-              className={`autopilot-toggle ${autopilotOn ? 'is-on' : ''}`}
-              aria-pressed={autopilotOn}
-              disabled={busy || !workspace.connected || (running && !autopilotOn)}
-              title="Autopilot 실행/중지"
-              onClick={() => void toggleAutopilot()}
-            >
-              <span className="status-dot" />
-              Autopilot {autopilotOn ? 'ON' : 'OFF'}
-            </button>
           </div>
           <div className="topbar-right">
             <span className="mode-badge" title={project?.path}>
@@ -842,6 +832,18 @@ export function App() {
                 <Icon name={config.provider === 'openrouter' ? 'cloud' : 'chip'} size={15} />
                 {providerName(config.provider)}
                 <Icon name="down" size={12} />
+              </button>
+              <button
+                type="button"
+                className={`autopilot-toggle ${autopilotOn ? 'is-on' : ''}`}
+                aria-label={`Autopilot ${autopilotOn ? '끄기' : '켜기'}`}
+                aria-pressed={autopilotOn}
+                disabled={!session || busy || !workspace.connected || (running && !autopilotOn)}
+                title="Autopilot 실행/중지"
+                onClick={() => void toggleAutopilot()}
+              >
+                <span className="status-dot" />
+                Autopilot {autopilotOn ? 'ON' : 'OFF'}
               </button>
               {config.eco && (
                 <span className="eco-tag">
