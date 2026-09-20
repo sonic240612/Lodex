@@ -8,6 +8,7 @@ import {
   type Project,
 } from '@lodex/contracts';
 import { nativeDesktop } from './bridge';
+import { loadLastModelConfig, saveLastModelConfig } from './model-preference';
 interface WorkspaceState {
   sessions: Session[];
   deletedSessionIds: string[];
@@ -31,6 +32,10 @@ interface WorkspaceState {
   setConnected: (connected: boolean) => void;
   setKeyConfigured: (value: boolean) => void;
 }
+const initialConfig = nativeDesktop
+  ? (loadLastModelConfig() ?? defaultModelConfig())
+  : { ...defaultModelConfig(), provider: 'demo' as const, model: 'demo' };
+
 export const useWorkspace = create<WorkspaceState>((set) => ({
   sessions: [],
   deletedSessionIds: [],
@@ -43,10 +48,7 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
   projects: [],
   selectedProjectId: null,
   selectedId: null,
-  config: {
-    ...defaultModelConfig(),
-    ...(nativeDesktop ? {} : { provider: 'demo', model: 'demo' }),
-  },
+  config: initialConfig,
   connected: false,
   openrouterConfigured: false,
   lastSeq: 0,
@@ -104,13 +106,24 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
     set((state) => ({ projects: [...state.projects.filter((p) => p.id !== project.id), project] })),
   selectProject: (selectedProjectId) => set({ selectedProjectId, selectedId: null }),
   select: (selectedId) =>
-    set((state) => ({
-      selectedId: selectedId && state.deletedSessionIds.includes(selectedId) ? null : selectedId,
-      ...(selectedId
-        ? { selectedProjectId: state.sessions.find((s) => s.id === selectedId)?.projectId ?? null }
-        : {}),
-    })),
-  setConfig: (config) => set({ config }),
+    set((state) => {
+      const allowedId =
+        selectedId && !state.deletedSessionIds.includes(selectedId) ? selectedId : null;
+      const selected = allowedId
+        ? state.sessions.find((session) => session.id === allowedId)
+        : null;
+      if (selected && nativeDesktop) saveLastModelConfig(selected.config);
+      return {
+        selectedId: allowedId,
+        ...(selected
+          ? { selectedProjectId: selected.projectId ?? null, config: selected.config }
+          : {}),
+      };
+    }),
+  setConfig: (config) => {
+    if (nativeDesktop) saveLastModelConfig(config);
+    set({ config });
+  },
   setConnected: (connected) => set({ connected }),
   setKeyConfigured: (openrouterConfigured) =>
     set({

@@ -25,6 +25,7 @@ import {
 import { Icon, Logo } from './icons';
 import { useWorkspace } from './state';
 import { ActivityCards } from './ActivityCards';
+import { loadLastModelConfig } from './model-preference';
 import { ProjectDialog } from './ProjectDialog';
 import { Markdown } from './Markdown';
 import { ConversationHistory } from './ConversationHistory';
@@ -143,6 +144,8 @@ export function App() {
       try {
         const state = await snapshot();
         if (disposed) return;
+        if (nativeDesktop && !loadLastModelConfig() && state.sessions[0])
+          useWorkspace.getState().setConfig(state.sessions[0].config);
         useWorkspace.getState().replace(state);
         retries = 0;
         cleanup = await subscribe(
@@ -196,6 +199,7 @@ export function App() {
       mode,
     });
     workspace.upsert(result.session);
+    workspace.setConfig(modelConfig);
     workspace.select(result.session.id);
     return result.session;
   }

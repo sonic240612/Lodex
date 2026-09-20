@@ -33,3 +33,21 @@ it('removes the current chat and ignores late responses and replayed events for 
   expect(useWorkspace.getState().selectedId).toBeNull();
   expect(useWorkspace.getState().lastSeq).toBe(1);
 });
+
+it('uses the selected conversation model as the next conversation default', () => {
+  const session: Session = {
+    id: crypto.randomUUID(),
+    title: 'selected model',
+    version: 1,
+    createdAt: '2026',
+    updatedAt: '2026',
+    config: { ...defaultModelConfig(), model: 'saved-model', temperature: 0.25 },
+    plan: defaultPlan(),
+    messages: [],
+    run: null,
+  };
+  const store = useWorkspace.getState();
+  store.upsert(session);
+  store.select(session.id);
+  expect(useWorkspace.getState().config).toEqual(session.config);
+});
