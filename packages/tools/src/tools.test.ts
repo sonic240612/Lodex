@@ -133,6 +133,27 @@ describe('project read tools', () => {
     expect(await readFile(join(path, 'src', 'hello.ts'), 'utf8')).toBe('user changed');
     expect(await checkEdit(project, edit, signal)).toBe('conflict');
   });
+  it('preserves a normalized fused validation command on the proposal', async () => {
+    const { project, run } = await setup();
+    const { sha256 } = await run('read_file', { path: 'src/hello.ts' });
+    const edit = await proposeEdit(
+      project,
+      {
+        path: 'src/hello.ts',
+        expectedHash: sha256,
+        oldText: '안녕',
+        newText: '반가워',
+        thenRun: { command: 'npm test' },
+      },
+      new AbortController().signal,
+    );
+    expect(edit.thenRun).toEqual({
+      command: 'npm test',
+      cwd: '.',
+      timeoutMs: 60000,
+      stdin: '',
+    });
+  });
   it('rejects ambiguous replacements and forbidden edit paths', async () => {
     const { path, run } = await setup();
     await writeFile(join(path, 'src', 'hello.ts'), 'repeat repeat');

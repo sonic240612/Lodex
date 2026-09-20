@@ -60,6 +60,12 @@ export function EditReview({
         <strong>{grouped ? `${files.length}개 파일 변경` : files[0]!.path}</strong>
         <span>{editStatusText[edit.status]}</span>
       </div>
+      {edit.thenRun && (
+        <div className="activity-section">
+          <span>적용 후 검증 · Docker</span>
+          <pre>{edit.thenRun.command}</pre>
+        </div>
+      )}
       {files.map((file) => (
         <div key={file.path} className="file-change">
           {grouped && (

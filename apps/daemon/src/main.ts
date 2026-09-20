@@ -70,6 +70,7 @@ async function main() {
     store,
     supervisorPath: join(__dirname, 'supervisor.cjs'),
     worktreeRoot: join(config.dataDir, 'worktrees'),
+    observationRoot: join(config.dataDir, 'observations'),
     ...(config.telegramToken ? { telegramToken: config.telegramToken } : {}),
     ...secrets,
   });

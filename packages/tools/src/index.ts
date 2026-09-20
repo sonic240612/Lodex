@@ -8,6 +8,7 @@ import {
   type ToolDefinition,
   type EditProposal,
   type ChangeSet,
+  runCommandSchema,
 } from '@lodex/contracts';
 import { createTwoFilesPatch } from 'diff';
 import { proposeChanges, changeInputSchema } from './changes';
@@ -51,6 +52,7 @@ const schemas = {
     expectedHash: z.string().regex(/^[a-f0-9]{64}$/),
     oldText: z.string().min(1).max(6000),
     newText: z.string().max(6000),
+    thenRun: runCommandSchema.optional(),
   }),
   list_files: z.strictObject({ path: pathSchema }),
   read_file: z.strictObject({
@@ -66,9 +68,9 @@ const schemas = {
 };
 const descriptions: Record<keyof typeof schemas, string> = {
   propose_changes:
-    'Propose a reviewed set of 1-8 UTF-8 file changes. kind edit requires read_file sha256, one exact oldText and newText. kind create requires a nonexistent path inside an EXISTING directory and content. A missing project-root .env or .env.* file may be created this way, but existing dotenv files cannot be read or edited. Paths must be distinct. Total tool arguments stay under 16 KiB. NEVER writes; user reviews and applies the entire set in the UI. No directories, deletion or commands.',
+    'Propose a reviewed set of 1-8 UTF-8 file changes. kind edit requires read_file sha256, one exact oldText and newText. kind create requires a nonexistent path inside an EXISTING directory and content. A missing project-root .env or .env.* file may be created this way, but existing dotenv files cannot be read or edited. Paths must be distinct. Optional thenRun fuses one Docker validation command with the approved change set. Total tool arguments stay under 16 KiB. NEVER writes before approval. No directories or deletion.',
   propose_edit:
-    'Propose one exact text replacement in an existing UTF-8 project file. First read_file for its sha256 as expectedHash; oldText must match exactly once, without line numbers. Preserves CRLF. Produces a diff for user review; NEVER writes a file. The user applies it in the UI after the response ends. No creation, deletion or commands.',
+    'Propose one exact text replacement in an existing UTF-8 project file. First read_file for its sha256 as expectedHash; oldText must match exactly once, without line numbers. Preserves CRLF. Optional thenRun fuses one Docker validation command with the approved edit. Produces a diff for review and NEVER writes before approval. No creation or deletion.',
   list_files:
     'List up to 200 files/directories directly inside a project-relative directory. Start with path ".". No file content is read.',
   read_file:
@@ -247,6 +249,7 @@ export async function proposeEdit(
     diff: patch,
     status: 'proposed',
     offset: text.indexOf(oldText),
+    ...(args.thenRun ? { thenRun: args.thenRun } : {}),
   };
 }
 export async function checkEdit(
@@ -416,6 +419,7 @@ export async function runProjectTool(
       return JSON.stringify({
         files: changes.files.map((f) => ({ path: f.path, afterHash: f.afterHash, diff: f.diff })),
         applied: false,
+        ...(changes.thenRun ? { thenRun: changes.thenRun } : {}),
         message: 'Proposal only. Await user review and apply the set in the UI.',
       });
     }
@@ -428,6 +432,7 @@ export async function runProjectTool(
         afterHash: edit.afterHash,
         diff: edit.diff,
         applied: false,
+        ...(edit.thenRun ? { thenRun: edit.thenRun } : {}),
         message: 'Proposal only. Await user review and apply in the UI.',
       });
     }

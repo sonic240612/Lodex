@@ -24,6 +24,7 @@ import { runSkillTool } from './skills';
 import type { RunMcp } from './mcp';
 import type { RegisteredSkill } from '@lodex/skills';
 import { parseDelegation, runSubagents } from './subagents';
+import type { ObservationPack } from './observations';
 
 import { ToolCallAssembler, mergeDetails } from './tool-stream';
 import {
@@ -66,6 +67,7 @@ export async function runAgent(options: {
   pricing?: (config: ModelConfig) => ModelPricing | undefined;
   waitForApproval?: (activityId: string, signal: AbortSignal) => Promise<Activity>;
   applyApprovedEdit?: (activityId: string) => Promise<void>;
+  observations?: ObservationPack;
 }) {
   const { store, session, provider, context, controller, project } = options;
   const runId = session.run!.id;
@@ -244,7 +246,12 @@ export async function runAgent(options: {
       signal.throwIfAborted();
       const request = {
         ...context.request,
-        messages: [...context.request.messages, ...continuation],
+        messages: options.observations
+          ? await options.observations.project(session.id, [
+              ...context.request.messages,
+              ...continuation,
+            ])
+          : [...context.request.messages, ...continuation],
       };
       const manifest = {
         ...context.manifest,
@@ -414,6 +421,7 @@ export async function runAgent(options: {
         };
         await reserveToolCall();
         let result: string;
+        let observationResult: string | undefined;
         if (call.name === 'delegate_tasks') {
           if (!options.subagents)
             throw new AppError('SUBAGENTS_DISABLED', '서브에이전트가 활성화되지 않았습니다.');
@@ -494,6 +502,10 @@ export async function runAgent(options: {
               message: error instanceof AppError ? error.message : '검증 인자가 올바르지 않습니다.',
             });
           }
+        } else if (call.name === 'recall_observation') {
+          if (!options.observations)
+            throw new AppError('OBSERVATION_UNAVAILABLE', '보관된 도구 결과를 읽을 수 없습니다.');
+          result = await options.observations.recall(session.id, call.arguments);
         } else if (call.name.startsWith('mcp_')) {
           if (!options.mcp) throw new AppError('MCP_DISABLED', 'MCP 도구가 연결되지 않았습니다.');
           if (
@@ -578,11 +590,15 @@ export async function runAgent(options: {
               message: 'The user rejected this command. Do not claim it ran.',
             });
           else {
+            let capturedOutput = '';
             const execution = await (options.commandExecutor ?? executeCommand)({
               project,
               config: session.execution,
               argumentsJson: call.arguments,
               signal,
+              captureOutput: (chunk) => {
+                if (chunk) capturedOutput += chunk;
+              },
               record: async (execution) => {
                 card.execution = structuredClone(execution);
                 await store.recordExecution(session.id, card.id, execution);
@@ -596,6 +612,17 @@ export async function runAgent(options: {
               exitCode: execution.exitCode,
               status: execution.status,
               output: execution.output,
+              truncated: execution.truncated,
+              cleanupPending: execution.cleanupPending,
+            });
+            observationResult = JSON.stringify({
+              ...(execution.status !== 'completed'
+                ? { error: execution.error ?? 'COMMAND_FAILED' }
+                : {}),
+              executionId: execution.id,
+              exitCode: execution.exitCode,
+              status: execution.status,
+              output: capturedOutput || execution.output,
               truncated: execution.truncated,
               cleanupPending: execution.cleanupPending,
             });
@@ -619,10 +646,14 @@ export async function runAgent(options: {
             network: 'bridge',
             environment: 'host',
           });
+          let capturedOutput = '';
           const execution = await executeHostCommand({
             project,
             argumentsJson: call.arguments,
             signal,
+            captureOutput: (chunk) => {
+              if (chunk) capturedOutput += chunk;
+            },
             record: async (execution) => {
               card.execution = structuredClone(execution);
               await store.recordExecution(session.id, card.id, execution);
@@ -636,6 +667,16 @@ export async function runAgent(options: {
             exitCode: execution.exitCode,
             status: execution.status,
             output: execution.output,
+            truncated: execution.truncated,
+          });
+          observationResult = JSON.stringify({
+            ...(execution.status !== 'completed'
+              ? { error: execution.error ?? 'COMMAND_FAILED' }
+              : {}),
+            executionId: execution.id,
+            exitCode: execution.exitCode,
+            status: execution.status,
+            output: capturedOutput || execution.output,
             truncated: execution.truncated,
           });
         } else {
@@ -664,9 +705,24 @@ export async function runAgent(options: {
           const proposal = activityProposal(card)!;
           const paths =
             'files' in proposal ? proposal.files.map((file) => file.path) : [proposal.path];
+          const thenRun = proposal.thenRun;
+          if (thenRun && (!project || session.execution?.backend !== 'docker'))
+            throw new AppError(
+              'EXECUTION_DISABLED',
+              '수정 후 검증을 함께 실행하려면 이 대화의 Docker 명령 실행을 켜야 합니다.',
+              403,
+            );
           const permission = permissionDecision(
             session.permissionMode ?? defaultPermissionMode(),
-            { kind: 'file', paths },
+            thenRun
+              ? {
+                  kind: 'fusion',
+                  paths,
+                  command: thenRun.command,
+                  network: session.execution!.network,
+                  environment: 'docker',
+                }
+              : { kind: 'file', paths },
             session.run?.actor ?? 'desktop',
           );
           const approval = options.waitForApproval(card.id, signal);
@@ -693,17 +749,62 @@ export async function runAgent(options: {
           const decision = activityProposal(decided);
           if (!decision)
             throw new AppError('EDIT_NOT_FOUND', '검토 중인 수정안을 찾을 수 없습니다.');
-          result = JSON.stringify({
-            status: decision.status,
-            message:
-              decision.status === 'applied'
-                ? 'The user approved and applied the proposed changes. Continue from the updated project.'
-                : decision.status === 'rejected'
-                  ? 'The user rejected the proposed changes. Do not assume they were applied.'
-                  : 'The review finished with status ' +
-                    decision.status +
-                    '. Inspect before continuing.',
-          });
+          if (decision.status === 'applied' && thenRun) {
+            let capturedOutput = '';
+            const execution = await (options.commandExecutor ?? executeCommand)({
+              project: project!,
+              config: session.execution!,
+              argumentsJson: JSON.stringify(thenRun),
+              signal,
+              captureOutput: (chunk) => {
+                if (chunk) capturedOutput += chunk;
+              },
+              record: async (execution) => {
+                card.execution = structuredClone(execution);
+                await store.recordExecution(session.id, card.id, execution);
+              },
+            });
+            const combined = {
+              ...(execution.status !== 'completed'
+                ? { error: execution.error ?? 'COMMAND_FAILED' }
+                : {}),
+              status: execution.status,
+              editStatus: decision.status,
+              validation: {
+                command: thenRun.command,
+                executionId: execution.id,
+                exitCode: execution.exitCode,
+                output: execution.output,
+                truncated: execution.truncated,
+              },
+              message:
+                execution.status === 'completed'
+                  ? 'The approved changes were applied and their fused validation passed.'
+                  : 'The approved changes were applied, but their fused validation failed. Inspect the output; do not revert unless requested.',
+            };
+            result = JSON.stringify(combined);
+            observationResult = JSON.stringify({
+              ...combined,
+              validation: {
+                ...combined.validation,
+                output: capturedOutput || execution.output,
+              },
+            });
+            if (execution.cleanupPending) throw new AppError('CLEANUP_REQUIRED', execution.error!);
+          } else {
+            result = JSON.stringify({
+              status: decision.status,
+              editStatus: decision.status,
+              message:
+                decision.status === 'applied'
+                  ? 'The user approved and applied the proposed changes. Continue from the updated project.'
+                  : decision.status === 'rejected'
+                    ? 'The user rejected the proposed changes. Do not assume they were applied.'
+                    : 'The review finished with status ' +
+                      decision.status +
+                      '. Inspect before continuing.',
+            });
+          }
         }
         signal.throwIfAborted();
         card.text = card.execution
@@ -723,16 +824,34 @@ export async function runAgent(options: {
             output?: string;
             truncated?: boolean;
             fullOutputAvailableInActivity?: boolean;
+            validation?: {
+              output?: string;
+              truncated?: boolean;
+              fullOutputAvailableInActivity?: boolean;
+            };
           };
           const limit = session.config.eco ? 2400 : 6000;
-          if (data.output && data.output.length > limit) {
-            data.output =
-              data.output.slice(0, limit / 4) +
+          const executionResult = data.validation ?? data;
+          if (executionResult.output && executionResult.output.length > limit) {
+            executionResult.output =
+              executionResult.output.slice(0, limit / 4) +
               '\n[context excerpt; full captured output is in the activity card]\n' +
-              data.output.slice((-limit * 3) / 4);
-            data.truncated = true;
-            data.fullOutputAvailableInActivity = true;
+              executionResult.output.slice((-limit * 3) / 4);
+            executionResult.truncated = true;
+            executionResult.fullOutputAvailableInActivity = true;
             contextResult = JSON.stringify(data);
+          }
+        }
+        if (options.observations && session.config.eco) {
+          try {
+            contextResult = await options.observations.archive(
+              session.id,
+              call.name,
+              call.id,
+              observationResult ?? contextResult,
+            );
+          } catch {
+            // Fail open: archival must never hide a tool result or stop the active run.
           }
         }
         continuation.push({ role: 'tool', content: contextResult, toolCallId: call.id });

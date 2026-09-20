@@ -9,13 +9,14 @@ A desktop agent harness for local LLMs and OpenRouter.
 - Assign Plan, Build, and subagent models; delegate up to three isolated read-only tasks at a time.
 - Create a Git worktree as a separate project without changing the original working files.
 - Pair a Telegram bot for messages, status, plans, and cancellation in one selected conversation.
-- Read project files, review changes, apply them, and undo them.
+- Read project files, review changes, apply them with fused validation, and undo them.
 - Switch between Plan and Build, review AI plans, and edit task criteria and dependencies.
 - Run commands in an opt-in Docker container, with collapsible output and cancellation.
 - Run local Autopilot with task dependencies, saved verification commands, and explicit budgets.
 - Choose Ask, Approve for me, or Full Access per conversation; Plan always stays read-only.
 - Select local SKILL.md folders per conversation and load instructions only when needed.
 - Connect stdio or Streamable HTTP MCP servers and choose tools per conversation.
+- Use Eco mode to compact history and recall archived large tool results only when needed.
 - Adjust generation settings and see token usage, generation speed, and prefill speed.
 
 Early development. Windows x64 tested; macOS and Linux builds checked in CI.

@@ -4,6 +4,13 @@ export type PermissionRequest =
   | { kind: 'file'; paths: string[] }
   | { kind: 'command'; command: string; network: 'none' | 'bridge'; environment: 'docker' | 'host' }
   | {
+      kind: 'fusion';
+      paths: string[];
+      command: string;
+      network: 'none' | 'bridge';
+      environment: 'docker' | 'host';
+    }
+  | {
       kind: 'mcp';
       target: string;
       readOnly: boolean;
@@ -50,7 +57,9 @@ export function permissionDecision(
           ? request.paths.join(', ')
           : request.kind === 'command'
             ? request.command
-            : request.target,
+            : request.kind === 'fusion'
+              ? `${request.paths.join(', ')}\n→ ${request.command}`
+              : request.target,
       actor,
       mode,
       risk: 'high',
@@ -79,6 +88,36 @@ export function permissionDecision(
       reason: secret
         ? '비밀 또는 인증 설정으로 사용될 수 있는 파일을 변경합니다.'
         : '프로젝트 파일을 변경합니다.',
+      action: 'prompt',
+    };
+  }
+
+  if (request.kind === 'fusion') {
+    const secret = request.paths.some(secretPath);
+    const high =
+      secret ||
+      request.environment === 'host' ||
+      request.network === 'bridge' ||
+      dangerousCommand(request.command);
+    if (mode === 'auto' && !high)
+      return {
+        kind: 'fusion',
+        target: `${request.paths.join(', ')}\n→ ${request.command}`,
+        actor,
+        mode,
+        risk: 'low',
+        reason: '일반 프로젝트 파일 변경과 외부 네트워크가 없는 Docker 검증을 함께 실행합니다.',
+        action: 'allow',
+      };
+    return {
+      kind: 'fusion',
+      target: `${request.paths.join(', ')}\n→ ${request.command}`,
+      actor,
+      mode,
+      risk: high ? 'high' : 'low',
+      reason: high
+        ? '파일 변경 뒤 위험하거나 외부 접근 가능성이 있는 검증 명령을 실행합니다.'
+        : '프로젝트 파일 변경과 검증 명령을 함께 실행합니다.',
       action: 'prompt',
     };
   }

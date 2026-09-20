@@ -54,6 +54,30 @@ describe('permission policy', () => {
     ).toMatchObject({ action: 'prompt', risk: 'high' });
   });
 
+  it('treats an edit and its validation command as one policy decision', () => {
+    const safe = {
+      kind: 'fusion' as const,
+      paths: ['src/app.ts'],
+      command: 'npm test',
+      network: 'none' as const,
+      environment: 'docker' as const,
+    };
+    expect(permissionDecision('ask', safe)).toMatchObject({
+      kind: 'fusion',
+      action: 'prompt',
+      risk: 'low',
+    });
+    expect(permissionDecision('auto', safe)).toMatchObject({
+      kind: 'fusion',
+      action: 'allow',
+      risk: 'low',
+    });
+    expect(permissionDecision('auto', { ...safe, command: 'npm test && rm -rf .' })).toMatchObject({
+      action: 'prompt',
+      risk: 'high',
+    });
+  });
+
   it('allows every classified action in full access and records high risk', () => {
     expect(
       permissionDecision('full', {

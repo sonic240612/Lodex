@@ -9,6 +9,7 @@ import {
   type ChangeSet,
   type FileChange,
   type CreatedFileProposal,
+  runCommandSchema,
 } from '@lodex/contracts';
 import {
   digest,
@@ -39,6 +40,7 @@ export const changeInputSchema = z.strictObject({
     )
     .min(1)
     .max(8),
+  thenRun: runCommandSchema.optional(),
 });
 const isCreate = (file: FileChange): file is CreatedFileProposal =>
   'kind' in file && file.kind === 'create';
@@ -120,7 +122,7 @@ export async function proposeChanges(
     Buffer.byteLength(files.map((f) => f.diff).join('\n')) > 48000
   )
     throw new AppError('DIFF_LIMIT', '변경 묶음이 너무 큽니다. 파일 수나 수정 범위를 줄여 주세요.');
-  return { files, status: 'proposed' };
+  return { files, status: 'proposed', ...(args.thenRun ? { thenRun: args.thenRun } : {}) };
 }
 
 // A crash between link() and unlink() can leave the owned staging name. Only

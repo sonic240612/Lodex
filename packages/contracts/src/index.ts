@@ -95,6 +95,7 @@ export const runCommandSchema = z.strictObject({
   timeoutMs: z.number().int().min(1000).max(120000).default(60000),
   stdin: z.string().max(8000).default(''),
 });
+export type FusedCommand = z.infer<typeof runCommandSchema>;
 export interface CommandExecution {
   id: string;
   containerName: string;
@@ -426,6 +427,8 @@ export interface EditProposal {
   newText: string;
   diff: string;
   status: 'proposed' | 'applying' | 'applied' | 'reverted' | 'rejected' | 'conflict' | 'uncertain';
+  /** Optional validation command approved and executed with this exact file mutation. */
+  thenRun?: FusedCommand;
   error?: string;
 }
 export type ChangeStatus = EditProposal['status'] | 'partial';
@@ -442,6 +445,8 @@ export type FileChange = EditProposal | CreatedFileProposal;
 export interface ChangeSet {
   files: FileChange[];
   status: ChangeStatus;
+  /** Optional validation command approved and executed after the whole set is applied. */
+  thenRun?: FusedCommand;
   operation?: 'apply' | 'undo';
   observations?: { path: string; state: 'before' | 'after' | 'conflict' | 'unknown' }[];
   error?: string;
@@ -462,7 +467,7 @@ export const approvalActionSchema = z.strictObject({
 });
 export type ApprovalAction = z.infer<typeof approvalActionSchema>;
 export interface PermissionDecision {
-  kind: 'file' | 'command' | 'mcp';
+  kind: 'file' | 'command' | 'mcp' | 'fusion';
   target: string;
   actor: 'desktop' | 'telegram';
   mode: PermissionMode;

@@ -64,7 +64,7 @@ export type DockerCli = (
   args: string[],
   signal: AbortSignal,
   input?: string,
-  progress?: (output: string) => void,
+  progress?: (output: string, chunk?: string) => void,
 ) => Promise<CliResult>;
 
 export function runCli(
@@ -72,7 +72,7 @@ export function runCli(
   args: string[],
   signal: AbortSignal,
   input = '',
-  progress?: (output: string) => void,
+  progress?: (output: string, chunk?: string) => void,
 ): Promise<CliResult> {
   return new Promise((resolve, reject) => {
     signal.throwIfAborted();
@@ -94,7 +94,7 @@ export function runCli(
         output = output.slice(0, 8000) + '\n[output truncated]\n' + output.slice(-15000);
         truncated = true;
       }
-      progress?.(output);
+      progress?.(output, text);
       if (total > 1048576) {
         truncated = true;
         child.kill();
@@ -134,7 +134,7 @@ export type HostCommandRunner = (
   cwd: string,
   signal: AbortSignal,
   input?: string,
-  progress?: (output: string) => void,
+  progress?: (output: string, chunk?: string) => void,
 ) => Promise<CliResult>;
 
 export const hostCommandRunner: HostCommandRunner = (command, cwd, signal, input = '', progress) =>
@@ -190,7 +190,7 @@ export const hostCommandRunner: HostCommandRunner = (command, cwd, signal, input
         output = output.slice(0, 8000) + '\n[output truncated]\n' + output.slice(-15000);
         truncated = true;
       }
-      progress?.(output);
+      progress?.(output, text);
       if (total > 1048576) terminate();
     };
     const abort = () => terminate();
@@ -402,6 +402,7 @@ export async function executeCommand(options: {
   argumentsJson: string;
   signal: AbortSignal;
   record: (execution: CommandExecution) => Promise<void>;
+  captureOutput?: (chunk: string) => void;
   cli?: DockerCli;
 }): Promise<CommandExecution> {
   const { project, signal: parent, record, cli = dockerCli } = options;
@@ -461,7 +462,8 @@ export async function executeCommand(options: {
       ['--host', runtime.host, 'start', '--attach', '--interactive', execution.containerId],
       signal,
       input.stdin,
-      (output) => {
+      (output, chunk) => {
+        if (chunk) options.captureOutput?.(chunk);
         execution.output = output;
         if (performance.now() - lastSave > 250) {
           lastSave = performance.now();
@@ -542,6 +544,7 @@ export async function executeHostCommand(options: {
   argumentsJson: string;
   signal: AbortSignal;
   record: (execution: CommandExecution) => Promise<void>;
+  captureOutput?: (chunk: string) => void;
   runner?: HostCommandRunner;
 }): Promise<CommandExecution> {
   const { project, signal: parent, record, runner = hostCommandRunner } = options;
@@ -571,7 +574,8 @@ export async function executeHostCommand(options: {
   try {
     execution.status = 'running';
     await record(execution);
-    const result = await runner(input.command, cwd, signal, input.stdin, (output) => {
+    const result = await runner(input.command, cwd, signal, input.stdin, (output, chunk) => {
+      if (chunk) options.captureOutput?.(chunk);
       execution.output = output;
       if (performance.now() - lastSave > 250) {
         lastSave = performance.now();

@@ -73,6 +73,7 @@ import { McpContentPreviews } from './mcp-content';
 import { OAuthEnvStore } from './oauth-store';
 import { InferenceScheduler } from './inference-scheduler';
 import { subagentTool } from './subagents';
+import { isObservationMarker, ObservationPack, observationRecallTool } from './observations';
 import { z } from 'zod';
 declare const __dirname: string;
 const skillRegistrationInput = z
@@ -93,6 +94,7 @@ const skillRemovalInput = z.strictObject({
 
 interface ServerOptions {
   worktreeRoot?: string;
+  observationRoot?: string;
   telegramFetch?: typeof fetch;
   telegramToken?: string;
   token: string;
@@ -138,6 +140,9 @@ function operationSignal(response: ServerResponse, shutdown: AbortSignal): Abort
 }
 export async function startServer(options: ServerOptions) {
   const { store } = options;
+  const observations = options.observationRoot
+    ? new ObservationPack(options.observationRoot)
+    : undefined;
   const mcpSupervisorPath =
     options.mcpSupervisorPath ??
     (typeof __dirname === 'string'
@@ -377,8 +382,7 @@ export async function startServer(options: ServerOptions) {
       .find((entry) => entry.id === action.activityId);
     if (
       pendingActivity?.approval?.kind !== 'file' &&
-      (!current.run ||
-        active.get(current.run.id)?.approval?.activityId !== action.activityId)
+      (!current.run || active.get(current.run.id)?.approval?.activityId !== action.activityId)
     )
       throw new AppError(
         'APPROVAL_EXPIRED',
@@ -391,7 +395,7 @@ export async function startServer(options: ServerOptions) {
       .find((entry) => entry.id === action.activityId);
     if (!activity?.approval)
       throw new AppError('APPROVAL_NOT_FOUND', '권한 요청을 찾을 수 없습니다.', 404);
-    if (activity.approval.kind === 'file') {
+    if (activity.approval.kind === 'file' || activity.approval.kind === 'fusion') {
       try {
         return await reviewEdit({
           sessionId: decided.id,
@@ -472,6 +476,7 @@ export async function startServer(options: ServerOptions) {
             }
           : {}),
         pricing: (config) => pricing.get(config.provider + '\0' + config.model),
+        ...(observations ? { observations } : {}),
         waitForApproval: (activityId, signal) =>
           waitForApproval(session.run!.id, session.id, activityId, signal),
         applyApprovedEdit: async (activityId) => {
@@ -718,6 +723,16 @@ export async function startServer(options: ServerOptions) {
             )
           : [];
       tools.push(planningTool);
+      if (
+        observations &&
+        (session.config.eco ||
+          session.messages.some((message) =>
+            message.continuation?.some(
+              (entry) => entry.role === 'tool' && isObservationMarker(entry.content),
+            ),
+          ))
+      )
+        tools.push(observationRecallTool);
       if (session.routing?.subagentsEnabled) tools.push(subagentTool);
       tools.push(...mcpSelections.map((value) => value.definition));
       if (selectedSkills.length) tools.push(...skillTools);
@@ -1218,7 +1233,12 @@ export async function startServer(options: ServerOptions) {
                     409,
                   );
               }
-              return store.deleteSessions(parsed.data);
+              const deleted = store.deleteSessions(parsed.data);
+              if (observations)
+                await Promise.all(
+                  parsed.data.targets.map((target) => observations.removeSession(target.sessionId)),
+                );
+              return deleted;
             }),
           ),
         );

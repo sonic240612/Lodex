@@ -28,6 +28,7 @@ async function setup(
   provider?: InferenceProvider,
   secrets?: { openrouterKey: string; openrouterKeySource: SecretSource; envFilePath: string },
   commandExecutor?: typeof executeCommand,
+  withObservations = false,
 ) {
   const dir = await mkdtemp(join(tmpdir(), 'lodex-http-한글 '));
   const store = await Store.open(join(dir, 'test.sqlite'), resolve('apps/daemon/dist/worker.cjs'));
@@ -38,6 +39,7 @@ async function setup(
     ...secrets,
     ...(provider ? { providerFactory: factory } : {}),
     ...(commandExecutor ? { commandExecutor } : {}),
+    ...(withObservations ? { observationRoot: join(dir, 'observations') } : {}),
   });
   cleanup.push(async () => {
     await app.close();
@@ -78,6 +80,84 @@ afterEach(async () => {
   for (const close of cleanup.splice(0)) await close();
 });
 describe('authenticated daemon integration', () => {
+  it('projects large tool results twice, then exposes a recallable ObservationPack handle', async () => {
+    let round = 0;
+    const provider: InferenceProvider = {
+      listModels: async () => [],
+      capabilities: async () => ({ tools: true, streaming: true }),
+      async *generate(request) {
+        expect(request.tools?.some((tool) => tool.function.name === 'recall_observation')).toBe(
+          true,
+        );
+        if (round === 0) {
+          yield {
+            type: 'tool_call_delta',
+            index: 0,
+            id: 'large-read',
+            name: 'read_file',
+            arguments: JSON.stringify({ path: 'large.txt', maxLines: 300 }),
+          };
+          yield { type: 'finished', reason: 'tool_calls' };
+        } else {
+          const large = request.messages.find((message) => message.toolCallId === 'large-read');
+          if (round <= 2) expect(large?.content).toContain('OBSERVATION_PAYLOAD_LINE');
+          else {
+            expect(large?.content).toContain('large tool result replaced');
+            expect(large?.content).toContain('recall_observation');
+          }
+          if (round <= 2) {
+            yield {
+              type: 'tool_call_delta',
+              index: 0,
+              id: 'list-' + round,
+              name: 'list_files',
+              arguments: JSON.stringify({ path: '.' }),
+            };
+            yield { type: 'finished', reason: 'tool_calls' };
+          } else {
+            yield { type: 'text_delta', text: '관찰 결과를 확인했습니다.' };
+            yield { type: 'finished', reason: 'stop' };
+          }
+        }
+        round++;
+      },
+    };
+    const app = await setup(provider, undefined, undefined, true);
+    await writeFile(
+      join(app.dir, 'large.txt'),
+      Array.from(
+        { length: 300 },
+        (_, index) => `OBSERVATION_PAYLOAD_LINE ${index} ${'x'.repeat(48)}`,
+      ).join('\n'),
+    );
+    const { project } = await app
+      .request('/v1/projects', { method: 'POST', body: JSON.stringify({ path: app.dir }) })
+      .then((response) => response.json());
+    const session = await app.create(
+      { contextBudgetTokens: 65536, maxTokens: 12000, eco: true },
+      project.id,
+    );
+    await app.command(
+      makeCommand({
+        type: 'send_message',
+        sessionId: session.id,
+        expectedVersion: session.version,
+        content: '큰 파일을 확인해 줘',
+      }),
+    );
+    await vi.waitFor(async () =>
+      expect((await app.store.session(session.id)).run?.status).not.toBe('running'),
+    );
+    const terminal = await app.store.session(session.id);
+    expect(terminal.run?.status, JSON.stringify(terminal.messages.at(-1))).toBe('completed');
+    expect(round).toBe(4);
+    const stored = await app.store.session(session.id);
+    const continuation = stored.messages.at(-1)?.continuation ?? [];
+    expect(continuation.find((message) => message.toolCallId === 'large-read')?.content).toMatch(
+      /^lodex_observation_v1:/,
+    );
+    expect(JSON.stringify(continuation)).not.toContain('OBSERVATION_PAYLOAD_LINE 150');
+  });
   it('persists manual checkpoints and automatically compacts a request that would overflow', async () => {
     const requests: InferenceRequest[] = [];
     const provider: InferenceProvider = {
@@ -472,6 +552,124 @@ describe('authenticated daemon integration', () => {
     expect(
       completed.messages.at(-1)?.activities?.find((entry) => entry.id === activity.id)?.approval,
     ).toMatchObject({ status: 'approved', decidedBy: 'user' });
+  });
+  it('approves, applies, and validates an Action Fusion proposal as one operation', async () => {
+    const before = 'export const value = 1;\n';
+    let round = 0;
+    const provider: InferenceProvider = {
+      listModels: async () => [],
+      capabilities: async () => ({ tools: true, streaming: true }),
+      async *generate(request) {
+        if (round++ === 0) {
+          yield {
+            type: 'tool_call_delta',
+            index: 0,
+            id: 'fused-edit',
+            name: 'propose_edit',
+            arguments: JSON.stringify({
+              path: 'fused.ts',
+              expectedHash: createHash('sha256').update(before).digest('hex'),
+              oldText: 'value = 1',
+              newText: 'value = 2',
+              thenRun: { command: 'npm test' },
+            }),
+          };
+          yield { type: 'finished', reason: 'tool_calls' };
+        } else {
+          const result = request.messages.at(-1)!;
+          expect(result).toMatchObject({ role: 'tool', toolCallId: 'fused-edit' });
+          expect(result.content).toContain('fused validation passed');
+          expect(result.content).toContain('"editStatus":"applied"');
+          yield { type: 'text_delta', text: '변경과 검증을 완료했습니다.' };
+          yield { type: 'finished', reason: 'stop' };
+        }
+      },
+    };
+    let executions = 0;
+    const executor: typeof executeCommand = async (options) => {
+      executions++;
+      options.captureOutput?.('all tests passed');
+      const id = crypto.randomUUID();
+      const execution = {
+        id,
+        environment: 'docker' as const,
+        containerName: 'lodex-' + id,
+        command: JSON.parse(options.argumentsJson).command,
+        cwd: '.',
+        status: 'completed' as const,
+        startedAt: new Date().toISOString(),
+        finishedAt: new Date().toISOString(),
+        exitCode: 0,
+        output: 'all tests passed',
+        truncated: false,
+        cleanupPending: false,
+      };
+      await options.record(execution);
+      return execution;
+    };
+    const app = await setup(provider, undefined, executor);
+    const file = join(app.dir, 'fused.ts');
+    await writeFile(file, before);
+    const { project } = await app
+      .request('/v1/projects', { method: 'POST', body: JSON.stringify({ path: app.dir }) })
+      .then((response) => response.json());
+    let session = await app.create({}, project.id);
+    session = (
+      await app
+        .command(
+          makeCommand({
+            type: 'configure_execution',
+            sessionId: session.id,
+            expectedVersion: session.version,
+            execution: { ...defaultExecutionConfig(), backend: 'docker', projectAccess: true },
+          }),
+        )
+        .then((response) => response.json())
+    ).session;
+    await app.command(
+      makeCommand({
+        type: 'send_message',
+        sessionId: session.id,
+        expectedVersion: session.version,
+        content: '값을 바꾸고 검사해 줘',
+      }),
+    );
+    await vi.waitFor(async () => {
+      const current = await app.store.session(session.id);
+      expect(
+        current.messages
+          .at(-1)
+          ?.activities?.some((activity) => activity.approval?.kind === 'fusion'),
+      ).toBe(true);
+    });
+    session = await app.store.session(session.id);
+    const activity = session.messages.at(-1)!.activities!.find((entry) => entry.edit)!;
+    expect(executions).toBe(0);
+    expect(await readFile(file, 'utf8')).toBe(before);
+    const approved = await app.request('/v1/approvals', {
+      method: 'POST',
+      body: JSON.stringify({
+        sessionId: session.id,
+        expectedVersion: session.version,
+        activityId: activity.id,
+        action: 'approve',
+      }),
+    });
+    expect(approved.status).toBe(200);
+    await vi.waitFor(async () =>
+      expect((await app.store.session(session.id)).run?.status).toBe('completed'),
+    );
+    expect(executions).toBe(1);
+    expect(await readFile(file, 'utf8')).toBe('export const value = 2;\n');
+    const completed = await app.store.session(session.id);
+    const completedActivity = completed.messages
+      .at(-1)!
+      .activities!.find((entry) => entry.id === activity.id)!;
+    expect(completedActivity).toMatchObject({
+      approval: { kind: 'fusion', status: 'approved', decidedBy: 'user' },
+      edit: { status: 'applied' },
+      execution: { status: 'completed', exitCode: 0 },
+    });
   });
   it('runs a slash goal independently from the saved plan until the model completes it', async () => {
     let calls = 0;

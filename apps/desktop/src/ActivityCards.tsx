@@ -97,7 +97,7 @@ export function ActivityCards({
               <pre>{activity.approval.target}</pre>
             </div>
           )}
-          {activity.execution ? (
+          {activity.execution && (
             <div className="activity-section">
               <span>명령 · {activity.execution.cwd}</span>
               <pre>{activity.execution.command}</pre>
@@ -106,19 +106,22 @@ export function ActivityCards({
               {activity.execution.truncated && <p>출력 일부가 생략되었습니다.</p>}
               {activity.execution.error && <p role="alert">{activity.execution.error}</p>}
             </div>
-          ) : activity.planProposal && sessionId ? (
+          )}
+          {activity.planProposal && sessionId && (
             <PlanReview
               proposal={activity.planProposal}
               sessionId={sessionId}
               activityId={activity.id}
             />
-          ) : activityProposal(activity) && sessionId ? (
+          )}
+          {activityProposal(activity) && sessionId && (
             <EditReview
               edit={activityProposal(activity)!}
               activityId={activity.id}
               sessionId={sessionId}
             />
-          ) : (
+          )}
+          {!activity.execution && !activity.planProposal && !activityProposal(activity) && (
             <>
               {activity.arguments !== undefined && (
                 <div className="activity-section">
