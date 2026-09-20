@@ -57,6 +57,7 @@ export const runtimeSettingsSchema = z
     vramBudgetMb: z.number().int().min(0).max(1048576).default(24576),
     headroomMb: z.number().int().min(0).max(65536).default(1024),
     autoUnloadIdle: z.boolean().default(true),
+    idleUnloadMinutes: z.number().int().min(1).max(1440).default(10),
   })
   .refine((s) => s.headroomMb <= s.vramBudgetMb, '여유 VRAM은 전체 예산 이하여야 합니다.');
 export type RuntimeSettings = z.infer<typeof runtimeSettingsSchema>;

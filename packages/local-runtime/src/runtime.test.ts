@@ -257,6 +257,22 @@ describe('managed local engines', () => {
     ).toBe('ready');
     await active.release();
   });
+  it('unloads expired idle engines without interrupting active leases', async () => {
+    const { manager, profile } = await fixture();
+    const lease = await manager.acquire(profile.id, AbortSignal.timeout(5000));
+    await manager.sweepIdle(Date.now() + 11 * 60000);
+    expect((await manager.snapshot()).instances[0]).toMatchObject({
+      status: 'ready',
+      leases: 1,
+    });
+    await lease.release();
+    await manager.sweepIdle(Date.now() + 11 * 60000);
+    expect((await manager.snapshot()).instances[0]).toMatchObject({
+      status: 'stopped',
+      leases: 0,
+      reservedVramMb: 0,
+    });
+  });
   it('does not expose split transport secrets or fragments left by log truncation', async () => {
     const { manager, profile } = await fixture();
     const lease = await manager.acquire(profile.id, AbortSignal.timeout(5000));

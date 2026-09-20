@@ -374,10 +374,14 @@ export class RuntimeManager {
   private closing = new AbortController();
   private closePromise?: Promise<void>;
   private resourceCache?: { measuredAt: number; value: Promise<RuntimeResources> };
+  private idleTimer: NodeJS.Timeout;
   constructor(
     private repository: RuntimeRepository,
     private supervisorPath: string,
-  ) {}
+  ) {
+    this.idleTimer = setInterval(() => void this.sweepIdle().catch(() => undefined), 30000);
+    this.idleTimer.unref();
+  }
   private serial<T>(fn: () => Promise<T>): Promise<T> {
     const next = this.queue.then(fn);
     this.queue = next.catch(() => undefined);
@@ -470,6 +474,23 @@ export class RuntimeManager {
   }
   unload(id: string) {
     return this.serial(() => this.stop(id));
+  }
+  sweepIdle(now = Date.now()) {
+    return this.serial(async () => {
+      if (this.closing.signal.aborted) return;
+      const settings = await this.repository.runtimeSettings();
+      if (!settings.autoUnloadIdle) return;
+      const cutoff = now - settings.idleUnloadMinutes * 60000;
+      const expired = [...this.instances.values()]
+        .filter(
+          (instance) =>
+            instance.status === 'ready' &&
+            instance.leases === 0 &&
+            Date.parse(instance.lastUsedAt) <= cutoff,
+        )
+        .sort((left, right) => left.lastUsedAt.localeCompare(right.lastUsedAt));
+      for (const instance of expired) await this.stop(instance.profileId);
+    });
   }
   private async makeRoom(required: number, settings: RuntimeSettings) {
     const available = settings.vramBudgetMb - settings.headroomMb;
@@ -664,6 +685,7 @@ export class RuntimeManager {
   close(): Promise<void> {
     if (!this.closePromise) {
       this.closing.abort();
+      clearInterval(this.idleTimer);
       this.closePromise = this.serial(async () => {
         const results = await Promise.allSettled(
           [...this.instances.values()].map(async (instance) => {

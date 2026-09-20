@@ -207,7 +207,21 @@ export function ModelManager({
                 checked={budget.autoUnloadIdle}
                 onChange={(e) => setBudget({ ...budget, autoUnloadIdle: e.target.checked })}
               />
-              공간이 부족하면 사용하지 않는 모델부터 언로드
+              공간 부족 또는 유휴 시간 초과 시 사용하지 않는 모델 자동 언로드
+            </label>
+            <label className="field runtime-idle-field">
+              유휴 모델 자동 언로드 (분)
+              <input
+                type="number"
+                min={1}
+                max={1440}
+                disabled={!budget.autoUnloadIdle}
+                value={budget.idleUnloadMinutes}
+                onChange={(e) =>
+                  setBudget({ ...budget, idleUnloadMinutes: Number(e.target.value) })
+                }
+              />
+              <small>활성 응답이 없는 관리형 모델에만 적용됩니다.</small>
             </label>
             <button
               className="secondary-button"
