@@ -23,9 +23,6 @@ import type { RunMcp } from './mcp';
 import type { RegisteredSkill } from '@lodex/skills';
 import { parseDelegation, runSubagents } from './subagents';
 
-export const MAX_MODEL_CALLS = 6;
-const MAX_TOOL_CALLS = 12;
-
 import { ToolCallAssembler, mergeDetails } from './tool-stream';
 export { ToolCallAssembler } from './tool-stream';
 
@@ -59,6 +56,7 @@ export async function runAgent(options: {
   mcp?: RunMcp;
   subagents?: { config: ModelConfig; provider: InferenceProvider };
   pricing?: (config: ModelConfig) => ModelPricing | undefined;
+  waitForApproval?: (activityId: string, signal: AbortSignal) => Promise<Activity>;
 }) {
   const { store, session, provider, context, controller, project } = options;
   const runId = session.run!.id;
@@ -73,19 +71,14 @@ export async function runAgent(options: {
         costUnconfirmed: persistedAutopilot.costUnconfirmed ?? false,
       }
     : undefined;
-  const maxModels = autopilot?.limits.modelCalls ?? (options.subagents ? 12 : MAX_MODEL_CALLS);
-  const maxTools = autopilot?.limits.toolCalls ?? (options.subagents ? 24 : MAX_TOOL_CALLS);
-  const signal = AbortSignal.any([
-    controller.signal,
-    AbortSignal.timeout(
-      autopilot
-        ? Math.max(
-            1,
-            autopilot.limits.minutes * 60000 - (Date.now() - Date.parse(autopilot.startedAt)),
-          )
-        : 300000,
-    ),
-  ]);
+  const maxModels = autopilot?.limits.modelCalls ?? Number.POSITIVE_INFINITY;
+  const maxTools = autopilot?.limits.toolCalls ?? Number.POSITIVE_INFINITY;
+  const remainingMs = autopilot?.limits.minutes
+    ? Math.max(1, autopilot.limits.minutes * 60000 - (Date.now() - Date.parse(autopilot.startedAt)))
+    : null;
+  const signal = remainingMs
+    ? AbortSignal.any([controller.signal, AbortSignal.timeout(remainingMs)])
+    : controller.signal;
   const activities: Activity[] = [];
   const continuation: InferenceMessage[] = [];
   const rounds: Partial<Usage>[] = [];
@@ -140,6 +133,7 @@ export async function runAgent(options: {
       throw new AppError('STEP_LIMIT', '부모·서브에이전트의 공유 모델 호출 예산에 도달했습니다.');
     if (
       autopilot &&
+      autopilot.limits.outputTokens !== null &&
       autopilot.reservedOutputTokens + config.maxTokens > autopilot.limits.outputTokens
     )
       throw new AppError(
@@ -217,7 +211,7 @@ export async function runAgent(options: {
     await save();
   };
   try {
-    for (let step = 0; step < maxModels; step++) {
+    for (;;) {
       signal.throwIfAborted();
       const request = {
         ...context.request,
@@ -357,7 +351,7 @@ export async function runAgent(options: {
           'TOOLS_UNAVAILABLE',
           '프로젝트 도구가 허용되지 않아 실행하지 않았습니다. 프로젝트 선택과 전송 설정을 확인하세요.',
         );
-      if ((!autopilot && modelCount === maxModels) || toolCount + calls.length > maxTools)
+      if (toolCount + calls.length > maxTools)
         throw new AppError(
           'STEP_LIMIT',
           `실행 한도(모델 ${maxModels}회·도구 ${maxTools}회)에 도달했습니다. 진행 내용을 확인한 뒤 다시 실행하세요.`,
@@ -537,6 +531,35 @@ export async function runAgent(options: {
             },
           );
         }
+        if (activityProposal(card) && options.waitForApproval) {
+          card.text = result;
+          card.status = 'completed';
+          const approval = options.waitForApproval(card.id, signal);
+          try {
+            await save();
+          } catch (error) {
+            controller.abort(error);
+            await approval.catch(() => undefined);
+            throw error;
+          }
+          const decided = await approval;
+          if (decided.edit) card.edit = decided.edit;
+          if (decided.changes) card.changes = decided.changes;
+          const decision = activityProposal(decided);
+          if (!decision)
+            throw new AppError('EDIT_NOT_FOUND', '검토 중인 수정안을 찾을 수 없습니다.');
+          result = JSON.stringify({
+            status: decision.status,
+            message:
+              decision.status === 'applied'
+                ? 'The user approved and applied the proposed changes. Continue from the updated project.'
+                : decision.status === 'rejected'
+                  ? 'The user rejected the proposed changes. Do not assume they were applied.'
+                  : 'The review finished with status ' +
+                    decision.status +
+                    '. Inspect before continuing.',
+          });
+        }
         signal.throwIfAborted();
         card.text = card.execution
           ? JSON.stringify({
@@ -578,7 +601,7 @@ export async function runAgent(options: {
             await save('completed');
             return;
           }
-          if (activityProposal(card) || card.planProposal) {
+          if (activityProposal(card)?.status === 'proposed' || card.planProposal) {
             skipRemaining();
             autopilot.status = 'paused';
             autopilot.reason = card.planProposal
@@ -604,10 +627,6 @@ export async function runAgent(options: {
       }
       if (roundText) content += '\n\n';
     }
-    throw new AppError(
-      'STEP_LIMIT',
-      '모델 호출 예산에 도달했습니다. 아직 검증을 완료하지 못했습니다.',
-    );
   } catch (error) {
     const cancelled = controller.signal.aborted;
     const message = cancelled

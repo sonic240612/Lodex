@@ -149,8 +149,8 @@ export class Store {
   deleteSessions(command: DeleteSessions): Promise<DeleteSessionsResult> {
     return this.call('deleteSessions', command);
   }
-  beginEdit(action: EditAction): Promise<Session> {
-    return this.call('beginEdit', action);
+  beginEdit(action: EditAction, allowRunning = false): Promise<Session> {
+    return this.call('beginEdit', action, allowRunning);
   }
   recordExecution(
     sessionId: string,

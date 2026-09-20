@@ -132,10 +132,10 @@ export interface PlanProposal {
   status: 'proposed' | 'adopted';
 }
 export const autopilotLimitsSchema = z.strictObject({
-  modelCalls: z.number().int().min(1).max(64).default(12),
-  toolCalls: z.number().int().min(1).max(128).default(36),
-  minutes: z.number().int().min(1).max(120).default(15),
-  outputTokens: z.number().int().min(1024).max(1048576).default(32768),
+  modelCalls: z.number().int().min(1).max(1000000).nullable().default(null),
+  toolCalls: z.number().int().min(1).max(1000000).nullable().default(null),
+  minutes: z.number().int().min(1).max(525600).nullable().default(null),
+  outputTokens: z.number().int().min(1024).max(1000000000).nullable().default(null),
   costUsd: z.number().min(0.01).max(1000).default(1),
 });
 export interface AutopilotState {
@@ -721,9 +721,16 @@ export function resumeGoal(session: Session, runId = ''): AutopilotState {
   if (!previous?.goalDriven || previous.status === 'completed' || previous.status === 'cancelled')
     throw new AppError('GOAL_NOT_PAUSED', '계속 실행할 목표가 없습니다.', 409);
   const { reason: _reason, ...rest } = structuredClone(previous);
+  const limits = autopilotLimitsSchema.parse(rest.limits);
   return {
     ...rest,
-    limits: autopilotLimitsSchema.parse(rest.limits),
+    limits: {
+      ...limits,
+      modelCalls: null,
+      toolCalls: null,
+      minutes: null,
+      outputTokens: null,
+    },
     spentCostUsd: rest.spentCostUsd ?? 0,
     reservedCostUsd: rest.reservedCostUsd ?? 0,
     // A manual resume is the user's acknowledgement; the conservative reservation remains charged.

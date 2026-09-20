@@ -123,7 +123,7 @@ export async function runSubagents(tasks: { task: string }[], options: Options):
         record.status = 'running';
         record.startedAt = new Date().toISOString();
         await save();
-        for (let step = 0; step < 3; step++) {
+        for (;;) {
           signal.throwIfAborted();
           const request = { config, messages, ...(tools.length ? { tools } : {}) };
           const manifest = measureRequest(request);
@@ -180,8 +180,6 @@ export async function runSubagents(tasks: { task: string }[], options: Options):
               'SUBAGENT_INCOMPLETE',
               '서브에이전트가 완전한 결과를 반환하지 않았습니다.',
             );
-          if (step === 2 || record.toolCalls + calls.length > 4)
-            throw new AppError('SUBAGENT_LIMIT', '서브에이전트의 모델·도구 한도에 도달했습니다.');
           messages.push({
             role: 'assistant',
             content: text,

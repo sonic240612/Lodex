@@ -77,7 +77,7 @@ async function setup(
 }
 
 describe('role routing and durable delegation', () => {
-  it('caps total parent and child generations even when the parent keeps delegating', async () => {
+  it('keeps parent and child generations running beyond the former shared cap', async () => {
     let calls = 0;
     const app = await setup(
       async function* (request) {
@@ -99,13 +99,25 @@ describe('role routing and durable delegation', () => {
       { subagentsEnabled: true, plan: { ...base, model: 'planner' } },
     );
     expect((await app.send()).status).toBe(200);
+    await expect.poll(() => calls).toBeGreaterThan(12);
+    const running = await app.store.session(app.session.id);
+    expect(running.run?.status).toBe('running');
+    expect(
+      (
+        await app.command(
+          makeCommand({
+            type: 'cancel_run',
+            sessionId: running.id,
+            runId: running.run!.id,
+          }),
+        )
+      ).status,
+    ).toBe(200);
     await expect
       .poll(async () => (await app.store.session(app.session.id)).run?.status)
-      .toBe('failed');
-    expect(calls).toBe(12);
-    expect((await app.store.session(app.session.id)).messages.at(-1)?.error).toContain(
-      '공유 모델 호출 예산',
-    );
+      .toBe('cancelled');
+    expect(calls).toBeGreaterThan(12);
+    expect((await app.store.session(app.session.id)).messages.at(-1)?.status).toBe('cancelled');
   });
 
   it('uses Plan and child models with isolated project context and persists their results', async () => {

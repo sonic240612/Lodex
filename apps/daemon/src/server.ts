@@ -28,6 +28,7 @@ import {
   resolveModelConfig,
   type ModelConfig,
   type ModelPricing,
+  type Activity,
   telegramConfigSchema,
 } from '@lodex/contracts';
 import { Store } from '@lodex/storage';
@@ -185,7 +186,17 @@ export async function startServer(options: ServerOptions) {
   const inference = new InferenceScheduler(runtime, () => openrouterKey, options.providerFactory);
   let openrouterKeySource: SecretSource =
     options.openrouterKeySource ?? (openrouterKey ? 'os_keychain' : 'none');
-  const active = new Map<string, { abort: AbortController; task: Promise<void> }>();
+  type ActiveRun = {
+    abort: AbortController;
+    task: Promise<void>;
+    approval?: {
+      sessionId: string;
+      activityId: string;
+      resolve: (activity: Activity) => void;
+      reject: (reason: unknown) => void;
+    };
+  };
+  const active = new Map<string, ActiveRun>();
   const streams = new Set<ServerResponse>();
   let queue: Promise<unknown> = Promise.resolve();
   let closing = false;
@@ -195,6 +206,55 @@ export async function startServer(options: ServerOptions) {
     const next = queue.then(work);
     queue = next.catch(() => undefined);
     return next;
+  };
+  const waitForApproval = (
+    runId: string,
+    sessionId: string,
+    activityId: string,
+    signal: AbortSignal,
+  ): Promise<Activity> =>
+    new Promise((resolve, reject) => {
+      const run = active.get(runId);
+      if (!run) {
+        reject(new AppError('RUN_NOT_FOUND', '실행 중인 응답을 찾을 수 없습니다.', 409));
+        return;
+      }
+      if (run.approval) {
+        reject(new AppError('APPROVAL_PENDING', '이미 검토를 기다리는 수정안이 있습니다.', 409));
+        return;
+      }
+      const clear = () => {
+        signal.removeEventListener('abort', abort);
+        if (run.approval?.activityId === activityId) delete run.approval;
+      };
+      const abort = () => {
+        clear();
+        reject(signal.reason);
+      };
+      run.approval = {
+        sessionId,
+        activityId,
+        resolve: (activity) => {
+          clear();
+          resolve(activity);
+        },
+        reject: (reason) => {
+          clear();
+          reject(reason);
+        },
+      };
+      signal.addEventListener('abort', abort, { once: true });
+      if (signal.aborted) abort();
+    });
+  const finishApproval = (session: Session, activityId: string) => {
+    if (!session.run) return;
+    const pending = active.get(session.run.id)?.approval;
+    if (pending?.sessionId !== session.id || pending.activityId !== activityId) return;
+    const activity = session.messages
+      .flatMap((message) => message.activities ?? [])
+      .find((entry) => entry.id === activityId);
+    if (activity) pending.resolve(structuredClone(activity));
+    else pending.reject(new AppError('EDIT_NOT_FOUND', '검토한 수정안을 찾을 수 없습니다.', 404));
   };
   async function execute(
     session: Session,
@@ -207,7 +267,7 @@ export async function startServer(options: ServerOptions) {
     session = { ...session, config: resolveModelConfig(session) };
     const autopilot = session.autopilot;
     const loadSignal =
-      autopilot && autopilot.runId === session.run?.id
+      autopilot && autopilot.runId === session.run?.id && autopilot.limits.minutes
         ? AbortSignal.any([
             controller.signal,
             AbortSignal.timeout(
@@ -261,6 +321,8 @@ export async function startServer(options: ServerOptions) {
             }
           : {}),
         pricing: (config) => pricing.get(config.provider + '\0' + config.model),
+        waitForApproval: (activityId, signal) =>
+          waitForApproval(session.run!.id, session.id, activityId, signal),
         mcp: new RunMcp({
           selections: mcpSelections,
           supervisorPath: mcpSupervisorPath,
@@ -941,20 +1003,37 @@ export async function startServer(options: ServerOptions) {
             );
             if (!edit || !session.projectId)
               throw new AppError('EDIT_NOT_FOUND', '수정안을 찾을 수 없습니다.', 404);
-            if (action.action === 'apply' && edit.status === 'applied') return session;
-            if (action.action === 'undo' && edit.status === 'reverted') return session;
-            if (action.action === 'reject' && edit.status === 'rejected') return session;
-            if (action.action === 'reject') {
-              await store.beginEdit(action);
-              return store.finishEdit(session.id, action.activityId, 'rejected');
+            if (action.action === 'apply' && edit.status === 'applied') {
+              finishApproval(session, action.activityId);
+              return session;
             }
+            if (action.action === 'undo' && edit.status === 'reverted') return session;
+            if (action.action === 'reject' && edit.status === 'rejected') {
+              finishApproval(session, action.activityId);
+              return session;
+            }
+            if (action.action === 'reject') {
+              const liveApproval =
+                action.action === 'reject' &&
+                !!session.run &&
+                active.get(session.run.id)?.approval?.activityId === action.activityId;
+              await store.beginEdit(action, liveApproval);
+              const rejected = await store.finishEdit(session.id, action.activityId, 'rejected');
+              finishApproval(rejected, action.activityId);
+              return rejected;
+            }
+            const liveApproval =
+              action.action === 'apply' &&
+              !!session.run &&
+              active.get(session.run.id)?.approval?.activityId === action.activityId;
             for (const other of (await store.snapshot()).sessions) {
               if (
                 other.projectId === session.projectId &&
                 ((other.run && active.has(other.run.id)) ||
                   other.messages.some((m) =>
                     m.activities?.some((a) => a.execution?.cleanupPending),
-                  ))
+                  )) &&
+                !(liveApproval && other.id === session.id)
               )
                 throw new AppError(
                   'BUSY',
@@ -963,7 +1042,7 @@ export async function startServer(options: ServerOptions) {
                 );
             }
             const project = await store.project(session.projectId);
-            const pending = await store.beginEdit(action);
+            const pending = await store.beginEdit(action, liveApproval);
             const pendingEdit = activityProposal(
               pending.messages
                 .flatMap((m) => m.activities ?? [])
@@ -1012,7 +1091,15 @@ export async function startServer(options: ServerOptions) {
                 /* Outcome remains uncertain. */
               }
             }
-            return store.finishEdit(session.id, action.activityId, status, error, observations);
+            const finished = await store.finishEdit(
+              session.id,
+              action.activityId,
+              status,
+              error,
+              observations,
+            );
+            finishApproval(finished, action.activityId);
+            return finished;
           }),
         });
       } else if (request.method === 'POST' && url.pathname === '/v1/sessions/delete') {

@@ -75,21 +75,15 @@ export function AutopilotPanel({ session }: { session: Session }) {
           <dl className="metrics-list">
             <div>
               <dt>모델 호출</dt>
-              <dd>
-                {state.modelCalls}/{state.limits.modelCalls}
-              </dd>
+              <dd>{state.modelCalls}</dd>
             </div>
             <div>
               <dt>도구 호출</dt>
-              <dd>
-                {state.toolCalls}/{state.limits.toolCalls}
-              </dd>
+              <dd>{state.toolCalls}</dd>
             </div>
             <div>
               <dt>출력 토큰 사용·예약</dt>
-              <dd>
-                {state.reservedOutputTokens}/{state.limits.outputTokens}
-              </dd>
+              <dd>{state.reservedOutputTokens}</dd>
             </div>
             {(usesCloud || (state.spentCostUsd ?? 0) > 0 || (state.reservedCostUsd ?? 0) > 0) && (
               <div>
@@ -140,26 +134,7 @@ export function AutopilotPanel({ session }: { session: Session }) {
               {task.title}
             </label>
           ))}
-          {(
-            [
-              ['modelCalls', '모델 호출', 1, 64],
-              ['toolCalls', '도구 호출', 1, 128],
-              ['minutes', '시간 (분)', 1, 120],
-              ['outputTokens', '출력 토큰 예산', 1024, 1048576],
-            ] as const
-          ).map(([key, label, min, max]) => (
-            <label className="budget-field" key={key}>
-              {label}
-              <input
-                type="number"
-                min={min}
-                max={max}
-                value={limits[key]}
-                disabled={running || busy}
-                onChange={(e) => setLimits({ ...limits, [key]: Number(e.target.value) })}
-              />
-            </label>
-          ))}
+          <p>모델 호출, 도구 호출, 실행 시간과 출력 토큰에는 실행 한도를 두지 않습니다.</p>
           {usesCloud && (
             <label className="budget-field">
               OpenRouter 비용 한도 (USD)

@@ -6,6 +6,7 @@ import {
   makeCommand,
   modelConfigSchema,
   planSchema,
+  autopilotLimitsSchema,
 } from './index';
 describe('command boundary', () => {
   it('requires pinned unique skill selections and explicit cloud consent', () => {
@@ -80,6 +81,15 @@ describe('command boundary', () => {
     expect(modelConfigSchema.safeParse({ topP: 0 }).success).toBe(false);
     const task = { id: crypto.randomUUID(), title: '할 일', done: false };
     expect(planSchema.safeParse({ goal: '', tasks: [task, task] }).success).toBe(false);
+  });
+  it('defaults autonomous execution counters and duration to unlimited', () => {
+    expect(autopilotLimitsSchema.parse({})).toEqual({
+      modelCalls: null,
+      toolCalls: null,
+      minutes: null,
+      outputTokens: null,
+      costUsd: 1,
+    });
   });
   it.each([
     'http://example.com/v1',

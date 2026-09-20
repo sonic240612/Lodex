@@ -623,9 +623,15 @@ describe('authenticated daemon integration', () => {
         content: 'change both',
       }),
     );
-    await vi.waitFor(async () =>
-      expect((await app.store.session(created.id)).run?.status).toBe('completed'),
-    );
+    await vi.waitFor(async () => {
+      const current = await app.store.session(created.id);
+      expect(current.run?.status).toBe('running');
+      expect(
+        current.messages
+          .at(-1)
+          ?.activities?.some((activity) => activity.changes?.status === 'proposed'),
+      ).toBe(true);
+    });
     let session = await app.store.session(created.id);
     const card = session.messages.at(-1)!.activities!.find((a) => a.changes)!;
     expect(card.changes?.files).toHaveLength(2);
@@ -649,6 +655,10 @@ describe('authenticated daemon integration', () => {
     expect(applied.status).toBe('applied');
     expect(applied.files[1]).toHaveProperty('identity');
     expect(await readFile(join(app.dir, 'new.txt'), 'utf8')).toBe('new content');
+    await vi.waitFor(async () =>
+      expect((await app.store.session(created.id)).run?.status).toBe('completed'),
+    );
+    session = await app.store.session(created.id);
     await writeFile(join(app.dir, 'new.txt'), 'user work');
     expect((await act('undo')).status).toBe('conflict');
     expect(await readFile(join(app.dir, 'existing.txt'), 'utf8')).toBe('after');
@@ -699,7 +709,7 @@ describe('authenticated daemon integration', () => {
     const provider: InferenceProvider = {
       listModels: async () => [],
       capabilities: async () => ({ tools: true, streaming: true }),
-      async *generate() {
+      async *generate(request) {
         if (round++ === 0) {
           yield {
             type: 'tool_call_delta',
@@ -715,6 +725,11 @@ describe('authenticated daemon integration', () => {
           };
           yield { type: 'finished', reason: 'tool_calls' };
         } else {
+          expect(request.messages.at(-1)).toMatchObject({
+            role: 'tool',
+            toolCallId: 'proposal-1',
+          });
+          expect(request.messages.at(-1)?.content).toContain('"status":"applied"');
           yield { type: 'text_delta', text: '수정안을 확인해 주세요.' };
           yield { type: 'finished', reason: 'stop' };
         }
@@ -735,9 +750,15 @@ describe('authenticated daemon integration', () => {
         content: '수정 제안',
       }),
     );
-    await vi.waitFor(async () =>
-      expect((await app.store.session(session.id)).run?.status).toBe('completed'),
-    );
+    await vi.waitFor(async () => {
+      const current = await app.store.session(session.id);
+      expect(current.run?.status).toBe('running');
+      expect(
+        current.messages
+          .at(-1)
+          ?.activities?.some((activity) => activity.edit?.status === 'proposed'),
+      ).toBe(true);
+    });
     const proposed = await app.store.session(session.id);
     const card = proposed.messages.at(-1)!.activities!.find((a) => a.edit)!;
     expect(card.edit!.status).toBe('proposed');
@@ -754,6 +775,10 @@ describe('authenticated daemon integration', () => {
         .status,
     ).toBe('applied');
     expect(await readFile(file, 'utf8')).toBe('const value = 2;\n');
+    await vi.waitFor(async () =>
+      expect((await app.store.session(session.id)).run?.status).toBe('completed'),
+    );
+    const completed = await app.store.session(session.id);
     await writeFile(file, 'user edit');
     expect((await app.request('/v1/edits', { method: 'POST', body })).status).toBe(200);
     expect(await readFile(file, 'utf8')).toBe('user edit');
@@ -762,7 +787,7 @@ describe('authenticated daemon integration', () => {
         method: 'POST',
         body: JSON.stringify({
           sessionId: session.id,
-          expectedVersion: applied.session.version,
+          expectedVersion: completed.version,
           activityId: card.id,
           action: 'check',
         }),
@@ -845,9 +870,15 @@ describe('authenticated daemon integration', () => {
         content: '수정 제안',
       }),
     );
-    await vi.waitFor(async () =>
-      expect((await app.store.session(session.id)).run?.status).toBe('completed'),
-    );
+    await vi.waitFor(async () => {
+      const current = await app.store.session(session.id);
+      expect(current.run?.status).toBe('running');
+      expect(
+        current.messages
+          .at(-1)
+          ?.activities?.some((activity) => activity.edit?.status === 'proposed'),
+      ).toBe(true);
+    });
     const proposed = await app.store.session(session.id);
     const card = proposed.messages.at(-1)!.activities!.find((activity) => activity.edit)!;
     const rejected = await app
@@ -867,6 +898,9 @@ describe('authenticated daemon integration', () => {
         .activities.find((activity: { id: string }) => activity.id === card.id).edit.status,
     ).toBe('rejected');
     expect(await readFile(file, 'utf8')).toBe(before);
+    await vi.waitFor(async () =>
+      expect((await app.store.session(session.id)).run?.status).toBe('completed'),
+    );
   });
   it('registers a project and completes a real file tool round-trip with durable activities', async () => {
     const requests: InferenceRequest[] = [];
@@ -1040,7 +1074,7 @@ describe('authenticated daemon integration', () => {
     expect(message.activities?.[0]).toMatchObject({ status: 'failed', text: '' });
     expect(message.continuation ?? []).toHaveLength(0);
   });
-  it('stops a non-terminating tool loop at its model call limit', async () => {
+  it('continues beyond the former model call limit until the user cancels', async () => {
     let calls = 0;
     const provider: InferenceProvider = {
       listModels: async () => [],
@@ -1070,13 +1104,21 @@ describe('authenticated daemon integration', () => {
         content: 'loop',
       }),
     );
-    await vi.waitFor(async () =>
-      expect((await app.store.session(session.id)).run?.status).toBe('failed'),
+    await vi.waitFor(() => expect(calls).toBeGreaterThan(7));
+    const running = await app.store.session(session.id);
+    expect(running.run?.status).toBe('running');
+    await app.command(
+      makeCommand({
+        type: 'cancel_run',
+        sessionId: session.id,
+        runId: running.run!.id,
+      }),
     );
-    expect(calls).toBe(6);
-    const message = (await app.store.session(session.id)).messages.at(-1)!;
-    expect(message.error).toContain('실행 한도');
-    expect(message.activities?.filter((a) => a.status === 'completed')).toHaveLength(5);
+    await vi.waitFor(async () =>
+      expect((await app.store.session(session.id)).run?.status).toBe('cancelled'),
+    );
+    expect(calls).toBeGreaterThan(6);
+    expect((await app.store.session(session.id)).messages.at(-1)?.status).toBe('cancelled');
   });
   it('rejects a context overflow before storing messages or invoking the provider', async () => {
     const app = await setup();

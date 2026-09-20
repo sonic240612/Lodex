@@ -770,12 +770,12 @@ export function App() {
                     : pendingApproval.edit.path}
                 </span>
               </div>
-              <button disabled={busy || running} onClick={() => void decideApproval('reject')}>
+              <button disabled={busy} onClick={() => void decideApproval('reject')}>
                 거절
               </button>
               <button
                 className="permission-allow"
-                disabled={busy || running || mode === 'plan'}
+                disabled={busy || mode === 'plan'}
                 onClick={() => void decideApproval('apply')}
               >
                 수락

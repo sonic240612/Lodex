@@ -827,11 +827,6 @@ export class StorageEngine {
             if (context?.skillCatalog?.includedIds.length) session.hasSkillHistory = true;
             if (context?.mcpTools?.length) session.hasMcpHistory = true;
             if (context?.mcpAttachmentIds?.length) session.hasMcpHistory = true;
-            if (session.messages.length >= 120)
-              throw new AppError(
-                'CONTEXT_LIMIT',
-                '초기 버전은 대화당 60회 요청까지 지원합니다. 새 대화를 시작하세요.',
-              );
             const messageId = randomUUID();
             const runId = randomUUID();
             if (command.type === 'start_autopilot')
@@ -852,11 +847,7 @@ export class StorageEngine {
                       session.plan.goal +
                       '\n' +
                       session.autopilot!.taskIds.length +
-                      '개 작업 · 모델 ' +
-                      command.limits.modelCalls +
-                      '회 · ' +
-                      command.limits.minutes +
-                      '분 이내';
+                      '개 작업 · 실행 횟수 제한 없음';
             session.messages.push({
               id: randomUUID(),
               role: 'user',
@@ -951,12 +942,12 @@ export class StorageEngine {
       return session;
     });
   }
-  beginEdit(action: EditAction): Session {
+  beginEdit(action: EditAction, allowRunning = false): Session {
     return this.transaction(() => {
       const session = this.session(action.sessionId);
       if (session.mode === 'plan' && !['check', 'reject'].includes(action.action))
         throw new AppError('PLAN_READ_ONLY', '파일을 변경하려면 Build 모드로 전환하세요.', 403);
-      if (session.run?.status === 'running')
+      if (session.run?.status === 'running' && !allowRunning)
         throw new AppError('BUSY', '응답이 끝난 뒤 변경을 적용해 주세요.', 409);
       if (session.version !== action.expectedVersion)
         throw new AppError(
