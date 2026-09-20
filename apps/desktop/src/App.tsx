@@ -374,8 +374,8 @@ export function App() {
       managedModelId: profile.id,
       managedModelVersion: profile.version,
       contextBudgetTokens: profile.settings.contextSize,
-      maxTokens: Math.min(2048, Math.floor(profile.settings.contextSize / 4)),
-      autoMaxTokens: false,
+      maxTokens: Math.max(1, Math.min(1048576, Math.floor(profile.settings.contextSize * 0.2))),
+      autoMaxTokens: true,
       cloudConsent: false,
       projectCloudConsent: false,
     };
@@ -1678,8 +1678,8 @@ function Settings({
                   </span>
                 </label>
                 <p className="subtle-note">
-                  제공자 자동 대체와 데이터 수집 허용은 꺼져 있습니다. 앱 비용 한도·사후 비용 대사는
-                  아직 구현 전입니다.
+                  제공자 자동 대체와 데이터 수집 허용은 꺼져 있습니다. Autopilot은 실행 전에 비용을
+                  예약하고 OpenRouter가 보고한 실제 비용을 기록합니다.
                 </p>
               </div>
             )}
@@ -1757,32 +1757,56 @@ function Settings({
               </div>
             )}
             <div className="settings-grid">
-              <label className="field">
-                Temperature
+              <div className="field">
+                <label htmlFor="temperature-setting">Temperature</label>
                 <input
+                  id="temperature-setting"
                   aria-label="Temperature"
                   type="number"
                   min="0"
                   max="2"
                   step="0.05"
                   value={draft.temperature}
+                  disabled={draft.useDefaultTemperature}
                   onChange={(event) =>
                     setDraft({ ...draft, temperature: Number(event.target.value) })
                   }
                 />
-              </label>
-              <label className="field">
-                Top P
+                <label className="check-field generation-default">
+                  <input
+                    type="checkbox"
+                    checked={draft.useDefaultTemperature}
+                    onChange={(event) =>
+                      setDraft({ ...draft, useDefaultTemperature: event.target.checked })
+                    }
+                  />
+                  기본값 사용
+                </label>
+              </div>
+              <div className="field">
+                <label htmlFor="top-p-setting">Top P</label>
                 <input
+                  id="top-p-setting"
                   aria-label="Top P"
                   type="number"
                   min="0.01"
                   max="1"
                   step="0.01"
                   value={draft.topP}
+                  disabled={draft.useDefaultTopP}
                   onChange={(event) => setDraft({ ...draft, topP: Number(event.target.value) })}
                 />
-              </label>
+                <label className="check-field generation-default">
+                  <input
+                    type="checkbox"
+                    checked={draft.useDefaultTopP}
+                    onChange={(event) =>
+                      setDraft({ ...draft, useDefaultTopP: event.target.checked })
+                    }
+                  />
+                  기본값 사용
+                </label>
+              </div>
               <label className="field">
                 호출당 최대 출력 토큰
                 <input

@@ -69,6 +69,12 @@ describe('command boundary', () => {
     expect(commandSchema.safeParse({ ...command, actor: 'unknown-channel' }).success).toBe(false);
   });
   it('rejects out-of-range generation settings and duplicate task IDs', () => {
+    expect(defaultModelConfig()).toMatchObject({
+      useDefaultTemperature: true,
+      useDefaultTopP: true,
+      autoMaxTokens: true,
+      maxTokens: 6553,
+    });
     expect(modelConfigSchema.safeParse({ temperature: -1 }).success).toBe(false);
     expect(modelConfigSchema.safeParse({ maxTokens: 1.5 }).success).toBe(false);
     expect(modelConfigSchema.safeParse({ topP: 0 }).success).toBe(false);

@@ -293,7 +293,11 @@ export function RoutingSettings({
                             max={max}
                             step={step}
                             required
-                            disabled={key === 'maxTokens' && config.autoMaxTokens}
+                            disabled={
+                              (key === 'maxTokens' && config.autoMaxTokens) ||
+                              (key === 'temperature' && config.useDefaultTemperature) ||
+                              (key === 'topP' && config.useDefaultTopP)
+                            }
                             onChange={(event) => {
                               const value = Number(event.target.value);
                               if (key === 'contextBudgetTokens' && config.autoMaxTokens)
@@ -310,6 +314,24 @@ export function RoutingSettings({
                         </label>
                       ))}
                     </div>
+                    <label className="check-row">
+                      <input
+                        type="checkbox"
+                        checked={config.useDefaultTemperature}
+                        onChange={(event) =>
+                          change({ useDefaultTemperature: event.target.checked })
+                        }
+                      />
+                      Temperature 기본값 사용
+                    </label>
+                    <label className="check-row">
+                      <input
+                        type="checkbox"
+                        checked={config.useDefaultTopP}
+                        onChange={(event) => change({ useDefaultTopP: event.target.checked })}
+                      />
+                      Top P 기본값 사용
+                    </label>
                     <label className="check-row">
                       <input
                         type="checkbox"

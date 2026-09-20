@@ -1502,6 +1502,15 @@ button {
   line-height: 1.8;
   color: var(--muted);
 }
+.field .generation-default {
+  flex-direction: row;
+  align-items: center;
+  margin-top: -2px;
+}
+.field .generation-default input {
+  width: auto;
+  padding: 0;
+}
 .auto-token-setting {
   margin: -8px 0 20px;
 }

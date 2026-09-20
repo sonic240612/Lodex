@@ -190,8 +190,8 @@ export class ChatCompletionProvider implements InferenceProvider {
             }
           : {}),
         stream: true,
-        temperature: config.temperature,
-        top_p: config.topP,
+        ...(config.useDefaultTemperature ? {} : { temperature: config.temperature }),
+        ...(config.useDefaultTopP ? {} : { top_p: config.topP }),
         max_tokens: config.maxTokens,
         ...(this.kind === 'openrouter'
           ? {

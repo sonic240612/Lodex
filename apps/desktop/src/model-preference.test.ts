@@ -24,6 +24,8 @@ describe('last model preference', () => {
       provider: 'openrouter' as const,
       model: 'openai/gpt-test',
       temperature: 0.2,
+      useDefaultTemperature: false,
+      useDefaultTopP: false,
       contextBudgetTokens: 131072,
       autoMaxTokens: true,
       cloudConsent: true,

@@ -120,7 +120,41 @@ describe('provider adapters', () => {
         fetcher,
       ).generate(input, signal()),
     );
-    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body)).messages).toEqual(input.messages);
+    const body = JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body));
+    expect(body.messages).toEqual(input.messages);
+    expect(body).not.toHaveProperty('temperature');
+    expect(body).not.toHaveProperty('top_p');
+  });
+  it('sends Temperature and Top P only when model defaults are disabled', async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        response(data({ choices: [{ delta: {}, finish_reason: 'stop' }] }) + 'data: [DONE]\n\n'),
+      );
+    await collect(
+      new ChatCompletionProvider(
+        'llama-server',
+        'http://localhost:8080/v1',
+        null,
+        fetcher,
+      ).generate(
+        {
+          ...request(),
+          config: {
+            ...request().config,
+            temperature: 0.25,
+            useDefaultTemperature: false,
+            topP: 0.8,
+            useDefaultTopP: false,
+          },
+        },
+        signal(),
+      ),
+    );
+    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toMatchObject({
+      temperature: 0.25,
+      top_p: 0.8,
+    });
   });
   it('decodes content, engine timings and usage without estimating unknown values', async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
