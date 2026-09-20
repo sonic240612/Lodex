@@ -1511,6 +1511,14 @@ button {
   width: auto;
   padding: 0;
 }
+.settings-grid .generation-value-disabled > label:first-child,
+.settings-grid .generation-value-disabled > input[type='number'],
+.routing-numbers .generation-value-disabled {
+  opacity: 0.42;
+}
+.settings-grid .generation-value-disabled > input[type='number'] {
+  background: color-mix(in srgb, var(--surface) 65%, var(--border));
+}
 .auto-token-setting {
   margin: -8px 0 20px;
 }

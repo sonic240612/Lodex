@@ -284,7 +284,15 @@ export function RoutingSettings({
                           ['contextBudgetTokens', '컨텍스트 예산', 1024, 2097152, 1],
                         ] as const
                       ).map(([key, label, min, max, step]) => (
-                        <label key={key}>
+                        <label
+                          key={key}
+                          className={
+                            (key === 'temperature' && config.useDefaultTemperature) ||
+                            (key === 'topP' && config.useDefaultTopP)
+                              ? 'generation-value-disabled'
+                              : undefined
+                          }
+                        >
                           {label}
                           <input
                             type="number"

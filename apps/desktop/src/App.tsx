@@ -1757,7 +1757,9 @@ function Settings({
               </div>
             )}
             <div className="settings-grid">
-              <div className="field">
+              <div
+                className={`field${draft.useDefaultTemperature ? ' generation-value-disabled' : ''}`}
+              >
                 <label htmlFor="temperature-setting">Temperature</label>
                 <input
                   id="temperature-setting"
@@ -1783,7 +1785,7 @@ function Settings({
                   기본값 사용
                 </label>
               </div>
-              <div className="field">
+              <div className={`field${draft.useDefaultTopP ? ' generation-value-disabled' : ''}`}>
                 <label htmlFor="top-p-setting">Top P</label>
                 <input
                   id="top-p-setting"
