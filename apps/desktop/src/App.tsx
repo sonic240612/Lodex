@@ -99,6 +99,9 @@ export function App() {
   const [newMode, setNewMode] = useState<AgentMode>('plan');
   const mode = session?.mode ?? newMode;
   const [light, setLight] = useState(false);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const conversation = useRef<HTMLDivElement>(null);
+  const followLatest = useRef(true);
   const end = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
   const config = session ? resolveModelConfig(session) : workspace.config;
@@ -190,9 +193,26 @@ export function App() {
     };
   }, []);
 
+  function scrollToBottom(behavior: ScrollBehavior = 'smooth') {
+    followLatest.current = true;
+    setShowScrollToBottom(false);
+    end.current?.scrollIntoView({ behavior, block: 'end' });
+  }
+  function trackConversationScroll() {
+    const node = conversation.current;
+    if (!node) return;
+    const atBottom = node.scrollHeight - node.scrollTop - node.clientHeight <= 72;
+    followLatest.current = atBottom;
+    setShowScrollToBottom(!atBottom && !!session?.messages.length);
+  }
   useEffect(() => {
-    end.current?.scrollIntoView({ behavior: running ? 'instant' : 'smooth', block: 'end' });
-  }, [session?.id, session?.messages.at(-1)?.content, running]);
+    followLatest.current = true;
+    setShowScrollToBottom(false);
+    requestAnimationFrame(() => scrollToBottom('instant'));
+  }, [session?.id]);
+  useEffect(() => {
+    if (followLatest.current) scrollToBottom('instant');
+  }, [session?.messages.at(-1)?.content, running]);
   async function createSession(
     modelConfig = workspace.config,
     routing = session?.routing,
@@ -226,6 +246,8 @@ export function App() {
     }
     setBusy(true);
     setError('');
+    followLatest.current = true;
+    setShowScrollToBottom(false);
     try {
       const target = session ?? (await createSession());
       const result = await sendCommand(
@@ -668,118 +690,135 @@ export function App() {
             UI 미리보기입니다. 실제 모델 연결과 영구 저장은 데스크톱 앱에서 사용할 수 있습니다.
           </div>
         )}
-        <div className={`conversation ${session?.messages.length ? 'has-messages' : ''}`}>
-          {!session?.messages.length ? (
-            <div className="welcome">
-              <div className="welcome-logo">
-                <Logo size={64} />
+        <div className="conversation-shell">
+          <div
+            ref={conversation}
+            className={`conversation ${session?.messages.length ? 'has-messages' : ''}`}
+            onScroll={trackConversationScroll}
+          >
+            {!session?.messages.length ? (
+              <div className="welcome">
+                <div className="welcome-logo">
+                  <Logo size={64} />
+                </div>
+                <div className="eyebrow">YOUR MODELS. YOUR WORKSPACE.</div>
+                <h1>무엇을 만들어 볼까요?</h1>
+                <p>
+                  생각을 정리하고, 목표를 세우고.
+                  <br />내 모델과 함께 시작하는 나만의 작업 공간.
+                </p>
+                <div className="suggestions">
+                  <button
+                    onClick={() => {
+                      setText('만들고 싶은 프로그램의 개발 단계를 함께 정리해 줘.');
+                      composer.current?.focus();
+                    }}
+                  >
+                    <Icon name="chat" />
+                    <strong>아이디어 구체화</strong>
+                    <span>생각을 실행 가능한 단계로</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      setText('/goal ');
+                      composer.current?.focus();
+                    }}
+                  >
+                    <Icon name="goal" />
+                    <strong>지속 목표 실행</strong>
+                    <span>/goal로 완료까지 진행</span>
+                  </button>
+                  <button onClick={() => setSettings(true)}>
+                    <Icon name="chip" />
+                    <strong>내 모델 연결</strong>
+                    <span>로컬 서버 또는 OpenRouter</span>
+                  </button>
+                </div>
+                <span className="welcome-note">
+                  <Icon name="info" size={14} />
+                  {nativeDesktop
+                    ? 'llama-server는 설정한 서버로, OpenRouter는 전송 동의 후 연결합니다.'
+                    : '데모 화면에는 실제 모델 응답이나 성능 수치를 표시하지 않습니다.'}
+                </span>
               </div>
-              <div className="eyebrow">YOUR MODELS. YOUR WORKSPACE.</div>
-              <h1>무엇을 만들어 볼까요?</h1>
-              <p>
-                생각을 정리하고, 목표를 세우고.
-                <br />내 모델과 함께 시작하는 나만의 작업 공간.
-              </p>
-              <div className="suggestions">
-                <button
-                  onClick={() => {
-                    setText('만들고 싶은 프로그램의 개발 단계를 함께 정리해 줘.');
-                    composer.current?.focus();
-                  }}
-                >
-                  <Icon name="chat" />
-                  <strong>아이디어 구체화</strong>
-                  <span>생각을 실행 가능한 단계로</span>
-                </button>
-                <button
-                  onClick={() => {
-                    setText('/goal ');
-                    composer.current?.focus();
-                  }}
-                >
-                  <Icon name="goal" />
-                  <strong>지속 목표 실행</strong>
-                  <span>/goal로 완료까지 진행</span>
-                </button>
-                <button onClick={() => setSettings(true)}>
-                  <Icon name="chip" />
-                  <strong>내 모델 연결</strong>
-                  <span>로컬 서버 또는 OpenRouter</span>
-                </button>
+            ) : (
+              <div className="messages" aria-live="polite" aria-relevant="additions text">
+                {session.messages.map((message) => (
+                  <article key={message.id} className={`message ${message.role}`}>
+                    {showActivities && message.activities?.length ? (
+                      <ActivityCards activities={message.activities} sessionId={session.id} />
+                    ) : null}
+                    {!showActivities &&
+                      message.activities?.some(
+                        (a) =>
+                          (a.changes || a.edit) &&
+                          !['applied', 'reverted', 'rejected'].includes(
+                            (a.changes || a.edit)!.status,
+                          ),
+                      ) && (
+                        <button className="review-reveal" onClick={() => setShowActivities(true)}>
+                          파일 수정안 확인
+                        </button>
+                      )}
+                    {!showActivities &&
+                      message.activities?.some(
+                        (a) =>
+                          a.planProposal?.status === 'proposed' ||
+                          a.execution?.cleanupPending ||
+                          a.execution?.status === 'failed',
+                      ) && (
+                        <button className="review-reveal" onClick={() => setShowActivities(true)}>
+                          계획 제안·명령 결과 확인
+                        </button>
+                      )}
+                    <div className="message-body">
+                      {(message.content ? <Markdown text={message.content} /> : null) ||
+                        (message.status === 'streaming' ? (
+                          <span className="thinking">
+                            <i />
+                            <i />
+                            <i />
+                          </span>
+                        ) : (
+                          '응답 내용이 없습니다.'
+                        ))}
+                    </div>
+                    {message.error && (
+                      <p className="message-error">
+                        <Icon name="info" size={15} />
+                        {message.error}
+                      </p>
+                    )}
+                    {['cancelled', 'interrupted', 'failed'].includes(message.status) && (
+                      <span className="message-status">
+                        {message.status === 'cancelled'
+                          ? '중지됨'
+                          : message.status === 'interrupted'
+                            ? '이전 실행이 중단됨'
+                            : '응답 미완료'}
+                      </span>
+                    )}
+                    {message.usage?.costUsd !== null && message.usage?.costUsd !== undefined && (
+                      <span className="message-status">
+                        제공자 보고 비용 ${message.usage.costUsd.toFixed(6)}
+                      </span>
+                    )}
+                  </article>
+                ))}
+                <div ref={end} />
               </div>
-              <span className="welcome-note">
-                <Icon name="info" size={14} />
-                {nativeDesktop
-                  ? 'llama-server는 설정한 서버로, OpenRouter는 전송 동의 후 연결합니다.'
-                  : '데모 화면에는 실제 모델 응답이나 성능 수치를 표시하지 않습니다.'}
-              </span>
-            </div>
-          ) : (
-            <div className="messages" aria-live="polite" aria-relevant="additions text">
-              {session.messages.map((message) => (
-                <article key={message.id} className={`message ${message.role}`}>
-                  {showActivities && message.activities?.length ? (
-                    <ActivityCards activities={message.activities} sessionId={session.id} />
-                  ) : null}
-                  {!showActivities &&
-                    message.activities?.some(
-                      (a) =>
-                        (a.changes || a.edit) &&
-                        !['applied', 'reverted', 'rejected'].includes(
-                          (a.changes || a.edit)!.status,
-                        ),
-                    ) && (
-                      <button className="review-reveal" onClick={() => setShowActivities(true)}>
-                        파일 수정안 확인
-                      </button>
-                    )}
-                  {!showActivities &&
-                    message.activities?.some(
-                      (a) =>
-                        a.planProposal?.status === 'proposed' ||
-                        a.execution?.cleanupPending ||
-                        a.execution?.status === 'failed',
-                    ) && (
-                      <button className="review-reveal" onClick={() => setShowActivities(true)}>
-                        계획 제안·명령 결과 확인
-                      </button>
-                    )}
-                  <div className="message-body">
-                    {(message.content ? <Markdown text={message.content} /> : null) ||
-                      (message.status === 'streaming' ? (
-                        <span className="thinking">
-                          <i />
-                          <i />
-                          <i />
-                        </span>
-                      ) : (
-                        '응답 내용이 없습니다.'
-                      ))}
-                  </div>
-                  {message.error && (
-                    <p className="message-error">
-                      <Icon name="info" size={15} />
-                      {message.error}
-                    </p>
-                  )}
-                  {['cancelled', 'interrupted', 'failed'].includes(message.status) && (
-                    <span className="message-status">
-                      {message.status === 'cancelled'
-                        ? '중지됨'
-                        : message.status === 'interrupted'
-                          ? '이전 실행이 중단됨'
-                          : '응답 미완료'}
-                    </span>
-                  )}
-                  {message.usage?.costUsd !== null && message.usage?.costUsd !== undefined && (
-                    <span className="message-status">
-                      제공자 보고 비용 ${message.usage.costUsd.toFixed(6)}
-                    </span>
-                  )}
-                </article>
-              ))}
-              <div ref={end} />
-            </div>
+            )}
+          </div>
+          {showScrollToBottom && (
+            <button
+              type="button"
+              className="scroll-to-bottom"
+              aria-label="최신 메시지로 이동"
+              title="맨 아래로"
+              onClick={() => scrollToBottom()}
+            >
+              <Icon name="down" size={19} />
+            </button>
           )}
         </div>
         <div className="composer-area">

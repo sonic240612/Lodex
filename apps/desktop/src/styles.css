@@ -664,6 +664,12 @@ button {
   background: var(--accent-surface);
   border-bottom: 1px solid var(--border);
 }
+.conversation-shell {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  display: flex;
+}
 .conversation {
   flex: 1;
   overflow: auto;
@@ -671,6 +677,31 @@ button {
   min-height: 0;
   scrollbar-gutter: stable;
   padding: 0 30px;
+}
+.scroll-to-bottom {
+  position: absolute;
+  z-index: 2;
+  left: 50%;
+  bottom: 16px;
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  transform: translateX(-50%);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: 0 8px 24px var(--shadow);
+  cursor: pointer;
+}
+.scroll-to-bottom:hover {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: var(--surface-hover);
+}
+.scroll-to-bottom:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 .welcome {
   width: 100%;
