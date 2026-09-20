@@ -30,6 +30,8 @@ npm ci
 npm run dev
 ```
 
+On Windows, double-click `run-lodex.bat` to install missing npm packages and start the development app.
+
 ## Models
 
 - **Local models:** Open the local model manager, select a llama-server binary and GGUF file, then create a conversation from the saved profile. Context, GPU layers, KV cache, threads, templates, and extra engine arguments are configurable.
@@ -58,7 +60,7 @@ Keep API keys in `.env` using `LODEX_MCP_` references. OAuth supports pre-regist
 
 ## Telegram
 
-Create a bot with [BotFather](https://core.telegram.org/bots/tutorial#obtain-your-bot-token), put `TELEGRAM_BOT_TOKEN` in `.env`, and open Telegram settings. Select a conversation, enable transmission, generate a pairing code, and approve your numeric user/chat IDs in the desktop app.
+Create a bot with [BotFather](https://core.telegram.org/bots/tutorial#obtain-your-bot-token), paste its token in Telegram settings, and select a conversation. You can use `TELEGRAM_BOT_TOKEN` in `.env` instead. Enable transmission, generate a pairing code, and approve your numeric user/chat IDs in the desktop app.
 
 Use `/ask`, `/status`, `/plan`, or `/stop`. Build requests require separate permission. File approvals stay on desktop; Lodex must remain running. Uncertain message deliveries are recorded without automatic resend.
 

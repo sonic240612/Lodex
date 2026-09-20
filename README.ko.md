@@ -30,6 +30,8 @@ npm ci
 npm run dev
 ```
 
+Windows에서는 `run-lodex.bat`를 더블클릭하면 필요한 npm 패키지를 확인하고 개발용 앱을 실행합니다.
+
 ## 모델 연결
 
 - **로컬 모델:** 모델 관리에서 llama-server 실행 파일과 GGUF 파일을 선택하고, 저장한 모델로 대화를 시작하세요. 컨텍스트·GPU 레이어·KV cache·스레드·템플릿·추가 엔진 인자를 설정할 수 있습니다.
@@ -58,7 +60,7 @@ API 키는 `.env`의 `LODEX_MCP_` 변수로 관리하세요. OAuth는 PKCE와 lo
 
 ## Telegram
 
-[BotFather](https://core.telegram.org/bots/tutorial#obtain-your-bot-token)에서 봇을 만들고 `.env`에 `TELEGRAM_BOT_TOKEN`을 설정하세요. 앱의 Telegram 설정에서 대화·전송 허용을 선택하고 연결 코드를 만든 뒤, 숫자 사용자·채팅 ID를 확인해 승인하세요.
+[BotFather](https://core.telegram.org/bots/tutorial#obtain-your-bot-token)에서 봇을 만든 뒤 Telegram 설정에 토큰을 입력하고 대화를 선택하세요. `.env`의 `TELEGRAM_BOT_TOKEN`도 사용할 수 있습니다. 전송 허용을 켜고 연결 코드를 만든 뒤, 숫자 사용자·채팅 ID를 확인해 승인하세요.
 
 명령은 `/ask`, `/status`, `/plan`, `/stop`. Build 요청은 별도 허용이 필요합니다. 파일 적용은 데스크톱에서 진행하며, Lodex가 실행 중이어야 연결됩니다. 전달 결과를 확인하지 못한 메시지는 자동 재전송하지 않습니다.
 
