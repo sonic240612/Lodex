@@ -207,6 +207,70 @@ describe('authenticated daemon integration', () => {
       else expect(session.autopilot?.reason).toBeTruthy();
     },
   );
+  it('runs a slash goal independently from the saved plan until the model completes it', async () => {
+    let calls = 0;
+    const provider: InferenceProvider = {
+      listModels: async () => [],
+      capabilities: async () => ({ tools: true, streaming: true }),
+      async *generate(request) {
+        calls++;
+        expect(request.tools?.some((tool) => tool.function.name === 'complete_goal')).toBe(true);
+        expect(JSON.stringify(request.messages)).toContain('Ship the fixture');
+        if (calls === 1) {
+          yield { type: 'text_delta', text: '먼저 상태를 확인했습니다.' };
+          yield { type: 'finished', reason: 'stop' };
+          return;
+        }
+        yield {
+          type: 'tool_call_delta',
+          index: 0,
+          id: 'goal-done',
+          name: 'complete_goal',
+          arguments: JSON.stringify({ evidence: '요구 사항과 결과를 확인했습니다.' }),
+        };
+        yield { type: 'finished', reason: 'tool_calls' };
+      },
+    };
+    const app = await setup(provider);
+    let session = await app.create();
+    session = (
+      await app
+        .command(
+          makeCommand({
+            type: 'set_mode',
+            sessionId: session.id,
+            expectedVersion: session.version,
+            mode: 'plan',
+          }),
+        )
+        .then((response) => response.json())
+    ).session;
+    const savedPlan = structuredClone(session.plan);
+    const response = await app.command(
+      makeCommand({
+        type: 'start_goal',
+        sessionId: session.id,
+        expectedVersion: session.version,
+        goal: 'Ship the fixture',
+        limits: autopilotLimitsSchema.parse({ modelCalls: 3 }),
+      }),
+    );
+    expect(response.status).toBe(200);
+    await vi.waitFor(async () =>
+      expect((await app.store.session(session.id)).run?.status).toBe('completed'),
+    );
+    session = await app.store.session(session.id);
+    expect(session.mode).toBe('build');
+    expect(session.plan).toEqual(savedPlan);
+    expect(session.autopilot).toMatchObject({
+      goalDriven: true,
+      status: 'completed',
+      modelCalls: 2,
+      reason: '목표 완료: 요구 사항과 결과를 확인했습니다.',
+    });
+    expect(session.autopilot?.plan.goal).toBe('Ship the fixture');
+    expect(session.title).toBe('Ship the fixture');
+  });
   it('offers read-only Plan tools, reviews a plan, and adopts it without executing tasks', async () => {
     let round = 0;
     const provider: InferenceProvider = {
@@ -565,6 +629,71 @@ describe('authenticated daemon integration', () => {
     await writeFile(file, 'new user edit after undo');
     expect((await app.request('/v1/edits', { method: 'POST', body: undoBody })).status).toBe(200);
     expect(await readFile(file, 'utf8')).toBe('new user edit after undo');
+  });
+  it('rejects a pending model edit without changing the project file', async () => {
+    const before = 'const keep = true;\n';
+    let round = 0;
+    const provider: InferenceProvider = {
+      listModels: async () => [],
+      capabilities: async () => ({ tools: true, streaming: true }),
+      async *generate() {
+        if (round++ === 0) {
+          yield {
+            type: 'tool_call_delta',
+            index: 0,
+            id: 'reject-proposal',
+            name: 'propose_edit',
+            arguments: JSON.stringify({
+              path: 'keep.ts',
+              expectedHash: createHash('sha256').update(before).digest('hex'),
+              oldText: 'keep = true',
+              newText: 'keep = false',
+            }),
+          };
+          yield { type: 'finished', reason: 'tool_calls' };
+        } else {
+          yield { type: 'text_delta', text: '검토를 기다립니다.' };
+          yield { type: 'finished', reason: 'stop' };
+        }
+      },
+    };
+    const app = await setup(provider);
+    const file = join(app.dir, 'keep.ts');
+    await writeFile(file, before);
+    const { project } = await app
+      .request('/v1/projects', { method: 'POST', body: JSON.stringify({ path: app.dir }) })
+      .then((response) => response.json());
+    const session = await app.create({}, project.id);
+    await app.command(
+      makeCommand({
+        type: 'send_message',
+        sessionId: session.id,
+        expectedVersion: session.version,
+        content: '수정 제안',
+      }),
+    );
+    await vi.waitFor(async () =>
+      expect((await app.store.session(session.id)).run?.status).toBe('completed'),
+    );
+    const proposed = await app.store.session(session.id);
+    const card = proposed.messages.at(-1)!.activities!.find((activity) => activity.edit)!;
+    const rejected = await app
+      .request('/v1/edits', {
+        method: 'POST',
+        body: JSON.stringify({
+          sessionId: session.id,
+          expectedVersion: proposed.version,
+          activityId: card.id,
+          action: 'reject',
+        }),
+      })
+      .then((response) => response.json());
+    expect(
+      rejected.session.messages
+        .at(-1)
+        .activities.find((activity: { id: string }) => activity.id === card.id).edit.status,
+    ).toBe('rejected');
+    expect(await readFile(file, 'utf8')).toBe(before);
   });
   it('registers a project and completes a real file tool round-trip with durable activities', async () => {
     const requests: InferenceRequest[] = [];

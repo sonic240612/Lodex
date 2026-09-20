@@ -234,7 +234,9 @@ export function measureRequest(request: InferenceRequest) {
     );
   const inputEstimateTokens =
     estimateInputTokens(messages) + (tools?.length ? Buffer.byteLength(JSON.stringify(tools)) : 0);
-  const safetyReserveTokens = Math.max(256, Math.ceil(config.contextBudgetTokens * 0.05));
+  const safetyReserveTokens = config.autoMaxTokens
+    ? 0
+    : Math.max(256, Math.ceil(config.contextBudgetTokens * 0.05));
   const available = config.contextBudgetTokens - config.maxTokens - safetyReserveTokens;
   if (inputEstimateTokens > available)
     throw new AppError(

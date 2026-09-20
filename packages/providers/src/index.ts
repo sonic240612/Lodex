@@ -110,11 +110,16 @@ export class ChatCompletionProvider implements InferenceProvider {
     return body.data.flatMap((item) => {
       const model = object(item);
       if (typeof model.id !== 'string') return [];
+      const defaults = object(model.default_parameters);
+      const topProvider = object(model.top_provider);
       return [
         {
           id: model.id,
           name: typeof model.name === 'string' ? model.name : model.id,
           contextLength: number(model.context_length),
+          maxCompletionTokens: number(topProvider.max_completion_tokens),
+          defaultTemperature: number(defaults.temperature),
+          defaultTopP: number(defaults.top_p),
           tools: Array.isArray(model.supported_parameters)
             ? model.supported_parameters.includes('tools')
             : null,
@@ -304,7 +309,17 @@ export class ChatCompletionProvider implements InferenceProvider {
 }
 export class DemoProvider implements InferenceProvider {
   async listModels(): Promise<ModelDescriptor[]> {
-    return [{ id: 'demo', name: '데모 · LLM 사용 안 함', contextLength: null, tools: false }];
+    return [
+      {
+        id: 'demo',
+        name: '데모 · LLM 사용 안 함',
+        contextLength: null,
+        maxCompletionTokens: null,
+        defaultTemperature: null,
+        defaultTopP: null,
+        tools: false,
+      },
+    ];
   }
   async capabilities(): Promise<ModelCapabilities> {
     return { tools: false, streaming: true };

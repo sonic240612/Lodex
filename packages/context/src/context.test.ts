@@ -189,6 +189,21 @@ describe('context compiler', () => {
     expect(() => compileContext(source, 'hello')).toThrow('앱 컨텍스트 예산');
     expect(source).toEqual(before);
   });
+  it('uses an exact 80/20 input-output split when automatic output tokens are enabled', () => {
+    const source = session();
+    source.config = {
+      ...source.config,
+      contextBudgetTokens: 10_000,
+      maxTokens: 2_000,
+      autoMaxTokens: true,
+    };
+    const result = compileContext(source, 'hello');
+    expect(result.manifest).toMatchObject({
+      contextBudgetTokens: 10_000,
+      outputReserveTokens: 2_000,
+      safetyReserveTokens: 0,
+    });
+  });
   it('counts Korean and emoji bytes, and labels the result as a heuristic', () => {
     expect(estimateInputTokens([{ role: 'user', content: '한😀' }])).toBe(27);
     const result = compileContext(session(), '한😀');

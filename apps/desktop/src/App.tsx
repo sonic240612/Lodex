@@ -10,8 +10,18 @@ import {
   type LocalProfile,
   type AgentRoutingConfig,
   resolveModelConfig,
+  autopilotLimitsSchema,
+  activityProposal,
 } from '@lodex/contracts';
-import { models, nativeDesktop, saveKey, sendCommand, snapshot, subscribe } from './bridge';
+import {
+  editAction,
+  models,
+  nativeDesktop,
+  saveKey,
+  sendCommand,
+  snapshot,
+  subscribe,
+} from './bridge';
 import { Icon, Logo } from './icons';
 import { useWorkspace } from './state';
 import { ActivityCards } from './ActivityCards';
@@ -89,6 +99,11 @@ export function App() {
       ? 'openrouter'
       : config.provider;
   const running = session?.run?.status === 'running';
+  const autopilotOn = session?.autopilot?.status === 'running';
+  const pendingApproval = session?.messages
+    .flatMap((message) => message.activities ?? [])
+    .map((activity) => ({ activity, edit: activityProposal(activity) }))
+    .find((entry) => entry.edit?.status === 'proposed');
   const project = workspace.projects.find((p) => p.id === workspace.selectedProjectId);
   const visibleSessions = workspace.sessions.filter(
     (s) => (s.projectId ?? null) === workspace.selectedProjectId,
@@ -106,6 +121,18 @@ export function App() {
     window.addEventListener('keydown', shortcut);
     return () => window.removeEventListener('keydown', shortcut);
   }, []);
+
+  useEffect(() => {
+    const shortcut = (event: KeyboardEvent) => {
+      if (event.ctrlKey && !event.altKey && !event.shiftKey && event.code === 'Period') {
+        event.preventDefault();
+        if (!busy && !running && workspace.connected)
+          void changeMode(mode === 'plan' ? 'build' : 'plan');
+      }
+    };
+    window.addEventListener('keydown', shortcut);
+    return () => window.removeEventListener('keydown', shortcut);
+  }, [busy, mode, running, session?.id, session?.version, workspace.connected]);
 
   useEffect(() => {
     let disposed = false,
@@ -180,16 +207,31 @@ export function App() {
       return;
     }
     const content = text.trim();
+    const goal = content.match(/^\/goal(?:\s+([\s\S]+))?$/i);
+    if (goal && !goal[1]?.trim()) {
+      setError('사용법: /goal 달성할 목표');
+      return;
+    }
     setBusy(true);
     setError('');
     try {
       const target = session ?? (await createSession());
-      const result = await sendCommand({
-        type: 'send_message',
-        sessionId: target.id,
-        expectedVersion: target.version,
-        content,
-      });
+      const result = await sendCommand(
+        goal
+          ? {
+              type: 'start_goal',
+              sessionId: target.id,
+              expectedVersion: target.version,
+              goal: goal[1]!.trim(),
+              limits: autopilotLimitsSchema.parse({}),
+            }
+          : {
+              type: 'send_message',
+              sessionId: target.id,
+              expectedVersion: target.version,
+              content,
+            },
+      );
       workspace.upsert(result.session);
       setText('');
     } catch (failure) {
@@ -210,6 +252,83 @@ export function App() {
       workspace.upsert(result.session);
     } catch (failure) {
       setError(messageError(failure));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function toggleAutopilot() {
+    if (!session || busy || !workspace.connected) {
+      setError('먼저 대화를 만들고 목표 또는 작업 계획을 준비하세요.');
+      return;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      if (running && autopilotOn) {
+        const result = await sendCommand({
+          type: 'cancel_run',
+          sessionId: session.id,
+          runId: session.run!.id,
+        });
+        workspace.upsert(result.session);
+        return;
+      }
+      const result = await sendCommand(
+        session.autopilot?.goalDriven && session.autopilot.status === 'paused'
+          ? {
+              type: 'resume_goal',
+              sessionId: session.id,
+              expectedVersion: session.version,
+            }
+          : {
+              type: 'start_autopilot',
+              sessionId: session.id,
+              expectedVersion: session.version,
+              taskIds: [],
+              limits: autopilotLimitsSchema.parse({}),
+            },
+      );
+      workspace.upsert(result.session);
+    } catch (failure) {
+      setError(messageError(failure));
+      setPlanOpen(true);
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function decideApproval(action: 'apply' | 'reject') {
+    if (!session || !pendingApproval?.edit || busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      let updated = await editAction({
+        sessionId: session.id,
+        expectedVersion: session.version,
+        activityId: pendingApproval.activity.id,
+        action,
+      });
+      workspace.upsert(updated);
+      if (
+        action === 'apply' &&
+        updated.autopilot?.goalDriven &&
+        updated.autopilot.status === 'paused'
+      ) {
+        updated = (
+          await sendCommand({
+            type: 'resume_goal',
+            sessionId: updated.id,
+            expectedVersion: updated.version,
+          })
+        ).session;
+        workspace.upsert(updated);
+      }
+    } catch (failure) {
+      setError(messageError(failure));
+      try {
+        workspace.replace(await snapshot());
+      } catch {
+        /* Reconnect refreshes. */
+      }
     } finally {
       setBusy(false);
     }
@@ -252,6 +371,7 @@ export function App() {
       managedModelVersion: profile.version,
       contextBudgetTokens: profile.settings.contextSize,
       maxTokens: Math.min(2048, Math.floor(profile.settings.contextSize / 4)),
+      autoMaxTokens: false,
       cloudConsent: false,
       projectCloudConsent: false,
     };
@@ -377,11 +497,7 @@ export function App() {
         </button>
         <button className="nav-item" onClick={() => setPlanOpen((value) => !value)}>
           <Icon name="goal" size={18} />
-          Goal과 할 일
-        </button>
-        <button className="nav-item" onClick={() => setSettings(true)}>
-          <Icon name="chip" size={18} />
-          모델 연결
+          작업 계획
         </button>
         <button className="nav-item" onClick={() => setModelManager(true)}>
           <Icon name="chip" size={18} />
@@ -488,6 +604,16 @@ export function App() {
               <span className="model-name">{config.model || '모델 연결'}</span>
               <Icon name="down" size={15} />
             </button>
+            <button
+              className={`autopilot-toggle ${autopilotOn ? 'is-on' : ''}`}
+              aria-pressed={autopilotOn}
+              disabled={busy || !workspace.connected || (running && !autopilotOn)}
+              title="Autopilot 실행/중지"
+              onClick={() => void toggleAutopilot()}
+            >
+              <span className="status-dot" />
+              Autopilot {autopilotOn ? 'ON' : 'OFF'}
+            </button>
           </div>
           <div className="topbar-right">
             <span className="mode-badge" title={project?.path}>
@@ -511,7 +637,7 @@ export function App() {
             </button>
             <button
               className={`icon-button ${planOpen ? 'is-active' : ''}`}
-              aria-label="Goal 패널 열기/닫기"
+              aria-label="작업 계획 패널 열기/닫기"
               aria-expanded={planOpen}
               onClick={() => setPlanOpen(!planOpen)}
             >
@@ -547,10 +673,15 @@ export function App() {
                   <strong>아이디어 구체화</strong>
                   <span>생각을 실행 가능한 단계로</span>
                 </button>
-                <button onClick={() => setPlanOpen(true)}>
+                <button
+                  onClick={() => {
+                    setText('/goal ');
+                    composer.current?.focus();
+                  }}
+                >
                   <Icon name="goal" />
-                  <strong>목표와 할 일 작성</strong>
-                  <span>이번 작업의 방향 정하기</span>
+                  <strong>지속 목표 실행</strong>
+                  <span>/goal로 완료까지 진행</span>
                 </button>
                 <button onClick={() => setSettings(true)}>
                   <Icon name="chip" />
@@ -576,7 +707,9 @@ export function App() {
                     message.activities?.some(
                       (a) =>
                         (a.changes || a.edit) &&
-                        !['applied', 'reverted'].includes((a.changes || a.edit)!.status),
+                        !['applied', 'reverted', 'rejected'].includes(
+                          (a.changes || a.edit)!.status,
+                        ),
                     ) && (
                       <button className="review-reveal" onClick={() => setShowActivities(true)}>
                         파일 수정안 확인
@@ -632,6 +765,28 @@ export function App() {
           )}
         </div>
         <div className="composer-area">
+          {pendingApproval?.edit && (
+            <div className="permission-banner" role="alertdialog" aria-label="파일 변경 권한 요청">
+              <div>
+                <strong>파일 변경 권한 요청</strong>
+                <span>
+                  {'files' in pendingApproval.edit
+                    ? `${pendingApproval.edit.files.length}개 파일 변경`
+                    : pendingApproval.edit.path}
+                </span>
+              </div>
+              <button disabled={busy || running} onClick={() => void decideApproval('reject')}>
+                거절
+              </button>
+              <button
+                className="permission-allow"
+                disabled={busy || running || mode === 'plan'}
+                onClick={() => void decideApproval('apply')}
+              >
+                수락
+              </button>
+            </div>
+          )}
           {error && (
             <div className="error-banner" role="alert">
               <Icon name="info" size={17} />
@@ -675,6 +830,7 @@ export function App() {
               <select
                 className="mode-select"
                 aria-label="에이전트 모드"
+                title="Ctrl + . 로 전환"
                 value={mode}
                 disabled={busy || running || !workspace.connected}
                 onChange={(event) => void changeMode(event.target.value as AgentMode)}
@@ -694,7 +850,7 @@ export function App() {
                 </span>
               )}
               <div className="composer-spacer" />
-              <span className="composer-hint">Shift + Enter 줄바꿈</span>
+              <span className="composer-hint">Ctrl + . 모드 전환 · Shift + Enter 줄바꿈</span>
               {running ? (
                 <button
                   type="button"
@@ -742,7 +898,7 @@ export function App() {
       </main>
 
       {planOpen && (
-        <aside className="plan-panel" aria-label="Goal과 할 일">
+        <aside className="plan-panel" aria-label="작업 계획과 할 일">
           <div className="plan-header">
             <Icon name="goal" size={19} />
             <strong>작업 계획</strong>
@@ -838,7 +994,9 @@ export function App() {
               </p>
             </details>
           )}
-          {session?.projectId && <AutopilotPanel key={session.id} session={session} />}
+          {session && (session.projectId || session.autopilot) && (
+            <AutopilotPanel key={session.id} session={session} />
+          )}
         </aside>
       )}
       {modelManager && (
@@ -992,7 +1150,7 @@ function PlanEditor({
   return (
     <div className="plan-editor">
       <label className="section-label" htmlFor="goal">
-        GOAL
+        계획 목표
       </label>
       <textarea
         id="goal"
@@ -1271,6 +1429,7 @@ function Settings({
   const [draft, setDraft] = useState(config);
   const [key, setKey] = useState('');
   const [catalog, setCatalog] = useState<ModelDescriptor[]>([]);
+  const [catalogProvider, setCatalogProvider] = useState<string>('');
   const [status, setStatus] = useState('');
   const [failure, setFailure] = useState('');
   const [busy, setBusy] = useState(false);
@@ -1294,6 +1453,51 @@ function Settings({
       setBusy(false);
     }
   }
+  const automaticOutputTokens = (context: number, descriptor?: ModelDescriptor) =>
+    Math.max(
+      1,
+      Math.min(
+        Math.floor(context * 0.2),
+        descriptor?.maxCompletionTokens ?? Number.POSITIVE_INFINITY,
+        1048576,
+      ),
+    );
+  function chooseDescriptor(descriptor: ModelDescriptor) {
+    const context = Math.min(descriptor.contextLength ?? draft.contextBudgetTokens, 2097152);
+    setDraft((value) => ({
+      ...value,
+      model: descriptor.id,
+      contextBudgetTokens: context,
+      temperature: descriptor.defaultTemperature ?? 0.7,
+      topP: descriptor.defaultTopP ?? 0.95,
+      maxTokens: value.autoMaxTokens
+        ? automaticOutputTokens(context, descriptor)
+        : Math.min(value.maxTokens, descriptor.maxCompletionTokens ?? 1048576),
+    }));
+    setStatus(
+      `${descriptor.name} 기본 설정 · 컨텍스트 ${context.toLocaleString()} 토큰을 적용했습니다.`,
+    );
+  }
+  useEffect(() => {
+    if (
+      draft.provider !== 'openrouter' ||
+      !configured ||
+      !nativeDesktop ||
+      catalogProvider === 'openrouter'
+    )
+      return;
+    setCatalogProvider('openrouter');
+    void models('openrouter', draft.baseUrl)
+      .then((result) => {
+        setCatalog(result);
+        const selected = result.find((item) => item.id === draft.model);
+        if (selected) chooseDescriptor(selected);
+      })
+      .catch((failure) => {
+        setCatalogProvider('');
+        setFailure(messageError(failure));
+      });
+  }, [catalogProvider, configured, draft.provider]);
   return (
     <dialog
       className="settings-dialog"
@@ -1345,6 +1549,7 @@ function Settings({
                       projectCloudConsent: false,
                     });
                     setCatalog([]);
+                    setCatalogProvider('');
                   }}
                 >
                   <Icon
@@ -1489,7 +1694,13 @@ function Settings({
                     aria-label="모델 ID"
                     list="model-catalog"
                     value={draft.model}
-                    onChange={(event) => setDraft({ ...draft, model: event.target.value })}
+                    onChange={(event) => {
+                      const model = event.target.value;
+                      const descriptor = catalog.find((item) => item.id === model);
+                      if (draft.provider === 'openrouter' && descriptor)
+                        chooseDescriptor(descriptor);
+                      else setDraft({ ...draft, model });
+                    }}
                     placeholder={
                       draft.provider === 'openrouter'
                         ? '목록에서 선택하거나 정확한 모델 ID 입력'
@@ -1503,8 +1714,8 @@ function Settings({
                       void operation(async () => {
                         const result = await models(draft.provider, draft.baseUrl);
                         setCatalog(result);
-                        if (result.length === 1 && result[0])
-                          setDraft((value) => ({ ...value, model: result[0]!.id }));
+                        setCatalogProvider(draft.provider);
+                        if (result.length === 1 && result[0]) chooseDescriptor(result[0]);
                         setStatus(result.length + '개 모델을 불러왔습니다.');
                       });
                     }}
@@ -1572,15 +1783,37 @@ function Settings({
                   aria-label="최대 출력 토큰"
                   type="number"
                   min="1"
-                  max="32768"
+                  max="1048576"
                   step="1"
                   value={draft.maxTokens}
+                  disabled={draft.autoMaxTokens}
                   onChange={(event) =>
                     setDraft({ ...draft, maxTokens: Number(event.target.value) })
                   }
                 />
               </label>
             </div>
+            <label className="check-field auto-token-setting">
+              <input
+                type="checkbox"
+                checked={draft.autoMaxTokens}
+                onChange={(event) => {
+                  const automatic = event.target.checked;
+                  const descriptor = catalog.find((item) => item.id === draft.model);
+                  setDraft({
+                    ...draft,
+                    autoMaxTokens: automatic,
+                    maxTokens: automatic
+                      ? automaticOutputTokens(draft.contextBudgetTokens, descriptor)
+                      : draft.maxTokens,
+                  });
+                }}
+              />
+              <span>
+                출력 토큰 자동 선택 · 앱 컨텍스트 예산의 20%를 출력에 예약하고 80%를 입력에
+                사용합니다.
+              </span>
+            </label>
             <label className="field">
               앱 컨텍스트 예산 (토큰)
               <input
@@ -1589,13 +1822,22 @@ function Settings({
                 max="2097152"
                 step="1"
                 value={draft.contextBudgetTokens}
-                onChange={(event) =>
-                  setDraft({ ...draft, contextBudgetTokens: Number(event.target.value) })
-                }
+                onChange={(event) => {
+                  const contextBudgetTokens = Number(event.target.value);
+                  const descriptor = catalog.find((item) => item.id === draft.model);
+                  setDraft({
+                    ...draft,
+                    contextBudgetTokens,
+                    maxTokens: draft.autoMaxTokens
+                      ? automaticOutputTokens(contextBudgetTokens, descriptor)
+                      : draft.maxTokens,
+                  });
+                }}
               />
               <small>
-                입력 추정량 + 최대 출력 + 여유분을 검사합니다. 엔진의 컨텍스트 길이를 바꾸지는
-                않습니다. 모델의 실제 한도에 맞춰 설정하세요.
+                {draft.autoMaxTokens
+                  ? `입력 ${Math.max(0, draft.contextBudgetTokens - draft.maxTokens).toLocaleString()} · 출력 ${draft.maxTokens.toLocaleString()} 토큰으로 자동 배분합니다.`
+                  : '입력 추정량 + 최대 출력 + 여유분을 검사합니다. 엔진의 컨텍스트 길이를 바꾸지는 않습니다.'}
               </small>
             </label>
             <label className="eco-setting">

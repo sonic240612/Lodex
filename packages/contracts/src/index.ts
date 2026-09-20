@@ -137,6 +137,7 @@ export const autopilotLimitsSchema = z.strictObject({
   outputTokens: z.number().int().min(1024).max(1048576).default(32768),
 });
 export interface AutopilotState {
+  goalDriven?: boolean;
   runId: string;
   status: 'running' | 'paused' | 'completed' | 'cancelled' | 'interrupted';
   plan: Plan;
@@ -265,6 +266,15 @@ export const commandSchema = z.discriminatedUnion('type', [
     taskIds: z.array(idSchema).max(100),
     limits: autopilotLimitsSchema,
   }),
+  z.strictObject({
+    ...envelope,
+    ...target,
+    type: z.literal('start_goal'),
+    goal: z.string().trim().min(1).max(4000),
+    limits: autopilotLimitsSchema,
+  }),
+  z.strictObject({ ...envelope, ...target, type: z.literal('resume_goal') }),
+  z.strictObject({ ...envelope, ...target, type: z.literal('stop_autopilot') }),
   z.strictObject({ ...envelope, ...target, type: z.literal('save_plan'), plan: planSchema }),
   z.strictObject({ ...envelope, ...target, type: z.literal('set_mode'), mode: modeSchema }),
   z.strictObject({
@@ -382,7 +392,7 @@ export interface EditProposal {
   oldText: string;
   newText: string;
   diff: string;
-  status: 'proposed' | 'applying' | 'applied' | 'reverted' | 'conflict' | 'uncertain';
+  status: 'proposed' | 'applying' | 'applied' | 'reverted' | 'rejected' | 'conflict' | 'uncertain';
   error?: string;
 }
 export type ChangeStatus = EditProposal['status'] | 'partial';
@@ -408,7 +418,7 @@ export const editActionSchema = z.strictObject({
   sessionId: idSchema,
   expectedVersion: z.number().int().nonnegative(),
   activityId: idSchema,
-  action: z.enum(['apply', 'check', 'undo']),
+  action: z.enum(['apply', 'check', 'undo', 'reject']),
 });
 export type EditAction = z.infer<typeof editActionSchema>;
 export interface Activity {
@@ -540,6 +550,9 @@ export interface ModelDescriptor {
   id: string;
   name: string;
   contextLength: number | null;
+  maxCompletionTokens: number | null;
+  defaultTemperature: number | null;
+  defaultTopP: number | null;
   tools: boolean | null;
 }
 export interface ModelCapabilities {
@@ -655,6 +668,53 @@ export function prepareAutopilot(
     reservedOutputTokens: 0,
     startedAt: new Date().toISOString(),
   };
+}
+export function prepareGoal(
+  _session: Session,
+  goal: string,
+  limits: z.infer<typeof autopilotLimitsSchema>,
+  runId = '',
+): AutopilotState {
+  const normalized = goal.trim();
+  if (!normalized) throw new AppError('GOAL_REQUIRED', '/goal 뒤에 달성할 목표를 입력하세요.');
+  const plan = planSchema.parse({
+    goal: normalized,
+    instructions: '채팅에서 /goal로 시작한 지속 실행 목표입니다.',
+    includeInContext: true,
+    criteria: '요청한 결과를 실제로 만들고 가능한 범위에서 확인한 뒤 완료 근거를 제시합니다.',
+    tasks: [],
+  });
+  return {
+    goalDriven: true,
+    runId,
+    status: 'running',
+    plan,
+    taskIds: [],
+    completedTaskIds: [],
+    wholeGoal: true,
+    evidence: [],
+    limits,
+    modelCalls: 0,
+    toolCalls: 0,
+    reservedOutputTokens: 0,
+    startedAt: new Date().toISOString(),
+  };
+}
+export function resumeGoal(session: Session, runId = ''): AutopilotState {
+  const previous = session.autopilot;
+  if (!previous?.goalDriven || previous.status === 'completed' || previous.status === 'cancelled')
+    throw new AppError('GOAL_NOT_PAUSED', '계속 실행할 목표가 없습니다.', 409);
+  const { reason: _reason, ...rest } = structuredClone(previous);
+  return { ...rest, runId, status: 'running' };
+}
+export function goalPrompt(state: AutopilotState) {
+  return [
+    'Continue working autonomously until the user goal is achieved or a real blocker requires user action.',
+    'Use the available tools to inspect, implement, and verify. Do not stop after merely explaining a plan.',
+    'When a file change needs approval, propose it and pause. After approval, continue from the persisted conversation.',
+    'Call complete_goal only after the goal is actually achieved. Include concrete evidence in that tool call.',
+    'Goal: ' + state.plan.goal,
+  ].join('\n');
 }
 export function readyAutopilotTasks(state: AutopilotState) {
   return state.plan.tasks.filter(

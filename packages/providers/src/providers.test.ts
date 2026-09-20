@@ -340,4 +340,37 @@ describe('provider adapters', () => {
     ).listModels();
     expect(descriptors[0]).toMatchObject({ contextLength: null, tools: null });
   });
+  it('reads OpenRouter context, output, and default generation settings from the catalog', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          data: [
+            {
+              id: 'fixture/model',
+              name: 'Fixture Model',
+              context_length: 131072,
+              supported_parameters: ['tools'],
+              default_parameters: { temperature: 0.2, top_p: 0.8 },
+              top_provider: { max_completion_tokens: 16384 },
+            },
+          ],
+        }),
+      ),
+    );
+    const descriptors = await new ChatCompletionProvider(
+      'openrouter',
+      '',
+      'fixture-secret',
+      fetcher,
+    ).listModels();
+    expect(descriptors[0]).toEqual({
+      id: 'fixture/model',
+      name: 'Fixture Model',
+      contextLength: 131072,
+      maxCompletionTokens: 16384,
+      defaultTemperature: 0.2,
+      defaultTopP: 0.8,
+      tools: true,
+    });
+  });
 });

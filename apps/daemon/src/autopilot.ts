@@ -12,6 +12,9 @@ import { executeCommand } from '@lodex/tools';
 
 const taskInput = z.strictObject({ taskId: z.uuid() });
 const goalInput = z.strictObject({});
+const completeGoalInput = z.strictObject({
+  evidence: z.string().trim().min(1).max(4000),
+});
 export const verificationTools: ToolDefinition[] = [
   {
     type: 'function',
@@ -32,6 +35,24 @@ export const verificationTools: ToolDefinition[] = [
     },
   },
 ];
+export const goalCompletionTool: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'complete_goal',
+    description:
+      'Finish a /goal run only after the requested outcome has actually been produced and checked. Provide concise, concrete completion evidence. Do not call this for a plan, partial progress, or an unresolved blocker.',
+    parameters: z.toJSONSchema(completeGoalInput),
+  },
+};
+
+export function completeGoal(state: AutopilotState, argumentsJson: string) {
+  if (!state.goalDriven || state.status !== 'running')
+    throw new AppError('GOAL_REQUIRED', '실행 중인 /goal에서만 완료할 수 있습니다.');
+  const { evidence } = completeGoalInput.parse(JSON.parse(argumentsJson));
+  state.status = 'completed';
+  state.reason = '목표 완료: ' + evidence;
+  return { completed: true, evidence };
+}
 
 export async function verifyAutopilot(options: {
   state: AutopilotState;

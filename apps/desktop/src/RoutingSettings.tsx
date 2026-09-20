@@ -4,9 +4,35 @@ import {
   type AgentRoutingConfig,
   type ModelConfig,
   type LocalProfile,
+  type ModelDescriptor,
 } from '@lodex/contracts';
-import { nativeDesktop, runtimeSnapshot } from './bridge';
+import { models, nativeDesktop, runtimeSnapshot } from './bridge';
 import { Icon } from './icons';
+
+function automaticOutputTokens(context: number, descriptor?: ModelDescriptor) {
+  return Math.max(
+    1,
+    Math.min(
+      Math.floor(context * 0.2),
+      descriptor?.maxCompletionTokens ?? Number.POSITIVE_INFINITY,
+      1048576,
+    ),
+  );
+}
+
+function applyModelDefaults(config: ModelConfig, descriptor: ModelDescriptor): ModelConfig {
+  const context = Math.min(descriptor.contextLength ?? config.contextBudgetTokens, 2097152);
+  return {
+    ...config,
+    model: descriptor.id,
+    contextBudgetTokens: context,
+    temperature: descriptor.defaultTemperature ?? 0.7,
+    topP: descriptor.defaultTopP ?? 0.95,
+    maxTokens: config.autoMaxTokens
+      ? automaticOutputTokens(context, descriptor)
+      : Math.min(config.maxTokens, descriptor.maxCompletionTokens ?? 1048576),
+  };
+}
 
 export function RoutingSettings({
   base,
@@ -25,6 +51,7 @@ export function RoutingSettings({
 }) {
   const [draft, setDraft] = useState<AgentRoutingConfig>(routing ?? { subagentsEnabled: false });
   const [profiles, setProfiles] = useState<LocalProfile[]>([]);
+  const [catalog, setCatalog] = useState<ModelDescriptor[]>([]);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
   const dialog = useRef<HTMLDialogElement>(null);
@@ -45,6 +72,38 @@ export function RoutingSettings({
       live = false;
     };
   }, []);
+  useEffect(() => {
+    if (
+      !nativeDesktop ||
+      catalog.length ||
+      !(['plan', 'build', 'subagent'] as const).some(
+        (role) => draft[role]?.provider === 'openrouter',
+      )
+    )
+      return;
+    let live = true;
+    void models('openrouter', '')
+      .then((items) => {
+        if (!live) return;
+        setCatalog(items);
+        setDraft((current) => {
+          const next = { ...current };
+          for (const role of ['plan', 'build', 'subagent'] as const) {
+            const config = current[role];
+            const descriptor = items.find((item) => item.id === config?.model);
+            if (config?.provider === 'openrouter' && descriptor)
+              next[role] = applyModelDefaults(config, descriptor);
+          }
+          return next;
+        });
+      })
+      .catch((failure) => {
+        if (live) setError(failure instanceof Error ? failure.message : String(failure));
+      });
+    return () => {
+      live = false;
+    };
+  }, [catalog.length, draft.build?.provider, draft.plan?.provider, draft.subagent?.provider]);
   return (
     <dialog
       ref={dialog}
@@ -181,9 +240,23 @@ export function RoutingSettings({
                       <label>
                         모델 ID
                         <input
+                          list={
+                            config.provider === 'openrouter'
+                              ? 'routing-openrouter-models'
+                              : undefined
+                          }
                           value={config.model}
                           required
-                          onChange={(event) => change({ model: event.target.value })}
+                          onChange={(event) => {
+                            const model = event.target.value;
+                            const descriptor = catalog.find((item) => item.id === model);
+                            if (config.provider === 'openrouter' && descriptor)
+                              setDraft((old) => ({
+                                ...old,
+                                [role]: applyModelDefaults(old[role] ?? base, descriptor),
+                              }));
+                            else change({ model });
+                          }}
                         />
                       </label>
                     )}
@@ -207,7 +280,7 @@ export function RoutingSettings({
                         [
                           ['temperature', 'Temperature', 0, 2, 0.1],
                           ['topP', 'Top P', 0.01, 1, 0.01],
-                          ['maxTokens', '최대 출력 토큰', 1, 32768, 1],
+                          ['maxTokens', '최대 출력 토큰', 1, 1048576, 1],
                           ['contextBudgetTokens', '컨텍스트 예산', 1024, 2097152, 1],
                         ] as const
                       ).map(([key, label, min, max, step]) => (
@@ -220,11 +293,41 @@ export function RoutingSettings({
                             max={max}
                             step={step}
                             required
-                            onChange={(event) => change({ [key]: Number(event.target.value) })}
+                            disabled={key === 'maxTokens' && config.autoMaxTokens}
+                            onChange={(event) => {
+                              const value = Number(event.target.value);
+                              if (key === 'contextBudgetTokens' && config.autoMaxTokens)
+                                change({
+                                  contextBudgetTokens: value,
+                                  maxTokens: automaticOutputTokens(
+                                    value,
+                                    catalog.find((item) => item.id === config.model),
+                                  ),
+                                });
+                              else change({ [key]: value });
+                            }}
                           />
                         </label>
                       ))}
                     </div>
+                    <label className="check-row">
+                      <input
+                        type="checkbox"
+                        checked={config.autoMaxTokens}
+                        onChange={(event) =>
+                          change({
+                            autoMaxTokens: event.target.checked,
+                            maxTokens: event.target.checked
+                              ? automaticOutputTokens(
+                                  config.contextBudgetTokens,
+                                  catalog.find((item) => item.id === config.model),
+                                )
+                              : config.maxTokens,
+                          })
+                        }
+                      />
+                      최대 출력 자동 · 컨텍스트의 20%
+                    </label>
                     <label className="check-row">
                       <input
                         type="checkbox"
@@ -264,6 +367,13 @@ export function RoutingSettings({
           {hasMessages && (
             <p>저장하면 같은 프로젝트에 새 대화를 만듭니다. 기존 대화의 설정은 유지됩니다.</p>
           )}
+          <datalist id="routing-openrouter-models">
+            {catalog.map((model) => (
+              <option key={model.id} value={model.id}>
+                {model.name}
+              </option>
+            ))}
+          </datalist>
           {error && (
             <p role="alert" className="error-text">
               {error}

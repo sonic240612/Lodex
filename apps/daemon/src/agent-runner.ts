@@ -15,7 +15,7 @@ import { measureRequest, type CompiledContext } from '@lodex/context';
 import { runProjectTool, executeCommand } from '@lodex/tools';
 import type { Store } from '@lodex/storage';
 import { proposePlan } from './planning';
-import { verifyAutopilot } from './autopilot';
+import { completeGoal, verifyAutopilot } from './autopilot';
 import { runSkillTool } from './skills';
 import type { RunMcp } from './mcp';
 import type { RegisteredSkill } from '@lodex/skills';
@@ -258,9 +258,10 @@ export async function runAgent(options: {
             );
           continuation.push({
             role: 'user',
-            content:
-              'Autopilot is still active. Continue the ready tasks or explain the blocker; prose alone is not verification. Ready task IDs: ' +
-              JSON.stringify(readyAutopilotTasks(autopilot).map((t) => t.id)),
+            content: autopilot.goalDriven
+              ? 'The /goal run is still active. Continue doing the work. Call complete_goal only after the result exists and has been checked; otherwise explain a concrete blocker.'
+              : 'Autopilot is still active. Continue the ready tasks or explain the blocker; prose alone is not verification. Ready task IDs: ' +
+                JSON.stringify(readyAutopilotTasks(autopilot).map((t) => t.id)),
           });
           if (roundText) content += '\n\n';
           await save();
@@ -328,6 +329,16 @@ export async function runAgent(options: {
               await save();
             },
           });
+        } else if (call.name === 'complete_goal') {
+          if (!autopilot) throw new AppError('GOAL_REQUIRED', '실행 중인 /goal이 없습니다.');
+          try {
+            result = JSON.stringify(completeGoal(autopilot, call.arguments));
+          } catch (error) {
+            result = JSON.stringify({
+              error: error instanceof AppError ? error.code : 'GOAL_INPUT',
+              message: error instanceof AppError ? error.message : '완료 근거가 올바르지 않습니다.',
+            });
+          }
         } else if (call.name === 'verify_task' || call.name === 'verify_goal') {
           if (!autopilot || !project || !session.execution)
             throw new AppError(

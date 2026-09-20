@@ -8,6 +8,7 @@ export const editStatusText: Record<ChangeStatus, string> = {
   applying: '처리 중',
   applied: '적용됨',
   reverted: '되돌림 확인됨',
+  rejected: '거절됨',
   conflict: '파일 변경 충돌',
   uncertain: '상태 확인 필요',
   partial: '일부 파일 적용됨',
@@ -32,7 +33,7 @@ export function EditReview({
   const running = workspace.sessions.some(
     (s) => s.projectId === session?.projectId && s.run?.status === 'running',
   );
-  async function act(action: 'apply' | 'check' | 'undo') {
+  async function act(action: 'apply' | 'check' | 'undo' | 'reject') {
     if (!session || busy) return;
     setBusy(true);
     setError('');
@@ -117,6 +118,9 @@ export function EditReview({
         </p>
       )}
       {edit.status === 'reverted' && <p>변경 전 원본 내용이 파일에서 확인되었습니다.</p>}
+      {edit.status === 'rejected' && (
+        <p>이 변경은 사용자가 거절했습니다. 파일은 수정하지 않았습니다.</p>
+      )}
       {(edit.error || error) && (
         <p className="danger-text" role="alert">
           {error || edit.error}
@@ -137,6 +141,14 @@ export function EditReview({
             onClick={() => void act('apply')}
           >
             {busy ? '처리 중…' : edit.status === 'partial' ? '남은 변경 적용' : '검토한 변경 적용'}
+          </button>
+        )}
+        {edit.status === 'proposed' && !confirmUndo && (
+          <button
+            disabled={!nativeDesktop || !workspace.connected || busy || running}
+            onClick={() => void act('reject')}
+          >
+            거절
           </button>
         )}
         {edit.status !== 'applying' && (

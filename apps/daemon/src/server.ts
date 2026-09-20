@@ -14,6 +14,9 @@ import {
   localUrlSchema,
   prepareAutopilot,
   autopilotPrompt,
+  prepareGoal,
+  resumeGoal,
+  goalPrompt,
   localProfileInputSchema,
   runtimeSettingsSchema,
   runtimeActionSchema,
@@ -44,7 +47,7 @@ import {
 } from '@lodex/tools';
 import { runAgent } from './agent-runner';
 import { planningTool } from './planning';
-import { verificationTools } from './autopilot';
+import { goalCompletionTool, verificationTools } from './autopilot';
 import { RuntimeManager } from '@lodex/local-runtime';
 import { inspectSkillDirectory, skillCatalog, type RegisteredSkill } from '@lodex/skills';
 import { skillTools } from './skills';
@@ -293,9 +296,18 @@ export async function startServer(options: ServerOptions) {
       if (target.run && active.has(target.run.id) && target.run.status !== 'running')
         throw new AppError('BUSY', '중지한 실행을 정리하는 중입니다.', 409);
     }
-    if (command.type === 'send_message' || command.type === 'start_autopilot') {
+    if (
+      command.type === 'send_message' ||
+      command.type === 'start_autopilot' ||
+      command.type === 'start_goal' ||
+      command.type === 'resume_goal'
+    ) {
       const stored = await store.session(command.sessionId);
-      const session = { ...stored, config: resolveModelConfig(stored) };
+      const session = {
+        ...stored,
+        config: resolveModelConfig(stored),
+        ...(command.type === 'start_goal' ? { mode: 'build' as const } : {}),
+      };
       const configs = [session.config];
       const childConfig = session.routing?.subagent ?? stored.config;
       if (session.routing?.subagentsEnabled) configs.push(childConfig);
@@ -332,10 +344,14 @@ export async function startServer(options: ServerOptions) {
           'MCP 도구 설명과 실행 결과를 OpenRouter로 보내려면 이 대화의 MCP 전송 동의가 필요합니다. 선택을 해제해도 이전 내용은 기록에 남습니다.',
           403,
         );
-      if (command.type === 'start_autopilot' && session.mcp?.length)
+      const autonomous =
+        command.type === 'start_autopilot' ||
+        command.type === 'start_goal' ||
+        command.type === 'resume_goal';
+      if (autonomous && session.mcp?.length)
         throw new AppError(
           'MCP_AUTOPILOT',
-          'MCP 도구를 선택한 대화는 아직 Autopilot을 지원하지 않습니다. MCP 선택을 해제하고 실행하세요.',
+          'MCP 도구를 선택한 대화는 아직 자동 실행을 지원하지 않습니다. MCP 선택을 해제하고 실행하세요.',
         );
       if (session.mode !== 'plan')
         mcpSelections = selectedMcpTools(session, await store.registeredMcp());
@@ -467,9 +483,17 @@ export async function startServer(options: ServerOptions) {
         const autopilot = prepareAutopilot(session, command.taskIds, command.limits);
         tools.push(...verificationTools);
         content = autopilotPrompt(autopilot);
+      } else if (command.type === 'start_goal') {
+        const goal = prepareGoal(session, command.goal, command.limits);
+        tools.push(goalCompletionTool);
+        content = goalPrompt(goal);
+      } else if (command.type === 'resume_goal') {
+        const goal = resumeGoal(session);
+        tools.push(goalCompletionTool);
+        content = goalPrompt(goal);
       } else content = command.content;
       context = compileContext(
-        stored,
+        session,
         content,
         tools,
         selectedSkills.length
@@ -482,7 +506,10 @@ export async function startServer(options: ServerOptions) {
       contentPreviews.consume(command.previewId);
     if (
       !result.replayed &&
-      (command.type === 'send_message' || command.type === 'start_autopilot')
+      (command.type === 'send_message' ||
+        command.type === 'start_autopilot' ||
+        command.type === 'start_goal' ||
+        command.type === 'resume_goal')
     ) {
       const abort = new AbortController();
       const task = execute(result.session, abort, context!, selectedSkills, mcpSelections);
@@ -872,6 +899,11 @@ export async function startServer(options: ServerOptions) {
               throw new AppError('EDIT_NOT_FOUND', '수정안을 찾을 수 없습니다.', 404);
             if (action.action === 'apply' && edit.status === 'applied') return session;
             if (action.action === 'undo' && edit.status === 'reverted') return session;
+            if (action.action === 'reject' && edit.status === 'rejected') return session;
+            if (action.action === 'reject') {
+              await store.beginEdit(action);
+              return store.finishEdit(session.id, action.activityId, 'rejected');
+            }
             for (const other of (await store.snapshot()).sessions) {
               if (
                 other.projectId === session.projectId &&

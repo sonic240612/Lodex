@@ -51,7 +51,7 @@ export function AutopilotPanel({ session }: { session: Session }) {
   }
   return (
     <section className="autopilot-panel" aria-label="Autopilot">
-      <strong>Autopilot</strong>
+      <strong>{state?.goalDriven ? '/goal Autopilot' : 'Autopilot'}</strong>
       {state && (
         <>
           <p role="status">
@@ -64,7 +64,9 @@ export function AutopilotPanel({ session }: { session: Session }) {
                 interrupted: '이전 실행 중단',
               }[state.status]
             }{' '}
-            · {state.completedTaskIds.length}/{state.taskIds.length}개 작업 검증
+            {state.goalDriven
+              ? '· 목표: ' + state.plan.goal
+              : `· ${state.completedTaskIds.length}/${state.taskIds.length}개 작업 검증`}
           </p>
           <p>{state.reason}</p>
           {JSON.stringify(state.plan) !== JSON.stringify(session.plan) && (
@@ -108,55 +110,63 @@ export function AutopilotPanel({ session }: { session: Session }) {
           )}
         </>
       )}
-      <details>
-        <summary>실행 범위·예산</summary>
-        <p>선택하지 않으면 전체 작업을 실행합니다. 필요한 선행 작업도 포함됩니다.</p>
-        {session.plan.tasks.map((task) => (
-          <label className="check-field" key={task.id}>
-            <input
-              type="checkbox"
-              checked={selected.includes(task.id)}
-              disabled={running || busy}
-              onChange={(e) =>
-                setSelected(
-                  e.target.checked
-                    ? [...selected, task.id]
-                    : selected.filter((id) => id !== task.id),
-                )
-              }
-            />
-            {task.title}
-          </label>
-        ))}
-        {(
-          [
-            ['modelCalls', '모델 호출', 1, 64],
-            ['toolCalls', '도구 호출', 1, 128],
-            ['minutes', '시간 (분)', 1, 120],
-            ['outputTokens', '출력 토큰 예산', 1024, 1048576],
-          ] as const
-        ).map(([key, label, min, max]) => (
-          <label className="budget-field" key={key}>
-            {label}
-            <input
-              type="number"
-              min={min}
-              max={max}
-              value={limits[key]}
-              disabled={running || busy}
-              onChange={(e) => setLimits({ ...limits, [key]: Number(e.target.value) })}
-            />
-          </label>
-        ))}
-      </details>
-      <p>
-        저장한 계획과 검증 명령을 사용합니다. 수정안은 검토를 기다리고, 허용한 컨테이너 명령은
-        프로젝트를 변경할 수 있습니다. 다시 실행하면 검증을 새로 수행합니다.
-      </p>
-      <button className="save-plan" disabled={!canStart} onClick={() => void start()}>
-        {busy ? '시작 중…' : state ? '계획 다시 실행' : '계획 실행'}
-      </button>
-      {!canStart && !running && <p>로컬 모델·Build·Docker 실행 허용이 필요합니다.</p>}
+      {!state?.goalDriven && (
+        <details>
+          <summary>실행 범위·예산</summary>
+          <p>선택하지 않으면 전체 작업을 실행합니다. 필요한 선행 작업도 포함됩니다.</p>
+          {session.plan.tasks.map((task) => (
+            <label className="check-field" key={task.id}>
+              <input
+                type="checkbox"
+                checked={selected.includes(task.id)}
+                disabled={running || busy}
+                onChange={(e) =>
+                  setSelected(
+                    e.target.checked
+                      ? [...selected, task.id]
+                      : selected.filter((id) => id !== task.id),
+                  )
+                }
+              />
+              {task.title}
+            </label>
+          ))}
+          {(
+            [
+              ['modelCalls', '모델 호출', 1, 64],
+              ['toolCalls', '도구 호출', 1, 128],
+              ['minutes', '시간 (분)', 1, 120],
+              ['outputTokens', '출력 토큰 예산', 1024, 1048576],
+            ] as const
+          ).map(([key, label, min, max]) => (
+            <label className="budget-field" key={key}>
+              {label}
+              <input
+                type="number"
+                min={min}
+                max={max}
+                value={limits[key]}
+                disabled={running || busy}
+                onChange={(e) => setLimits({ ...limits, [key]: Number(e.target.value) })}
+              />
+            </label>
+          ))}
+        </details>
+      )}
+      {!state?.goalDriven && (
+        <p>
+          저장한 계획과 검증 명령을 사용합니다. 수정안은 검토를 기다리고, 허용한 컨테이너 명령은
+          프로젝트를 변경할 수 있습니다. 다시 실행하면 검증을 새로 수행합니다.
+        </p>
+      )}
+      {!state?.goalDriven && (
+        <button className="save-plan" disabled={!canStart} onClick={() => void start()}>
+          {busy ? '시작 중…' : state ? '계획 다시 실행' : '계획 실행'}
+        </button>
+      )}
+      {!state?.goalDriven && !canStart && !running && (
+        <p>로컬 모델·Build·Docker 실행 허용이 필요합니다.</p>
+      )}
       {error && (
         <p className="danger-text" role="alert">
           {error}

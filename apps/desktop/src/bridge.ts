@@ -172,9 +172,15 @@ async function previewCommand(command: Command): Promise<CommandResult> {
   } else {
     if (!session) throw new Error('대화를 찾을 수 없습니다.');
     if (command.type === 'save_plan') session.plan = command.plan;
-    else if (command.type === 'start_autopilot')
-      throw new Error('Autopilot은 데스크톱 앱의 로컬 모델에서 사용할 수 있습니다.');
-    else if (command.type === 'set_mode') session.mode = command.mode;
+    else if (
+      command.type === 'start_autopilot' ||
+      command.type === 'start_goal' ||
+      command.type === 'resume_goal'
+    )
+      throw new Error('자동 실행은 데스크톱 앱에서 사용할 수 있습니다.');
+    else if (command.type === 'stop_autopilot') {
+      if (session.autopilot) session.autopilot.status = 'cancelled';
+    } else if (command.type === 'set_mode') session.mode = command.mode;
     else if (command.type === 'configure_execution')
       throw new Error('명령 실행은 데스크톱 앱에서 설정할 수 있습니다.');
     else if (command.type === 'adopt_plan') {
@@ -451,7 +457,17 @@ export async function models(provider: string, baseUrl: string): Promise<ModelDe
     baseUrl = parsed.data;
   }
   if (!nativeDesktop)
-    return [{ id: 'demo', name: 'UI 미리보기', contextLength: null, tools: false }];
+    return [
+      {
+        id: 'demo',
+        name: 'UI 미리보기',
+        contextLength: null,
+        maxCompletionTokens: null,
+        defaultTemperature: null,
+        defaultTopP: null,
+        tools: false,
+      },
+    ];
   const result = await invoke<{ models: ModelDescriptor[] }>('daemon_request', {
     method: 'GET',
     path: '/v1/models?' + new URLSearchParams({ provider, baseUrl }).toString(),

@@ -133,6 +133,8 @@ button {
   flex-direction: column;
   padding: 23px 14px 12px;
   min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 .brand {
   display: flex;
@@ -447,6 +449,7 @@ button {
 }
 .sidebar-bottom {
   margin-top: 20px;
+  flex-shrink: 0;
 }
 .local-card {
   display: flex;
@@ -490,6 +493,11 @@ button {
   padding: 17px 8px 4px;
   background: transparent;
   text-align: left;
+  min-width: 0;
+}
+.profile-button > span:nth-child(2) {
+  min-width: 0;
+  overflow: hidden;
 }
 .profile-button > svg {
   margin-left: auto;
@@ -510,12 +518,18 @@ button {
   font-size: 11px;
   font-weight: 500;
   display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .profile-button small {
   font-size: 10px;
   color: var(--subtle);
   display: block;
   margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .main {
   display: flex;
@@ -560,6 +574,27 @@ button {
 }
 .model-picker svg {
   color: var(--subtle);
+}
+.autopilot-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.autopilot-toggle.is-on {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: var(--accent-surface);
+}
+.autopilot-toggle.is-on .status-dot {
+  background: var(--accent);
+  animation: pulse 1.4s infinite;
 }
 .mode-badge {
   font-size: 10px;
@@ -850,6 +885,46 @@ button {
   max-width: 860px;
   align-self: center;
   padding: 8px 35px 17px;
+}
+.permission-banner {
+  max-width: 790px;
+  width: 100%;
+  margin: 0 auto 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border));
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: 0 10px 30px var(--shadow);
+}
+.permission-banner > div {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+.permission-banner strong {
+  font-size: 11px;
+}
+.permission-banner span {
+  color: var(--muted);
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.permission-banner button {
+  padding: 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  font-size: 11px;
+}
+.permission-banner .permission-allow {
+  background: var(--accent);
+  color: var(--bg);
 }
 .composer {
   border: 1px solid #ffffff12;
@@ -1427,6 +1502,9 @@ button {
   line-height: 1.8;
   color: var(--muted);
 }
+.auto-token-setting {
+  margin: -8px 0 20px;
+}
 input[type='checkbox'] {
   accent-color: var(--accent);
   cursor: pointer;
@@ -1604,6 +1682,16 @@ input[type='checkbox'] {
   }
   .model-picker .model-name {
     max-width: 125px;
+  }
+  .autopilot-toggle {
+    font-size: 0;
+    width: 31px;
+    justify-content: center;
+    padding: 6px;
+  }
+  .autopilot-toggle .status-dot {
+    width: 7px;
+    height: 7px;
   }
   .mode-badge {
     display: none;

@@ -32,6 +32,8 @@ import {
   type CommandExecution,
   type AutopilotState,
   prepareAutopilot,
+  prepareGoal,
+  resumeGoal,
   runtimeSettingsSchema,
   type RuntimeSettings,
   type LocalProfile,
@@ -661,6 +663,13 @@ export class StorageEngine {
               }
             }
           }
+        } else if (command.type === 'stop_autopilot') {
+          if (session.run?.status === 'running')
+            throw new AppError('BUSY', '실행 중인 응답은 먼저 중지하세요.', 409);
+          if (session.autopilot && !['completed', 'cancelled'].includes(session.autopilot.status)) {
+            session.autopilot.status = 'cancelled';
+            session.autopilot.reason = '사용자가 Autopilot을 껐습니다.';
+          }
         } else if (command.type === 'save_plan') {
           if (session.run?.status === 'running' && session.autopilot?.runId === session.run.id)
             throw new AppError('BUSY', 'Autopilot을 중지한 뒤 실행 계획을 편집하세요.', 409);
@@ -827,18 +836,27 @@ export class StorageEngine {
             const runId = randomUUID();
             if (command.type === 'start_autopilot')
               session.autopilot = prepareAutopilot(session, command.taskIds, command.limits, runId);
+            else if (command.type === 'start_goal') {
+              session.mode = 'build';
+              session.autopilot = prepareGoal(session, command.goal, command.limits, runId);
+            } else if (command.type === 'resume_goal')
+              session.autopilot = resumeGoal(session, runId);
             const content =
               command.type === 'send_message'
                 ? command.content
-                : '목표 실행: ' +
-                  session.plan.goal +
-                  '\n' +
-                  session.autopilot!.taskIds.length +
-                  '개 작업 · 모델 ' +
-                  command.limits.modelCalls +
-                  '회 · ' +
-                  command.limits.minutes +
-                  '분 이내';
+                : command.type === 'start_goal'
+                  ? '/goal ' + command.goal
+                  : command.type === 'resume_goal'
+                    ? '/goal 계속: ' + session.autopilot!.plan.goal
+                    : '목표 실행: ' +
+                      session.plan.goal +
+                      '\n' +
+                      session.autopilot!.taskIds.length +
+                      '개 작업 · 모델 ' +
+                      command.limits.modelCalls +
+                      '회 · ' +
+                      command.limits.minutes +
+                      '분 이내';
             session.messages.push({
               id: randomUUID(),
               role: 'user',
@@ -868,9 +886,11 @@ export class StorageEngine {
             };
             if (session.messages.length === 2)
               session.title =
-                command.type === 'start_autopilot'
-                  ? session.plan.goal.slice(0, 60)
-                  : content.slice(0, 60);
+                command.type === 'start_goal'
+                  ? command.goal.slice(0, 60)
+                  : command.type === 'start_autopilot'
+                    ? session.plan.goal.slice(0, 60)
+                    : content.slice(0, 60);
           }
         }
       }
@@ -934,7 +954,7 @@ export class StorageEngine {
   beginEdit(action: EditAction): Session {
     return this.transaction(() => {
       const session = this.session(action.sessionId);
-      if (session.mode === 'plan' && action.action !== 'check')
+      if (session.mode === 'plan' && !['check', 'reject'].includes(action.action))
         throw new AppError('PLAN_READ_ONLY', '파일을 변경하려면 Build 모드로 전환하세요.', 403);
       if (session.run?.status === 'running')
         throw new AppError('BUSY', '응답이 끝난 뒤 변경을 적용해 주세요.', 409);
@@ -952,14 +972,15 @@ export class StorageEngine {
       if (
         edit.status === 'applying' ||
         (action.action === 'apply' && edit.status !== 'proposed' && edit.status !== 'partial') ||
-        (action.action === 'undo' && edit.status !== 'applied' && edit.status !== 'partial')
+        (action.action === 'undo' && edit.status !== 'applied' && edit.status !== 'partial') ||
+        (action.action === 'reject' && edit.status !== 'proposed')
       )
         throw new AppError(
           'EDIT_STATE',
           '먼저 파일 상태를 확인하거나 새 수정안을 만들어 주세요.',
           409,
         );
-      if (action.action !== 'check') edit.operation = action.action;
+      if (action.action === 'apply' || action.action === 'undo') edit.operation = action.action;
       edit.status = 'applying';
       if ('files' in edit)
         edit.observations = edit.files.map((f) => ({ path: f.path, state: 'unknown' }));
