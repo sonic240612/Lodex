@@ -207,6 +207,89 @@ describe('authenticated daemon integration', () => {
       else expect(session.autopilot?.reason).toBeTruthy();
     },
   );
+  it('runs Autopilot without Docker by verifying saved criteria with evidence', async () => {
+    const taskId = crypto.randomUUID();
+    let round = 0;
+    const provider: InferenceProvider = {
+      listModels: async () => [],
+      capabilities: async () => ({ tools: true, streaming: true }),
+      async *generate(request) {
+        expect(request.tools?.some((tool) => tool.function.name === 'run_command')).toBe(false);
+        const name = round++ === 0 ? 'verify_task' : 'verify_goal';
+        yield {
+          type: 'tool_call_delta',
+          index: 0,
+          id: 'evidence-' + round,
+          name,
+          arguments: JSON.stringify(
+            name === 'verify_task'
+              ? { taskId, evidence: '변경된 파일을 다시 읽어 완료 기준과 일치함을 확인했습니다.' }
+              : { evidence: '선택한 모든 작업과 최종 결과를 다시 확인했습니다.' },
+          ),
+        };
+        yield { type: 'finished', reason: 'tool_calls' };
+      },
+    };
+    const app = await setup(provider);
+    const { project } = await app
+      .request('/v1/projects', { method: 'POST', body: JSON.stringify({ path: app.dir }) })
+      .then((response) => response.json());
+    let session = await app.create(
+      { provider: 'llama-server', model: 'fixture', contextBudgetTokens: 65536 },
+      project.id,
+    );
+    session = (
+      await app
+        .command(
+          makeCommand({
+            type: 'set_mode',
+            sessionId: session.id,
+            expectedVersion: session.version,
+            mode: 'plan',
+          }),
+        )
+        .then((response) => response.json())
+    ).session;
+    session = (
+      await app
+        .command(
+          makeCommand({
+            type: 'save_plan',
+            sessionId: session.id,
+            expectedVersion: session.version,
+            plan: {
+              ...defaultPlan(),
+              goal: 'Docker 없이 작업 완료',
+              criteria: '저장한 완료 기준 충족',
+              includeInContext: true,
+              tasks: [{ id: taskId, title: '파일 확인', criteria: '결과 파일 확인', done: false }],
+            },
+          }),
+        )
+        .then((response) => response.json())
+    ).session;
+    expect(session.execution?.backend).toBe('disabled');
+    await app.command(
+      makeCommand({
+        type: 'start_autopilot',
+        sessionId: session.id,
+        expectedVersion: session.version,
+        taskIds: [],
+        limits: autopilotLimitsSchema.parse({}),
+      }),
+    );
+    await vi.waitFor(async () =>
+      expect((await app.store.session(session.id)).autopilot?.status).toBe('completed'),
+    );
+    const completed = await app.store.session(session.id);
+    expect(completed.run?.status).toBe('completed');
+    expect(completed.mode).toBe('build');
+    expect(completed.autopilot?.completedTaskIds).toEqual([taskId]);
+    expect(completed.autopilot?.evidence).toEqual([
+      expect.objectContaining({ taskId, passed: true, summary: expect.any(String) }),
+      expect.objectContaining({ taskId: null, passed: true, summary: expect.any(String) }),
+    ]);
+  });
   it('runs a slash goal independently from the saved plan until the model completes it', async () => {
     let calls = 0;
     const provider: InferenceProvider = {

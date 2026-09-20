@@ -829,9 +829,10 @@ export class StorageEngine {
             if (context?.mcpAttachmentIds?.length) session.hasMcpHistory = true;
             const messageId = randomUUID();
             const runId = randomUUID();
-            if (command.type === 'start_autopilot')
+            if (command.type === 'start_autopilot') {
+              session.mode = 'build';
               session.autopilot = prepareAutopilot(session, command.taskIds, command.limits, runId);
-            else if (command.type === 'start_goal') {
+            } else if (command.type === 'start_goal') {
               session.mode = 'build';
               session.autopilot = prepareGoal(session, command.goal, command.limits, runId);
             } else if (command.type === 'resume_goal')

@@ -20,9 +20,8 @@ export function AutopilotPanel({ session }: { session: Session }) {
     workspace.connected &&
     !running &&
     !busy &&
-    session.mode !== 'plan' &&
-    resolveModelConfig(session).provider !== 'demo' &&
-    session.execution?.backend === 'docker';
+    !!session.projectId &&
+    resolveModelConfig(session).provider !== 'demo';
   async function start() {
     setBusy(true);
     setError('');
@@ -105,7 +104,11 @@ export function AutopilotPanel({ session }: { session: Session }) {
                       ? state.plan.tasks.find((t) => t.id === e.taskId)?.title
                       : '최종 검증'}{' '}
                     · {e.passed ? '통과' : '실패'}
-                    <small>실행 {e.executionId.slice(0, 8)}</small>
+                    <small>
+                      {e.executionId
+                        ? `명령 실행 ${e.executionId.slice(0, 8)}`
+                        : `근거 ${(e.summary ?? '').slice(0, 160)}`}
+                    </small>
                   </li>
                 ))}
               </ol>
@@ -153,8 +156,8 @@ export function AutopilotPanel({ session }: { session: Session }) {
       )}
       {!state?.goalDriven && (
         <p>
-          저장한 계획과 검증 명령을 사용합니다. 수정안은 검토를 기다리고, 허용한 컨테이너 명령은
-          프로젝트를 변경할 수 있습니다. 다시 실행하면 검증을 새로 수행합니다.
+          저장한 계획과 완료 기준을 사용합니다. Docker 명령 실행을 켜고 검증 명령을 저장한 경우에는
+          명령으로 확인하고, 그 외에는 프로젝트 검사 근거를 기록합니다. 수정안은 검토를 기다립니다.
         </p>
       )}
       {!state?.goalDriven && (
@@ -163,7 +166,7 @@ export function AutopilotPanel({ session }: { session: Session }) {
         </button>
       )}
       {!state?.goalDriven && !canStart && !running && (
-        <p>모델 연결, Build 모드와 Docker 실행 허용이 필요합니다.</p>
+        <p>프로젝트 대화에서 모델을 연결하세요. 시작하면 Build 모드로 전환됩니다.</p>
       )}
       {error && (
         <p className="danger-text" role="alert">

@@ -413,7 +413,7 @@ export async function runAgent(options: {
             });
           }
         } else if (call.name === 'verify_task' || call.name === 'verify_goal') {
-          if (!autopilot || !project || !session.execution)
+          if (!autopilot)
             throw new AppError(
               'AUTOPILOT_REQUIRED',
               'Autopilot에서만 검증 도구를 사용할 수 있습니다.',
@@ -423,9 +423,10 @@ export async function runAgent(options: {
               state: autopilot,
               name: call.name,
               argumentsJson: call.arguments,
-              project,
-              config: session.execution,
               signal,
+              ...(project && session.execution?.backend === 'docker'
+                ? { project, config: session.execution }
+                : {}),
               ...(options.commandExecutor ? { executor: options.commandExecutor } : {}),
               record: async (execution) => {
                 card.execution = structuredClone(execution);
@@ -433,7 +434,7 @@ export async function runAgent(options: {
               },
             });
             result = JSON.stringify(verification);
-            if (verification.cleanupPending)
+            if ('cleanupPending' in verification && verification.cleanupPending)
               throw new AppError('CLEANUP_REQUIRED', '검증 컨테이너 정리가 필요합니다.');
           } catch (error) {
             if (card.execution?.cleanupPending) throw error;

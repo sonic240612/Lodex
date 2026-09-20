@@ -75,9 +75,24 @@ describe('goal verification and scheduling', () => {
       reservedCostUsd: 0,
       costUnconfirmed: false,
     });
-    expect(() =>
+    expect(
       prepareAutopilot(
         { ...session, plan: { ...session.plan, verificationCommand: '' } },
+        [],
+        state.limits,
+      ).taskIds,
+    ).toEqual(session.plan.tasks.map((task) => task.id));
+    expect(() =>
+      prepareAutopilot(
+        {
+          ...session,
+          plan: {
+            ...session.plan,
+            tasks: session.plan.tasks.map((task, index) =>
+              index === 0 ? { ...task, criteria: '' } : task,
+            ),
+          },
+        },
         [],
         state.limits,
       ),

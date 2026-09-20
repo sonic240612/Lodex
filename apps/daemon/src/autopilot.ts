@@ -10,8 +10,9 @@ import {
 } from '@lodex/contracts';
 import { executeCommand } from '@lodex/tools';
 
-const taskInput = z.strictObject({ taskId: z.uuid() });
-const goalInput = z.strictObject({});
+const evidence = z.string().trim().min(10).max(4000).optional();
+const taskInput = z.strictObject({ taskId: z.uuid(), evidence });
+const goalInput = z.strictObject({ evidence });
 const completeGoalInput = z.strictObject({
   evidence: z.string().trim().min(1).max(4000),
 });
@@ -21,7 +22,7 @@ export const verificationTools: ToolDefinition[] = [
     function: {
       name: 'verify_task',
       description:
-        'Run the saved USER-DEFINED verification command for one ready selected task. Only exit code 0 with confirmed cleanup records a pass. Supply the task ID from the working brief. A failed check returns output so you can fix the problem and retry. Does not change manual checkboxes.',
+        'Verify one ready selected task against its saved completion criteria. Supply its task ID. If a verification command is saved and Docker command execution is enabled, Lodex runs it. Otherwise include concrete inspection evidence of at least 10 characters. A failed command returns output so you can fix the problem and retry. Does not change manual checkboxes.',
       parameters: z.toJSONSchema(taskInput),
     },
   },
@@ -30,7 +31,7 @@ export const verificationTools: ToolDefinition[] = [
     function: {
       name: 'verify_goal',
       description:
-        'Finish Autopilot after every selected task has passed its check. Runs the saved final goal verification command. Call only when no proposed edits need review. A successful result ends the run; include your explanation before calling this tool.',
+        'Finish Autopilot after every selected task has passed. If a final verification command is saved and Docker command execution is enabled, Lodex runs it. Otherwise include concrete final inspection evidence of at least 10 characters. Call only when no proposed edits need review.',
       parameters: z.toJSONSchema(goalInput),
     },
   },
@@ -58,29 +59,59 @@ export async function verifyAutopilot(options: {
   state: AutopilotState;
   name: string;
   argumentsJson: string;
-  project: Project;
-  config: ExecutionConfig;
+  project?: Project;
+  config?: ExecutionConfig;
   signal: AbortSignal;
-  record: (execution: CommandExecution) => Promise<void>;
+  record?: (execution: CommandExecution) => Promise<void>;
   executor?: typeof executeCommand;
 }) {
   const { state, name } = options;
   let taskId: string | null = null,
-    command: string;
+    command: string | undefined,
+    suppliedEvidence: string | undefined;
   if (name === 'verify_task') {
-    taskId = taskInput.parse(JSON.parse(options.argumentsJson)).taskId;
+    const input = taskInput.parse(JSON.parse(options.argumentsJson));
+    taskId = input.taskId;
+    suppliedEvidence = input.evidence;
     const task = readyAutopilotTasks(state).find((task) => task.id === taskId);
     if (!task)
       throw new AppError(
         'TASK_NOT_READY',
         '선택 범위의 선행 검증을 통과한 작업만 검증할 수 있습니다.',
       );
-    command = task.verificationCommand!;
+    command = task.verificationCommand?.trim() || undefined;
   } else {
-    goalInput.parse(JSON.parse(options.argumentsJson));
+    const input = goalInput.parse(JSON.parse(options.argumentsJson));
+    suppliedEvidence = input.evidence;
     if (state.taskIds.some((id) => !state.completedTaskIds.includes(id)))
       throw new AppError('GOAL_PENDING', '선택한 작업의 검증이 모두 통과해야 합니다.');
-    command = state.plan.verificationCommand!;
+    command = state.plan.verificationCommand?.trim() || undefined;
+  }
+  if (!command || !options.project || !options.config || !options.record) {
+    if (!suppliedEvidence)
+      throw new AppError(
+        'EVIDENCE_REQUIRED',
+        'Docker 검증 명령을 사용하지 않는 경우 완료 기준을 확인한 구체적인 근거가 필요합니다.',
+      );
+    state.evidence.push({
+      taskId,
+      summary: suppliedEvidence,
+      passed: true,
+      at: new Date().toISOString(),
+    });
+    if (taskId) state.completedTaskIds.push(taskId);
+    else {
+      state.status = 'completed';
+      state.reason = state.wholeGoal
+        ? '모든 작업을 완료 기준과 제출된 근거로 확인했습니다.'
+        : '선택한 작업을 완료 기준과 제출된 근거로 확인했습니다.';
+    }
+    return {
+      passed: true,
+      evidence: suppliedEvidence,
+      readyTasks: readyAutopilotTasks(state).map((task) => ({ id: task.id, title: task.title })),
+      completedTaskIds: state.completedTaskIds,
+    };
   }
   const execution = await (options.executor ?? executeCommand)({
     project: options.project,

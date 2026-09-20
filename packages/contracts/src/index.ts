@@ -146,7 +146,13 @@ export interface AutopilotState {
   taskIds: string[];
   completedTaskIds: string[];
   wholeGoal: boolean;
-  evidence: { taskId: string | null; executionId: string; passed: boolean; at: string }[];
+  evidence: {
+    taskId: string | null;
+    executionId?: string;
+    summary?: string;
+    passed: boolean;
+    at: string;
+  }[];
   limits: z.infer<typeof autopilotLimitsSchema>;
   modelCalls: number;
   toolCalls: number;
@@ -631,10 +637,10 @@ export function prepareAutopilot(
   limits: z.infer<typeof autopilotLimitsSchema>,
   runId = '',
 ): AutopilotState {
-  if (session.mode === 'plan' || session.execution?.backend !== 'docker' || !session.projectId)
+  if (session.mode === 'plan' || !session.projectId)
     throw new AppError(
       'AUTOPILOT_POLICY',
-      'Build 모드와 프로젝트의 Docker 명령 실행 허용이 필요합니다.',
+      'Autopilot을 사용하려면 프로젝트 대화에서 Build 모드를 선택하세요.',
     );
   if (resolveModelConfig(session).provider === 'demo')
     throw new AppError('AUTOPILOT_MODEL_REQUIRED', '로컬 모델 또는 OpenRouter 모델을 연결하세요.');
@@ -656,14 +662,12 @@ export function prepareAutopilot(
   };
   for (const id of selected) include(id);
   for (const task of plan.tasks.filter((t) => selected.has(t.id)))
-    if (!task.criteria?.trim() || !task.verificationCommand?.trim())
+    if (!task.criteria?.trim())
       throw new AppError(
         'VERIFICATION_REQUIRED',
-        '선택한 작업과 선행 작업마다 완료 기준과 검증 명령을 저장하세요.',
+        '선택한 작업과 선행 작업마다 완료 기준을 저장하세요.',
       );
   const wholeGoal = selected.size === plan.tasks.length;
-  if (!plan.verificationCommand?.trim())
-    throw new AppError('VERIFICATION_REQUIRED', '전체 목표의 최종 검증 명령을 저장하세요.');
   return {
     runId,
     status: 'running',
@@ -758,7 +762,7 @@ export function readyAutopilotTasks(state: AutopilotState) {
 }
 export function autopilotPrompt(state: AutopilotState) {
   return (
-    'Execute the selected working plan within the configured budget. The user authorized this Autopilot run and the configured Docker project scope. Work on ready tasks only; use verify_task when a task is ready for its user-defined verification command. Never mark tasks complete in prose alone. After all selected tasks pass, call verify_goal. A proposed file change is not applied: pause for user review if needed. Stop and explain missing prerequisites.\nSelected task IDs: ' +
+    'Execute the selected working plan within the configured budget. The user authorized this Autopilot run for the selected project. Work on ready tasks only. Use verify_task after checking a task against its saved completion criteria; a saved verification command will run in Docker when command execution is enabled, otherwise provide concrete evidence from your inspection. Never mark tasks complete in prose alone. After all selected tasks pass, call verify_goal with final evidence. A proposed file change is not applied until the user approves it. Stop and explain missing prerequisites.\nSelected task IDs: ' +
     JSON.stringify(state.taskIds) +
     '\nReady task IDs: ' +
     JSON.stringify(readyAutopilotTasks(state).map((t) => t.id))

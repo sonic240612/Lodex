@@ -390,7 +390,9 @@ export async function startServer(options: ServerOptions) {
       const session = {
         ...stored,
         config: resolveModelConfig(stored),
-        ...(command.type === 'start_goal' ? { mode: 'build' as const } : {}),
+        ...(command.type === 'start_goal' || command.type === 'start_autopilot'
+          ? { mode: 'build' as const }
+          : {}),
       };
       const configs = [session.config];
       const childConfig = session.routing?.subagent ?? stored.config;
