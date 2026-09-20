@@ -27,6 +27,7 @@ import {
   type McpContextAttachment,
   resolveModelConfig,
   type ModelConfig,
+  type ModelPricing,
   telegramConfigSchema,
 } from '@lodex/contracts';
 import { Store } from '@lodex/storage';
@@ -220,6 +221,26 @@ export async function startServer(options: ServerOptions) {
     try {
       loadSignal.throwIfAborted();
       const provider = inference.provider(session);
+      const subagentProvider = session.routing?.subagentsEnabled
+        ? inference.provider({ ...session, config: childConfig })
+        : undefined;
+      const pricing = new Map<string, ModelPricing>();
+      const loadPricing = async (config: ModelConfig, target: InferenceProvider) => {
+        if (config.provider !== 'openrouter') return;
+        const descriptor = (await target.listModels(loadSignal)).find(
+          (model) => model.id === config.model,
+        );
+        if (!descriptor?.pricing)
+          throw new AppError(
+            'MODEL_PRICING_UNAVAILABLE',
+            `OpenRouter 모델 ${config.model}의 가격 정보를 확인할 수 없어 자동 실행을 시작하지 않았습니다.`,
+          );
+        pricing.set(config.provider + '\0' + config.model, descriptor.pricing);
+      };
+      if (autopilot) {
+        await loadPricing(session.config, provider);
+        if (subagentProvider) await loadPricing(childConfig, subagentProvider);
+      }
       const project =
         session.projectId && context.request.tools?.length
           ? await store.project(session.projectId)
@@ -235,10 +256,11 @@ export async function startServer(options: ServerOptions) {
           ? {
               subagents: {
                 config: childConfig,
-                provider: inference.provider({ ...session, config: childConfig }),
+                provider: subagentProvider!,
               },
             }
           : {}),
+        pricing: (config) => pricing.get(config.provider + '\0' + config.model),
         mcp: new RunMcp({
           selections: mcpSelections,
           supervisorPath: mcpSupervisorPath,
@@ -417,11 +439,6 @@ export async function startServer(options: ServerOptions) {
           'PROJECT_CLOUD_CONSENT',
           '서브에이전트에 프로젝트 작업을 맡기려면 해당 역할의 프로젝트 전송 동의가 필요합니다.',
           403,
-        );
-      if (command.type === 'start_autopilot' && usesCloud)
-        throw new AppError(
-          'AUTOPILOT_LOCAL_ONLY',
-          'OpenRouter 역할이 포함된 Autopilot은 비용 예산 기능 준비 후 지원합니다.',
         );
       for (const other of (await store.snapshot()).sessions) {
         if (

@@ -271,6 +271,179 @@ describe('authenticated daemon integration', () => {
     expect(session.autopilot?.plan.goal).toBe('Ship the fixture');
     expect(session.title).toBe('Ship the fixture');
   });
+  it('runs OpenRouter goals within a reserved USD budget and records actual cost', async () => {
+    let calls = 0;
+    const provider: InferenceProvider = {
+      listModels: async () => [
+        {
+          id: 'fixture/cloud',
+          name: 'Fixture Cloud',
+          contextLength: 65536,
+          maxCompletionTokens: 4096,
+          defaultTemperature: null,
+          defaultTopP: null,
+          tools: true,
+          pricing: { prompt: 0, completion: 0.000001, request: 0 },
+        },
+      ],
+      capabilities: async () => ({ tools: true, streaming: true }),
+      async *generate() {
+        calls++;
+        yield { type: 'usage', usage: { inputTokens: 100, outputTokens: 20, costUsd: 0.002 } };
+        yield {
+          type: 'tool_call_delta',
+          index: 0,
+          id: 'cloud-goal-done',
+          name: 'complete_goal',
+          arguments: JSON.stringify({ evidence: 'Cloud result verified.' }),
+        };
+        yield { type: 'finished', reason: 'tool_calls' };
+      },
+    };
+    const app = await setup(provider, {
+      openrouterKey: 'fixture-key',
+      openrouterKeySource: 'environment',
+      envFilePath: join(tmpdir(), 'lodex-fixture.env'),
+    });
+    let session = await app.create({
+      provider: 'openrouter',
+      model: 'fixture/cloud',
+      cloudConsent: true,
+      maxTokens: 4096,
+      contextBudgetTokens: 65536,
+    });
+    const response = await app.command(
+      makeCommand({
+        type: 'start_goal',
+        sessionId: session.id,
+        expectedVersion: session.version,
+        goal: 'Finish with cloud model',
+        limits: autopilotLimitsSchema.parse({ costUsd: 0.01 }),
+      }),
+    );
+    expect(response.status).toBe(200);
+    await vi.waitFor(async () =>
+      expect((await app.store.session(session.id)).run?.status).toBe('completed'),
+    );
+    session = await app.store.session(session.id);
+    expect(calls).toBe(1);
+    expect(session.autopilot).toMatchObject({
+      status: 'completed',
+      spentCostUsd: 0.002,
+      reservedCostUsd: 0,
+      costUnconfirmed: false,
+    });
+  });
+  it('stops before an OpenRouter call that cannot fit in the USD budget', async () => {
+    let calls = 0;
+    const provider: InferenceProvider = {
+      listModels: async () => [
+        {
+          id: 'fixture/expensive',
+          name: 'Expensive Fixture',
+          contextLength: 65536,
+          maxCompletionTokens: 4096,
+          defaultTemperature: null,
+          defaultTopP: null,
+          tools: true,
+          pricing: { prompt: 0, completion: 0.01, request: 0 },
+        },
+      ],
+      capabilities: async () => ({ tools: true, streaming: true }),
+      async *generate() {
+        calls++;
+        yield { type: 'finished', reason: 'stop' };
+      },
+    };
+    const app = await setup(provider, {
+      openrouterKey: 'fixture-key',
+      openrouterKeySource: 'environment',
+      envFilePath: join(tmpdir(), 'lodex-fixture.env'),
+    });
+    let session = await app.create({
+      provider: 'openrouter',
+      model: 'fixture/expensive',
+      cloudConsent: true,
+      maxTokens: 4096,
+      contextBudgetTokens: 65536,
+    });
+    expect(
+      (
+        await app.command(
+          makeCommand({
+            type: 'start_goal',
+            sessionId: session.id,
+            expectedVersion: session.version,
+            goal: 'Do not overspend',
+            limits: autopilotLimitsSchema.parse({ costUsd: 0.01 }),
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    await vi.waitFor(async () =>
+      expect((await app.store.session(session.id)).run?.status).toBe('failed'),
+    );
+    session = await app.store.session(session.id);
+    expect(calls).toBe(0);
+    expect(session.autopilot?.reason).toContain('비용 한도');
+  });
+  it('keeps the reservation and pauses when OpenRouter omits actual cost', async () => {
+    const provider: InferenceProvider = {
+      listModels: async () => [
+        {
+          id: 'fixture/no-cost',
+          name: 'No Cost Fixture',
+          contextLength: 65536,
+          maxCompletionTokens: 4096,
+          defaultTemperature: null,
+          defaultTopP: null,
+          tools: true,
+          pricing: { prompt: 0, completion: 0.000001, request: 0 },
+        },
+      ],
+      capabilities: async () => ({ tools: true, streaming: true }),
+      async *generate() {
+        yield { type: 'text_delta', text: 'missing billing data' };
+        yield { type: 'finished', reason: 'stop' };
+      },
+    };
+    const app = await setup(provider, {
+      openrouterKey: 'fixture-key',
+      openrouterKeySource: 'environment',
+      envFilePath: join(tmpdir(), 'lodex-fixture.env'),
+    });
+    let session = await app.create({
+      provider: 'openrouter',
+      model: 'fixture/no-cost',
+      cloudConsent: true,
+      maxTokens: 4096,
+      contextBudgetTokens: 65536,
+    });
+    expect(
+      (
+        await app.command(
+          makeCommand({
+            type: 'start_goal',
+            sessionId: session.id,
+            expectedVersion: session.version,
+            goal: 'Require cost accounting',
+            limits: autopilotLimitsSchema.parse({ costUsd: 0.01 }),
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    await vi.waitFor(async () =>
+      expect((await app.store.session(session.id)).run?.status).toBe('failed'),
+    );
+    session = await app.store.session(session.id);
+    expect(session.autopilot).toMatchObject({
+      status: 'paused',
+      spentCostUsd: 0,
+      costUnconfirmed: true,
+    });
+    expect(session.autopilot!.reservedCostUsd).toBeGreaterThan(0);
+    expect(session.autopilot?.reason).toContain('실제 호출 비용');
+  });
   it('offers read-only Plan tools, reviews a plan, and adopts it without executing tasks', async () => {
     let round = 0;
     const provider: InferenceProvider = {

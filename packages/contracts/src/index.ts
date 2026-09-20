@@ -136,6 +136,7 @@ export const autopilotLimitsSchema = z.strictObject({
   toolCalls: z.number().int().min(1).max(128).default(36),
   minutes: z.number().int().min(1).max(120).default(15),
   outputTokens: z.number().int().min(1024).max(1048576).default(32768),
+  costUsd: z.number().min(0.01).max(1000).default(1),
 });
 export interface AutopilotState {
   goalDriven?: boolean;
@@ -150,6 +151,9 @@ export interface AutopilotState {
   modelCalls: number;
   toolCalls: number;
   reservedOutputTokens: number;
+  spentCostUsd: number;
+  reservedCostUsd: number;
+  costUnconfirmed: boolean;
   startedAt: string;
   reason?: string;
 }
@@ -554,6 +558,15 @@ export interface ModelDescriptor {
   defaultTemperature: number | null;
   defaultTopP: number | null;
   tools: boolean | null;
+  pricing: ModelPricing | null;
+}
+export interface ModelPricing {
+  /** USD per input token. */
+  prompt: number;
+  /** USD per generated token. */
+  completion: number;
+  /** Fixed USD charge per request. */
+  request: number;
 }
 export interface ModelCapabilities {
   tools: boolean | null;
@@ -623,11 +636,8 @@ export function prepareAutopilot(
       'AUTOPILOT_POLICY',
       'Build 모드와 프로젝트의 Docker 명령 실행 허용이 필요합니다.',
     );
-  if (resolveModelConfig(session).provider !== 'llama-server')
-    throw new AppError(
-      'AUTOPILOT_LOCAL_ONLY',
-      '현재 Autopilot은 로컬 모델에서 사용할 수 있습니다. OpenRouter 자동 실행은 비용 예약 기능 준비 후 지원합니다.',
-    );
+  if (resolveModelConfig(session).provider === 'demo')
+    throw new AppError('AUTOPILOT_MODEL_REQUIRED', '로컬 모델 또는 OpenRouter 모델을 연결하세요.');
   const plan = planSchema.parse(session.plan);
   if (!plan.goal || !plan.criteria || !plan.includeInContext || !plan.tasks.length)
     throw new AppError(
@@ -666,6 +676,9 @@ export function prepareAutopilot(
     modelCalls: 0,
     toolCalls: 0,
     reservedOutputTokens: 0,
+    spentCostUsd: 0,
+    reservedCostUsd: 0,
+    costUnconfirmed: false,
     startedAt: new Date().toISOString(),
   };
 }
@@ -697,6 +710,9 @@ export function prepareGoal(
     modelCalls: 0,
     toolCalls: 0,
     reservedOutputTokens: 0,
+    spentCostUsd: 0,
+    reservedCostUsd: 0,
+    costUnconfirmed: false,
     startedAt: new Date().toISOString(),
   };
 }
@@ -705,7 +721,16 @@ export function resumeGoal(session: Session, runId = ''): AutopilotState {
   if (!previous?.goalDriven || previous.status === 'completed' || previous.status === 'cancelled')
     throw new AppError('GOAL_NOT_PAUSED', '계속 실행할 목표가 없습니다.', 409);
   const { reason: _reason, ...rest } = structuredClone(previous);
-  return { ...rest, runId, status: 'running' };
+  return {
+    ...rest,
+    limits: autopilotLimitsSchema.parse(rest.limits),
+    spentCostUsd: rest.spentCostUsd ?? 0,
+    reservedCostUsd: rest.reservedCostUsd ?? 0,
+    // A manual resume is the user's acknowledgement; the conservative reservation remains charged.
+    costUnconfirmed: false,
+    runId,
+    status: 'running',
+  };
 }
 export function goalPrompt(state: AutopilotState) {
   return [

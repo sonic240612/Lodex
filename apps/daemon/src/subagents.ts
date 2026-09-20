@@ -45,7 +45,12 @@ type Options = {
   provider: InferenceProvider;
   project?: Project;
   signal: AbortSignal;
-  reserveModelCall: () => void | Promise<void>;
+  reserveModelCall: (inputEstimateTokens: number) => number | Promise<number>;
+  settleModelCall?: (
+    reservation: number,
+    usage: Partial<Usage>,
+    completed: boolean,
+  ) => void | Promise<void>;
   reserveToolCall: () => void | Promise<void>;
   onUpdate: (records: SubagentRecord[]) => Promise<void>;
 };
@@ -121,8 +126,8 @@ export async function runSubagents(tasks: { task: string }[], options: Options):
         for (let step = 0; step < 3; step++) {
           signal.throwIfAborted();
           const request = { config, messages, ...(tools.length ? { tools } : {}) };
-          measureRequest(request);
-          await options.reserveModelCall();
+          const manifest = measureRequest(request);
+          const costReservation = await options.reserveModelCall(manifest.inputEstimateTokens);
           signal.throwIfAborted();
           record.modelCalls++;
           await save();
@@ -133,26 +138,35 @@ export async function runSubagents(tasks: { task: string }[], options: Options):
           let text = '',
             reasoning = '',
             finished: string | undefined;
-          for await (const event of options.provider.generate(request, signal)) {
-            signal.throwIfAborted();
-            if (finished && event.type !== 'usage')
-              throw new AppError('SUBAGENT_FORMAT', '종료 이후 이벤트를 받았습니다.');
-            if (event.type === 'text_delta') {
-              text += event.text;
-              if (Buffer.byteLength(text) > 4000)
-                throw new AppError('SUBAGENT_OUTPUT', '서브에이전트 출력 한도를 초과했습니다.');
-            } else if (event.type === 'reasoning_delta') {
-              reasoning += event.text;
-              if (Buffer.byteLength(reasoning) > 32768)
-                throw new AppError('SUBAGENT_REASONING', '서브에이전트 추론 한도를 초과했습니다.');
-            } else if (event.type === 'provider_state_delta') {
-              if (event.provider !== config.provider || event.model !== config.model)
-                throw new AppError('SUBAGENT_REASONING', '모델 추론 상태가 일치하지 않습니다.');
-              mergeDetails(details, event.data);
-            } else if (event.type === 'tool_call_delta') assembler.add(event);
-            else if (event.type === 'usage') Object.assign(round, event.usage);
-            else if (event.type === 'finished') finished = event.reason;
-            else if (event.type === 'error') throw new AppError(event.code, event.message);
+          let streamCompleted = false;
+          try {
+            for await (const event of options.provider.generate(request, signal)) {
+              signal.throwIfAborted();
+              if (finished && event.type !== 'usage')
+                throw new AppError('SUBAGENT_FORMAT', '종료 이후 이벤트를 받았습니다.');
+              if (event.type === 'text_delta') {
+                text += event.text;
+                if (Buffer.byteLength(text) > 4000)
+                  throw new AppError('SUBAGENT_OUTPUT', '서브에이전트 출력 한도를 초과했습니다.');
+              } else if (event.type === 'reasoning_delta') {
+                reasoning += event.text;
+                if (Buffer.byteLength(reasoning) > 32768)
+                  throw new AppError(
+                    'SUBAGENT_REASONING',
+                    '서브에이전트 추론 한도를 초과했습니다.',
+                  );
+              } else if (event.type === 'provider_state_delta') {
+                if (event.provider !== config.provider || event.model !== config.model)
+                  throw new AppError('SUBAGENT_REASONING', '모델 추론 상태가 일치하지 않습니다.');
+                mergeDetails(details, event.data);
+              } else if (event.type === 'tool_call_delta') assembler.add(event);
+              else if (event.type === 'usage') Object.assign(round, event.usage);
+              else if (event.type === 'finished') finished = event.reason;
+              else if (event.type === 'error') throw new AppError(event.code, event.message);
+            }
+            streamCompleted = true;
+          } finally {
+            await options.settleModelCall?.(costReservation, round, streamCompleted);
           }
           record.usage = sumUsage(rounds, config.provider === 'openrouter');
           record.text = text;

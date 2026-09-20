@@ -470,6 +470,7 @@ export async function models(provider: string, baseUrl: string): Promise<ModelDe
         defaultTemperature: null,
         defaultTopP: null,
         tools: false,
+        pricing: null,
       },
     ];
   const result = await invoke<{ models: ModelDescriptor[] }>('daemon_request', {

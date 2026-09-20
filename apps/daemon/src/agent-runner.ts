@@ -1,12 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import {
   AppError,
+  autopilotLimitsSchema,
   type Activity,
   type InferenceMessage,
   type InferenceProvider,
   type Project,
   type Session,
   type ModelConfig,
+  type ModelPricing,
   type Usage,
   readyAutopilotTasks,
   activityProposal,
@@ -56,11 +58,21 @@ export async function runAgent(options: {
   skills?: RegisteredSkill[];
   mcp?: RunMcp;
   subagents?: { config: ModelConfig; provider: InferenceProvider };
+  pricing?: (config: ModelConfig) => ModelPricing | undefined;
 }) {
   const { store, session, provider, context, controller, project } = options;
   const runId = session.run!.id;
-  const autopilot =
+  const persistedAutopilot =
     session.autopilot?.runId === runId ? structuredClone(session.autopilot) : undefined;
+  const autopilot = persistedAutopilot
+    ? {
+        ...persistedAutopilot,
+        limits: autopilotLimitsSchema.parse(persistedAutopilot.limits),
+        spentCostUsd: persistedAutopilot.spentCostUsd ?? 0,
+        reservedCostUsd: persistedAutopilot.reservedCostUsd ?? 0,
+        costUnconfirmed: persistedAutopilot.costUnconfirmed ?? false,
+      }
+    : undefined;
   const maxModels = autopilot?.limits.modelCalls ?? (options.subagents ? 12 : MAX_MODEL_CALLS);
   const maxTools = autopilot?.limits.toolCalls ?? (options.subagents ? 24 : MAX_TOOL_CALLS);
   const signal = AbortSignal.any([
@@ -122,7 +134,7 @@ export async function runAgent(options: {
     });
     lastSave = performance.now();
   };
-  const reserveModelCall = async (config: ModelConfig) => {
+  const reserveModelCall = async (config: ModelConfig, inputEstimateTokens: number) => {
     signal.throwIfAborted();
     if (modelCount >= maxModels)
       throw new AppError('STEP_LIMIT', '부모·서브에이전트의 공유 모델 호출 예산에 도달했습니다.');
@@ -134,10 +146,65 @@ export async function runAgent(options: {
         'OUTPUT_BUDGET',
         '부모·서브에이전트의 공유 출력 토큰 예산에 도달했습니다.',
       );
+    let costReservation = 0;
+    if (autopilot && config.provider === 'openrouter') {
+      if (autopilot.costUnconfirmed)
+        throw new AppError(
+          'COST_UNCONFIRMED',
+          '이전 OpenRouter 호출의 실제 비용을 확인하지 못했습니다. 비용 예약을 유지한 채 자동 실행을 멈췄습니다.',
+        );
+      const pricing = options.pricing?.(config);
+      if (!pricing)
+        throw new AppError(
+          'MODEL_PRICING_UNAVAILABLE',
+          'OpenRouter 모델 가격 정보를 확인할 수 없어 자동 실행을 시작하지 않았습니다.',
+        );
+      // Context estimates count UTF-8 bytes as tokens and add a small template margin.
+      const reservedInput = Math.ceil(inputEstimateTokens * 1.05);
+      costReservation =
+        pricing.request + reservedInput * pricing.prompt + config.maxTokens * pricing.completion;
+      if (
+        autopilot.spentCostUsd + autopilot.reservedCostUsd + costReservation >
+        autopilot.limits.costUsd + 1e-12
+      )
+        throw new AppError(
+          'COST_BUDGET',
+          `다음 OpenRouter 호출의 최대 예상 비용 $${costReservation.toFixed(6)}을 예약하면 비용 한도 $${autopilot.limits.costUsd.toFixed(2)}을 초과합니다.`,
+        );
+    }
     modelCount++;
     if (autopilot) {
       autopilot.modelCalls++;
       autopilot.reservedOutputTokens += config.maxTokens;
+      autopilot.reservedCostUsd += costReservation;
+    }
+    await save();
+    return costReservation;
+  };
+  const settleModelCall = async (
+    config: ModelConfig,
+    reservation: number,
+    roundUsage: Partial<Usage>,
+    completed: boolean,
+  ) => {
+    if (!autopilot || config.provider !== 'openrouter') return;
+    const actual = roundUsage.costUsd;
+    if (!completed || typeof actual !== 'number' || !Number.isFinite(actual) || actual < 0) {
+      autopilot.costUnconfirmed = true;
+      await save();
+      throw new AppError(
+        'COST_UNCONFIRMED',
+        'OpenRouter가 실제 호출 비용을 반환하지 않아 예약 금액을 유지하고 자동 실행을 멈췄습니다.',
+      );
+    }
+    autopilot.reservedCostUsd = Math.max(0, autopilot.reservedCostUsd - reservation);
+    autopilot.spentCostUsd += actual;
+    if (autopilot.spentCostUsd > autopilot.limits.costUsd + 1e-12) {
+      await save();
+      throw new AppError(
+        'COST_BUDGET',
+        `OpenRouter 실제 비용이 설정한 $${autopilot.limits.costUsd.toFixed(2)} 한도에 도달했습니다.`,
+      );
     }
     await save();
   };
@@ -161,7 +228,7 @@ export async function runAgent(options: {
         ...measureRequest(request),
         messageCount: request.messages.length,
       };
-      await reserveModelCall(session.config);
+      const costReservation = await reserveModelCall(session.config, manifest.inputEstimateTokens);
       await store.updateRun({
         sessionId: session.id,
         runId,
@@ -178,55 +245,64 @@ export async function runAgent(options: {
         reasoning = '',
         finished: string | null = null;
       let thinking: Activity | undefined;
-      for await (const event of provider.generate(request, signal)) {
-        signal.throwIfAborted();
-        if (finished && event.type !== 'usage')
-          throw new AppError('AFTER_FINISH', '종료 이후 추가 이벤트를 받았습니다.');
-        if (event.type === 'text_delta') {
-          roundText += event.text;
-          content += event.text;
-        } else if (event.type === 'reasoning_delta' || event.type === 'provider_state_delta') {
-          if (!thinking) {
-            thinking = {
-              id: randomUUID(),
-              kind: 'thinking',
-              label: 'Thinking',
-              status: 'running',
-              text: '',
-            };
-            activities.push(thinking);
-          }
-          if (event.type === 'reasoning_delta') {
-            reasoning += event.text;
-            thinking.text = reasoning;
-          } else {
-            if (event.provider !== session.config.provider || event.model !== session.config.model)
-              throw new AppError(
-                'REASONING_SCOPE',
-                '다른 모델의 reasoning 상태를 사용할 수 없습니다.',
-              );
-            mergeDetails(details, event.data);
-          }
-        } else if (event.type === 'tool_call_delta') {
-          const call = assembler.add(event);
-          let card = cards.get(event.index);
-          if (!card) {
-            card = {
-              id: randomUUID(),
-              kind: 'tool',
-              label: call.name || '도구 요청 수신',
-              status: 'running',
-              text: '',
-            };
-            cards.set(event.index, card);
-            activities.push(card);
-          }
-          card.label = call.name || '도구 요청 수신';
-          card.arguments = call.arguments;
-        } else if (event.type === 'usage') Object.assign(roundUsage, event.usage);
-        else if (event.type === 'error') throw new AppError(event.code, event.message, 502);
-        else if (event.type === 'finished') finished = event.reason;
-        if (performance.now() - lastSave > 180) await save();
+      let streamCompleted = false;
+      try {
+        for await (const event of provider.generate(request, signal)) {
+          signal.throwIfAborted();
+          if (finished && event.type !== 'usage')
+            throw new AppError('AFTER_FINISH', '종료 이후 추가 이벤트를 받았습니다.');
+          if (event.type === 'text_delta') {
+            roundText += event.text;
+            content += event.text;
+          } else if (event.type === 'reasoning_delta' || event.type === 'provider_state_delta') {
+            if (!thinking) {
+              thinking = {
+                id: randomUUID(),
+                kind: 'thinking',
+                label: 'Thinking',
+                status: 'running',
+                text: '',
+              };
+              activities.push(thinking);
+            }
+            if (event.type === 'reasoning_delta') {
+              reasoning += event.text;
+              thinking.text = reasoning;
+            } else {
+              if (
+                event.provider !== session.config.provider ||
+                event.model !== session.config.model
+              )
+                throw new AppError(
+                  'REASONING_SCOPE',
+                  '다른 모델의 reasoning 상태를 사용할 수 없습니다.',
+                );
+              mergeDetails(details, event.data);
+            }
+          } else if (event.type === 'tool_call_delta') {
+            const call = assembler.add(event);
+            let card = cards.get(event.index);
+            if (!card) {
+              card = {
+                id: randomUUID(),
+                kind: 'tool',
+                label: call.name || '도구 요청 수신',
+                status: 'running',
+                text: '',
+              };
+              cards.set(event.index, card);
+              activities.push(card);
+            }
+            card.label = call.name || '도구 요청 수신';
+            card.arguments = call.arguments;
+          } else if (event.type === 'usage') Object.assign(roundUsage, event.usage);
+          else if (event.type === 'error') throw new AppError(event.code, event.message, 502);
+          else if (event.type === 'finished') finished = event.reason;
+          if (performance.now() - lastSave > 180) await save();
+        }
+        streamCompleted = true;
+      } finally {
+        await settleModelCall(session.config, costReservation, roundUsage, streamCompleted);
       }
       if (!finished) throw new AppError('MISSING_FINISH', '정상 종료가 확인되지 않았습니다.');
       if (
@@ -322,7 +398,10 @@ export async function runAgent(options: {
             ...options.subagents,
             ...(project ? { project } : {}),
             signal,
-            reserveModelCall: () => reserveModelCall(options.subagents!.config),
+            reserveModelCall: (inputEstimateTokens) =>
+              reserveModelCall(options.subagents!.config, inputEstimateTokens),
+            settleModelCall: (reservation, roundUsage, completed) =>
+              settleModelCall(options.subagents!.config, reservation, roundUsage, completed),
             reserveToolCall,
             onUpdate: async (records) => {
               card.subagents = records;

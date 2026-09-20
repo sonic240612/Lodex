@@ -204,6 +204,7 @@ describe('provider adapters', () => {
       data_collection: 'deny',
       allow_fallbacks: false,
     });
+    expect(body.usage).toEqual({ include: true });
     expect(body).not.toHaveProperty('stream_options');
     expect(body).not.toHaveProperty('parallel_tool_calls');
     expect(init?.redirect).toBe('error');
@@ -420,6 +421,7 @@ describe('provider adapters', () => {
               supported_parameters: ['tools'],
               default_parameters: { temperature: 0.2, top_p: 0.8 },
               top_provider: { max_completion_tokens: 16384 },
+              pricing: { prompt: '0.000001', completion: '0.000002', request: '0.001' },
             },
           ],
         }),
@@ -439,6 +441,7 @@ describe('provider adapters', () => {
       defaultTemperature: 0.2,
       defaultTopP: 0.8,
       tools: true,
+      pricing: { prompt: 0.000001, completion: 0.000002, request: 0.001 },
     });
   });
 });

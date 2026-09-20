@@ -21,6 +21,10 @@ const object = (value: unknown): Record<string, unknown> =>
     : {};
 const number = (value: unknown): number | null =>
   typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+const price = (value: unknown): number | null => {
+  const parsed = typeof value === 'string' && value.trim() ? Number(value) : number(value);
+  return typeof parsed === 'number' && Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+};
 async function openRouterHttpError(response: Response, toolsRequested: boolean): Promise<string> {
   if (response.status !== 404)
     return '모델 요청 실패 (HTTP ' + response.status + '). OpenRouter 계정·키·사용량을 확인하세요.';
@@ -112,6 +116,10 @@ export class ChatCompletionProvider implements InferenceProvider {
       if (typeof model.id !== 'string') return [];
       const defaults = object(model.default_parameters);
       const topProvider = object(model.top_provider);
+      const rawPricing = object(model.pricing);
+      const prompt = price(rawPricing.prompt),
+        completion = price(rawPricing.completion),
+        request = price(rawPricing.request) ?? 0;
       return [
         {
           id: model.id,
@@ -123,6 +131,10 @@ export class ChatCompletionProvider implements InferenceProvider {
           tools: Array.isArray(model.supported_parameters)
             ? model.supported_parameters.includes('tools')
             : null,
+          pricing:
+            this.kind === 'openrouter' && prompt !== null && completion !== null
+              ? { prompt, completion, request }
+              : null,
         },
       ];
     });
@@ -183,6 +195,7 @@ export class ChatCompletionProvider implements InferenceProvider {
         max_tokens: config.maxTokens,
         ...(this.kind === 'openrouter'
           ? {
+              usage: { include: true },
               provider: {
                 require_parameters: true,
                 data_collection: 'deny',
@@ -334,6 +347,7 @@ export class DemoProvider implements InferenceProvider {
         defaultTemperature: null,
         defaultTopP: null,
         tools: false,
+        pricing: null,
       },
     ];
   }

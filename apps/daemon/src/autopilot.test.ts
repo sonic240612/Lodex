@@ -63,13 +63,18 @@ describe('goal verification and scheduling', () => {
     expect(state.completedTaskIds).toEqual([]);
     expect(readyAutopilotTasks(state).map((t) => t.id)).toEqual([session.plan.tasks[0]!.id]);
     expect(() => prepareAutopilot({ ...session, mode: 'plan' }, [], state.limits)).toThrow();
-    expect(() =>
+    expect(
       prepareAutopilot(
         { ...session, config: { ...session.config, provider: 'openrouter' } },
         [],
         state.limits,
-      ),
-    ).toThrow();
+      ).limits.costUsd,
+    ).toBe(1);
+    expect(state).toMatchObject({
+      spentCostUsd: 0,
+      reservedCostUsd: 0,
+      costUnconfirmed: false,
+    });
     expect(() =>
       prepareAutopilot(
         { ...session, plan: { ...session.plan, verificationCommand: '' } },

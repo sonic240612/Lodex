@@ -11,17 +11,17 @@ export function AutopilotPanel({ session }: { session: Session }) {
     [error, setError] = useState('');
   const state = session.autopilot;
   const running = session.run?.status === 'running';
+  const usesCloud =
+    resolveModelConfig(session).provider === 'openrouter' ||
+    (session.routing?.subagentsEnabled &&
+      (session.routing.subagent ?? session.config).provider === 'openrouter');
   const canStart =
     nativeDesktop &&
     workspace.connected &&
     !running &&
     !busy &&
     session.mode !== 'plan' &&
-    resolveModelConfig(session).provider === 'llama-server' &&
-    !(
-      session.routing?.subagentsEnabled &&
-      (session.routing.subagent ?? session.config).provider === 'openrouter'
-    ) &&
+    resolveModelConfig(session).provider !== 'demo' &&
     session.execution?.backend === 'docker';
   async function start() {
     setBusy(true);
@@ -91,6 +91,15 @@ export function AutopilotPanel({ session }: { session: Session }) {
                 {state.reservedOutputTokens}/{state.limits.outputTokens}
               </dd>
             </div>
+            {(usesCloud || (state.spentCostUsd ?? 0) > 0 || (state.reservedCostUsd ?? 0) > 0) && (
+              <div>
+                <dt>OpenRouter 비용 사용·예약</dt>
+                <dd>
+                  ${((state.spentCostUsd ?? 0) + (state.reservedCostUsd ?? 0)).toFixed(6)}/$
+                  {(state.limits.costUsd ?? 1).toFixed(2)}
+                </dd>
+              </div>
+            )}
           </dl>
           {!!state.evidence.length && (
             <details>
@@ -151,6 +160,20 @@ export function AutopilotPanel({ session }: { session: Session }) {
               />
             </label>
           ))}
+          {usesCloud && (
+            <label className="budget-field">
+              OpenRouter 비용 한도 (USD)
+              <input
+                type="number"
+                min={0.01}
+                max={1000}
+                step={0.01}
+                value={limits.costUsd}
+                disabled={running || busy}
+                onChange={(e) => setLimits({ ...limits, costUsd: Number(e.target.value) })}
+              />
+            </label>
+          )}
         </details>
       )}
       {!state?.goalDriven && (
@@ -165,7 +188,7 @@ export function AutopilotPanel({ session }: { session: Session }) {
         </button>
       )}
       {!state?.goalDriven && !canStart && !running && (
-        <p>로컬 모델·Build·Docker 실행 허용이 필요합니다.</p>
+        <p>모델 연결, Build 모드와 Docker 실행 허용이 필요합니다.</p>
       )}
       {error && (
         <p className="danger-text" role="alert">
