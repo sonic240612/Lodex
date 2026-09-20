@@ -1082,6 +1082,20 @@ describe('authenticated daemon integration', () => {
     expect(state).toContain('"openrouterConfigured":true');
     expect(state).not.toContain('test-private-key');
     expect(JSON.stringify(await app.store.snapshot())).not.toContain('test-private-key');
+    const telegramToken = '123456789:fixture_telegram_token_123456';
+    expect(
+      (
+        await app.request('/v1/telegram/secret', {
+          method: 'PUT',
+          body: JSON.stringify({ key: telegramToken }),
+        })
+      ).status,
+    ).toBe(200);
+    const telegram = await app.request('/v1/telegram').then((response) => response.text());
+    expect(telegram).toContain('"configured":true');
+    expect(telegram).toContain('"tokenSource":"os_keychain"');
+    expect(telegram).not.toContain(telegramToken);
+    expect(JSON.stringify(await app.store.snapshot())).not.toContain(telegramToken);
   });
   it('requires cloud consent before invoking any provider or adding messages', async () => {
     const provider: InferenceProvider = {

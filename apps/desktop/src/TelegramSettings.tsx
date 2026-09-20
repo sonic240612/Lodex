@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { TelegramStatus, TelegramConfig, Session } from '@lodex/contracts';
-import { nativeDesktop, telegramStatus, telegramAction } from './bridge';
+import { nativeDesktop, telegramStatus, telegramAction, saveTelegramToken } from './bridge';
 import { Icon } from './icons';
 
 export function TelegramSettings({
@@ -23,6 +23,8 @@ export function TelegramSettings({
     });
   const [busy, setBusy] = useState(false),
     [error, setError] = useState(''),
+    [token, setToken] = useState(''),
+    [notice, setNotice] = useState(''),
     [pair, setPair] = useState<{ code: string; expiresAt: number }>();
   useEffect(() => {
     dialog.current?.showModal();
@@ -50,6 +52,7 @@ export function TelegramSettings({
   async function action(kind: 'config' | 'pair' | 'approve' | 'unpair') {
     setBusy(true);
     setError('');
+    setNotice('');
     try {
       const result = await telegramAction(
         kind,
@@ -65,6 +68,22 @@ export function TelegramSettings({
         setDraft(result.config);
         if (kind !== 'config') setPair(undefined);
       }
+    } catch (error) {
+      setError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function saveToken(value: string | null) {
+    setBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      const result = await saveTelegramToken(value);
+      setStatus(result);
+      setDraft(result.config);
+      setToken('');
+      setNotice(value ? '봇 토큰을 OS 보안 저장소에 저장했습니다.' : '봇 토큰을 제거했습니다.');
     } catch (error) {
       setError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -87,15 +106,67 @@ export function TelegramSettings({
         </button>
       </div>
       <div className="integration-body">
-        <p>
-          .env의 <code>TELEGRAM_BOT_TOKEN</code>을 설정한 뒤 봇을 연결하세요. 토큰은 화면에 표시되지
-          않습니다.
-        </p>
+        <label className="field">
+          봇 토큰
+          <div className="input-action">
+            <input
+              type="password"
+              autoComplete="off"
+              spellCheck={false}
+              value={token}
+              disabled={
+                busy ||
+                status?.config.enabled ||
+                status?.tokenSource === 'environment' ||
+                status?.tokenSource === 'env_file'
+              }
+              placeholder={status?.configured ? '새 토큰으로 교체' : '123456789:AA…'}
+              onChange={(event) => setToken(event.target.value)}
+            />
+            <button
+              type="button"
+              disabled={
+                !nativeDesktop ||
+                !token.trim() ||
+                busy ||
+                status?.config.enabled ||
+                status?.tokenSource === 'environment' ||
+                status?.tokenSource === 'env_file'
+              }
+              onClick={() => void saveToken(token.trim())}
+            >
+              토큰 저장
+            </button>
+            {status?.configured && (
+              <button
+                type="button"
+                disabled={
+                  busy ||
+                  status.config.enabled ||
+                  status.tokenSource === 'environment' ||
+                  status.tokenSource === 'env_file'
+                }
+                onClick={() => void saveToken(null)}
+              >
+                제거
+              </button>
+            )}
+          </div>
+          <small>
+            {status?.tokenSource === 'env_file'
+              ? '.env에서 불러왔습니다.'
+              : status?.tokenSource === 'environment'
+                ? '환경 변수에서 불러왔습니다.'
+                : '직접 저장한 토큰은 OS 보안 저장소에서 관리합니다.'}
+          </small>
+          {status?.config.enabled && <small>토큰을 변경하려면 먼저 연결을 끄고 저장하세요.</small>}
+        </label>
         <p role="status">
           {status?.configured ? '토큰 설정됨' : '토큰 미설정'} ·{' '}
           {status?.running ? '수신 중' : '연결 꺼짐'}
           {status?.bot ? ' · @' + status.bot.username : ''}
         </p>
+        {notice && <p role="status">{notice}</p>}
         <form
           onSubmit={(event) => {
             event.preventDefault();

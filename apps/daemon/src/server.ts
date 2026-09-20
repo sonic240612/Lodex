@@ -59,7 +59,7 @@ import {
   type McpConfig,
 } from '@lodex/mcp';
 import { RunMcp, selectedMcpTools } from './mcp';
-import { loadMcpSecret, loadTelegramToken } from './secrets';
+import { loadMcpSecret, loadTelegramSecret, telegramToken } from './secrets';
 import { Telegram } from './telegram';
 import { Worktrees } from './worktrees';
 import { McpContentPreviews } from './mcp-content';
@@ -521,14 +521,20 @@ export async function startServer(options: ServerOptions) {
   const worktrees = options.worktreeRoot
     ? await Worktrees.open(store, options.worktreeRoot)
     : undefined;
+  let telegramKeychainToken = options.telegramToken ?? null,
+    telegramTokenSource: SecretSource = 'none';
+  const resolveTelegramToken = async () => {
+    const secret = await loadTelegramSecret({
+      ...(options.envFilePath ? { envFilePath: options.envFilePath } : {}),
+      keychainToken: telegramKeychainToken,
+    });
+    telegramTokenSource = secret.source;
+    return secret.token;
+  };
   const telegram = await Telegram.open({
     store,
-    loadToken: () =>
-      options.telegramToken
-        ? Promise.resolve(options.telegramToken)
-        : loadTelegramToken({
-            ...(options.envFilePath ? { envFilePath: options.envFilePath } : {}),
-          }),
+    loadToken: resolveTelegramToken,
+    tokenSource: () => telegramTokenSource,
     dispatch: (value) => serial(() => command(value)),
     ...(options.telegramFetch ? { fetch: options.telegramFetch } : {}),
   });
@@ -555,6 +561,27 @@ export async function startServer(options: ServerOptions) {
         });
       } else if (request.method === 'GET' && url.pathname === '/v1/telegram') {
         json(response, 200, telegram.status());
+      } else if (request.method === 'PUT' && url.pathname === '/v1/telegram/secret') {
+        if (telegramTokenSource === 'environment' || telegramTokenSource === 'env_file')
+          throw new AppError(
+            'ENV_MANAGED_KEY',
+            '.env 또는 환경 변수에서 토큰을 관리 중입니다. 해당 값을 수정하고 앱을 다시 시작하세요.',
+            409,
+          );
+        if (telegram.status().config.enabled)
+          throw new AppError(
+            'TELEGRAM_ACTIVE',
+            'Telegram 연결을 끄고 설정을 저장한 뒤 토큰을 변경하세요.',
+            409,
+          );
+        const value = (await readJson(request)) as { key?: unknown };
+        if (!(value.key === null || typeof value.key === 'string'))
+          throw new AppError('TELEGRAM_TOKEN', 'Telegram 봇 토큰 형식을 확인하세요.');
+        const token = telegramToken(value.key);
+        const status = await telegram.setToken(token);
+        telegramKeychainToken = token;
+        telegramTokenSource = token ? 'os_keychain' : 'none';
+        json(response, 200, { ...status, tokenSource: telegramTokenSource });
       } else if (request.method === 'POST' && url.pathname === '/v1/telegram/config') {
         const value = telegramConfigSchema.safeParse(await readJson(request));
         if (!value.success)

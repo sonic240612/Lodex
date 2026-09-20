@@ -46,6 +46,10 @@ export async function telegramAction(
   if (!nativeDesktop) throw new Error('Telegram 연결은 데스크톱 앱에서 설정하세요.');
   return invoke('daemon_request', { method: 'POST', path: '/v1/telegram/' + action, body });
 }
+export async function saveTelegramToken(key: string | null): Promise<TelegramStatus> {
+  if (!nativeDesktop) throw new Error('Telegram 토큰은 데스크톱 앱에서 저장할 수 있습니다.');
+  return invoke('set_telegram_token', { key });
+}
 export async function worktreeList(): Promise<{ records: WorktreeRecord[] }> {
   if (!nativeDesktop) return { records: [] };
   return invoke('daemon_request', { method: 'GET', path: '/v1/worktrees', body: null });

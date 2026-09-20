@@ -1,4 +1,5 @@
 import { z } from 'zod';
+export type SecretSource = 'environment' | 'env_file' | 'os_keychain' | 'none';
 export const telegramConfigSchema = z
   .strictObject({
     enabled: z.boolean(),
@@ -18,6 +19,7 @@ export interface TelegramPeer {
 }
 export interface TelegramStatus {
   configured: boolean;
+  tokenSource?: SecretSource;
   config: TelegramConfig;
   bot?: { id: number; username: string };
   owner?: TelegramPeer;

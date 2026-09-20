@@ -8,6 +8,10 @@ export interface SecretConfig {
   openrouterKeySource: SecretSource;
   envFilePath: string;
 }
+export interface TelegramSecretConfig {
+  token: string | null;
+  source: SecretSource;
+}
 function key(value: string | null | undefined): string | null {
   if (!value?.trim()) return null;
   const trimmed = value.trim();
@@ -69,19 +73,38 @@ export async function loadMcpSecret(
     ? (await readEnvFile({ envFilePath: options.envFilePath }))[name]
     : undefined;
 }
+export function telegramToken(value: string | null | undefined): string | null {
+  if (!value?.trim()) return null;
+  const token = value.trim();
+  if (!/^\d{5,20}:[A-Za-z0-9_-]{20,150}$/.test(token))
+    throw new AppError('TELEGRAM_TOKEN', 'TELEGRAM_BOT_TOKEN 형식을 확인하세요.');
+  return token;
+}
+export async function loadTelegramSecret(options: {
+  envFilePath?: string;
+  environment?: NodeJS.ProcessEnv;
+  keychainToken?: string | null;
+}): Promise<TelegramSecretConfig> {
+  const fileToken = options.envFilePath
+    ? (await readEnvFile({ envFilePath: options.envFilePath })).TELEGRAM_BOT_TOKEN
+    : undefined;
+  const candidates: [SecretSource, string | null | undefined][] = [
+    ['environment', (options.environment ?? process.env).TELEGRAM_BOT_TOKEN],
+    ['env_file', fileToken],
+    ['os_keychain', options.keychainToken],
+  ];
+  for (const [source, value] of candidates) {
+    const token = telegramToken(value);
+    if (token) return { token, source };
+  }
+  return { token: null, source: 'none' };
+}
 export async function loadTelegramToken(options: {
   envFilePath?: string;
   environment?: NodeJS.ProcessEnv;
+  keychainToken?: string | null;
 }): Promise<string | null> {
-  const value =
-    (options.environment ?? process.env).TELEGRAM_BOT_TOKEN ||
-    (options.envFilePath
-      ? (await readEnvFile({ envFilePath: options.envFilePath })).TELEGRAM_BOT_TOKEN
-      : undefined);
-  if (!value?.trim()) return null;
-  if (!/^\d{5,20}:[A-Za-z0-9_-]{20,150}$/.test(value.trim()))
-    throw new AppError('TELEGRAM_TOKEN', 'TELEGRAM_BOT_TOKEN 형식을 확인하세요.');
-  return value.trim();
+  return (await loadTelegramSecret(options)).token;
 }
 export async function loadSecrets(options: {
   envFilePath: string;

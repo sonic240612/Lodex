@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { SecretSource } from './integrations';
 import {
   agentRoutingConfigSchema,
   modelConfigSchema,
@@ -530,7 +531,6 @@ export type DomainEvent =
       projects: Project[];
       createdAt: string;
     };
-export type SecretSource = 'environment' | 'env_file' | 'os_keychain' | 'none';
 export interface Snapshot {
   protocolVersion: 1;
   deletedSessionIds?: string[];

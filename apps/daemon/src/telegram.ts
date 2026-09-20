@@ -11,6 +11,7 @@ import {
   type TelegramConfig,
   type TelegramPeer,
   type TelegramStatus,
+  type SecretSource,
 } from '@lodex/contracts';
 import type { Store } from '@lodex/storage';
 
@@ -66,6 +67,7 @@ interface Journal {
 type Options = {
   store: Store;
   loadToken: () => Promise<string | null>;
+  tokenSource?: () => SecretSource;
   dispatch: (command: Command) => Promise<CommandResult>;
   fetch?: typeof fetch;
 };
@@ -125,6 +127,7 @@ export class Telegram {
   status(): TelegramStatus {
     return {
       configured: !!this.token,
+      tokenSource: this.options.tokenSource?.() ?? (this.token ? 'os_keychain' : 'none'),
       config: structuredClone(this.state.config),
       ...(this.state.bot ? { bot: this.state.bot } : {}),
       ...(this.state.owner ? { owner: this.state.owner } : {}),
@@ -179,7 +182,7 @@ export class Telegram {
         await this.options.store.session(config.sessionId!);
         this.token = await this.options.loadToken();
         if (!this.token)
-          throw new AppError('TELEGRAM_TOKEN', '먼저 .env에 TELEGRAM_BOT_TOKEN을 설정하세요.');
+          throw new AppError('TELEGRAM_TOKEN', '먼저 Telegram 봇 토큰을 저장하세요.');
         const bot = await this.identity(AbortSignal.timeout(15000));
         if (this.state.bot && this.state.bot.id !== bot.id && this.state.owner)
           throw new AppError(
@@ -204,6 +207,32 @@ export class Telegram {
       this.error = undefined;
       if (config.enabled) this.start();
       return this.status();
+    });
+  }
+  async setToken(token: string | null) {
+    return this.operate(async () => {
+      const previous = this.token;
+      this.token = token;
+      try {
+        if (!token) {
+          this.state.config.enabled = false;
+          this.state.epoch++;
+          delete this.state.pairing;
+          delete this.state.candidate;
+          await this.save();
+        } else if (this.state.config.enabled) {
+          const bot = await this.identity(AbortSignal.timeout(15000));
+          if (this.state.bot && this.state.bot.id !== bot.id && this.state.owner)
+            throw new AppError('TELEGRAM_BOT', '봇이 변경되었습니다. 먼저 계정 연결을 해제하세요.');
+          this.state.bot = bot;
+          this.start();
+        }
+        this.error = undefined;
+        return this.status();
+      } catch (error) {
+        this.token = previous;
+        throw error;
+      }
     });
   }
   async pair() {

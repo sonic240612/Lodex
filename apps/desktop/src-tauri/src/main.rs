@@ -65,9 +65,24 @@ impl Bridge {
     }
 }
 
-fn key_entry() -> Result<keyring::Entry, String> {
+fn openrouter_key_entry() -> Result<keyring::Entry, String> {
     keyring::Entry::new("app.lodex.desktop", "openrouter")
         .map_err(|_| "OS 키 저장소를 열 수 없습니다.".into())
+}
+fn telegram_key_entry() -> Result<keyring::Entry, String> {
+    keyring::Entry::new("app.lodex.desktop", "telegram")
+        .map_err(|_| "OS 키 저장소를 열 수 없습니다.".into())
+}
+fn telegram_token_valid(token: &str) -> bool {
+    let Some((owner, secret)) = token.split_once(':') else {
+        return false;
+    };
+    (5..=20).contains(&owner.len())
+        && owner.bytes().all(|value| value.is_ascii_digit())
+        && (20..=150).contains(&secret.len())
+        && secret
+            .bytes()
+            .all(|value| value.is_ascii_alphanumeric() || value == b'_' || value == b'-')
 }
 fn start_daemon(app: &tauri::App) -> Result<Daemon, Box<dyn std::error::Error>> {
     let resource = app.path().resource_dir()?;
@@ -98,7 +113,12 @@ fn start_daemon(app: &tauri::App) -> Result<Daemon, Box<dyn std::error::Error>> 
         uuid::Uuid::new_v4().simple(),
         uuid::Uuid::new_v4().simple()
     );
-    let key = key_entry().ok().and_then(|entry| entry.get_password().ok());
+    let key = openrouter_key_entry()
+        .ok()
+        .and_then(|entry| entry.get_password().ok());
+    let telegram_token = telegram_key_entry()
+        .ok()
+        .and_then(|entry| entry.get_password().ok());
     let mut command = Command::new(node);
     command
         .arg(script)
@@ -117,7 +137,7 @@ fn start_daemon(app: &tauri::App) -> Result<Daemon, Box<dyn std::error::Error>> 
         command.creation_flags(0x08000000);
     }
     let mut child = command.spawn()?;
-    let bootstrap = json!({ "token": token, "dataDir": data_dir, "openrouterKey": key, "parentPid": std::process::id(), "envFile": env_file });
+    let bootstrap = json!({ "token": token, "dataDir": data_dir, "openrouterKey": key, "telegramToken": telegram_token, "parentPid": std::process::id(), "envFile": env_file });
     writeln!(
         child.stdin.as_mut().ok_or("Missing daemon pipe")?,
         "{}",
@@ -343,7 +363,7 @@ async fn set_openrouter_key(
     }
     {
         let _guard = state.secrets.lock().map_err(|_| "키 저장 잠금 실패")?;
-        let entry = key_entry()?;
+        let entry = openrouter_key_entry()?;
         match &key {
             Some(value) => entry.set_password(value).map_err(|_| {
                 "OS 키 저장소에 저장하지 못했습니다. Linux에서는 Secret Service가 필요합니다."
@@ -367,6 +387,78 @@ async fn set_openrouter_key(
         return Err("키는 OS에 반영됐지만 데몬 갱신이 실패했습니다. 앱을 다시 시작하세요.".into());
     }
     Ok(json!({ "configured": key.is_some() }))
+}
+#[tauri::command]
+async fn set_telegram_token(
+    state: State<'_, Bridge>,
+    key: Option<String>,
+) -> Result<Value, String> {
+    if key
+        .as_ref()
+        .is_some_and(|value| !telegram_token_valid(value))
+    {
+        return Err("Telegram 봇 토큰 형식이 올바르지 않습니다.".into());
+    }
+    let (port, token) = state.connection()?;
+    let status: Value = state
+        .client
+        .get(format!("http://127.0.0.1:{}/v1/telegram", port))
+        .bearer_auth(&token)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|_| "Telegram 설정 상태를 확인하지 못했습니다.")?
+        .error_for_status()
+        .map_err(|_| "Telegram 설정 상태를 확인하지 못했습니다.")?
+        .json()
+        .await
+        .map_err(|_| "Telegram 설정 상태를 확인하지 못했습니다.")?;
+    if matches!(
+        status["tokenSource"].as_str(),
+        Some("environment" | "env_file")
+    ) {
+        return Err(
+            ".env 또는 환경 변수에서 토큰을 관리 중입니다. 해당 값을 수정하고 앱을 다시 시작하세요."
+                .into(),
+        );
+    }
+    if status["config"]["enabled"].as_bool() == Some(true) {
+        return Err("Telegram 연결을 끄고 설정을 저장한 뒤 토큰을 변경하세요.".into());
+    }
+    {
+        let _guard = state.secrets.lock().map_err(|_| "토큰 저장 잠금 실패")?;
+        let entry = telegram_key_entry()?;
+        match &key {
+            Some(value) => entry.set_password(value).map_err(|_| {
+                "OS 키 저장소에 저장하지 못했습니다. Linux에서는 Secret Service가 필요합니다."
+            })?,
+            None => match entry.delete_credential() {
+                Ok(_) | Err(keyring::Error::NoEntry) => (),
+                Err(_) => return Err("OS 키 저장소에서 토큰을 제거하지 못했습니다.".into()),
+            },
+        }
+    }
+    let response = state
+        .client
+        .put(format!("http://127.0.0.1:{}/v1/telegram/secret", port))
+        .bearer_auth(token)
+        .json(&json!({ "key": key }))
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|_| "토큰은 OS에 반영됐지만 Telegram 연결 갱신에 실패했습니다.")?;
+    let status = response.status();
+    let value: Value = response
+        .json()
+        .await
+        .map_err(|_| "잘못된 데몬 응답입니다.")?;
+    if !status.is_success() {
+        return Err(value["error"]["message"]
+            .as_str()
+            .unwrap_or("Telegram 토큰을 반영하지 못했습니다.")
+            .into());
+    }
+    Ok(value)
 }
 #[tauri::command]
 async fn connect_events(
@@ -453,6 +545,7 @@ fn main() {
             pick_runtime_file,
             open_external,
             set_openrouter_key,
+            set_telegram_token,
             connect_events,
             disconnect_events
         ])
@@ -468,7 +561,7 @@ fn main() {
 }
 #[cfg(test)]
 mod tests {
-    use super::{external_url_allowed, route_allowed};
+    use super::{external_url_allowed, route_allowed, telegram_token_valid};
     #[test]
     fn markdown_can_only_open_web_and_mail_links() {
         assert!(external_url_allowed("https://example.com/docs#section"));
@@ -490,5 +583,13 @@ mod tests {
         assert!(!route_allowed("PUT", "/v1/secret"));
         assert!(!route_allowed("GET", "https://example.com"));
         assert!(!route_allowed("POST", "/v1/models?provider=openrouter"));
+    }
+    #[test]
+    fn telegram_token_validation_does_not_accept_free_form_secrets() {
+        assert!(telegram_token_valid(
+            "123456789:fixture_token_with_enough_chars"
+        ));
+        assert!(!telegram_token_valid("short"));
+        assert!(!telegram_token_valid("12345:contains whitespace value"));
     }
 }

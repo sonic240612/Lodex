@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { loadSecrets, loadMcpSecret, loadTelegramToken } from './secrets';
+import { loadSecrets, loadMcpSecret, loadTelegramSecret, loadTelegramToken } from './secrets';
 const dirs: string[] = [];
 async function setup(content?: string) {
   const dir = await mkdtemp(join(tmpdir(), 'lodex-env-한글 '));
@@ -28,6 +28,21 @@ describe('private daemon dotenv loading', () => {
     expect(
       await loadTelegramToken({ envFilePath, environment: { TELEGRAM_BOT_TOKEN: envToken } }),
     ).toBe(envToken);
+    expect(
+      await loadTelegramSecret({
+        envFilePath,
+        environment: {},
+        keychainToken: '11111111:keychain_fixture_token_12345',
+      }),
+    ).toEqual({ token: fileToken, source: 'env_file' });
+    await writeFile(envFilePath, 'TELEGRAM_BOT_TOKEN=');
+    expect(
+      await loadTelegramSecret({
+        envFilePath,
+        environment: {},
+        keychainToken: '11111111:keychain_fixture_token_12345',
+      }),
+    ).toEqual({ token: '11111111:keychain_fixture_token_12345', source: 'os_keychain' });
     await expect(
       loadTelegramToken({
         envFilePath,

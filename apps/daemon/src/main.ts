@@ -22,6 +22,7 @@ async function main() {
     token: string;
     dataDir: string;
     openrouterKey?: string | null;
+    telegramToken?: string | null;
     parentPid?: number;
     envFile?: string;
   };
@@ -69,6 +70,7 @@ async function main() {
     store,
     supervisorPath: join(__dirname, 'supervisor.cjs'),
     worktreeRoot: join(config.dataDir, 'worktrees'),
+    ...(config.telegramToken ? { telegramToken: config.telegramToken } : {}),
     ...secrets,
   });
   process.stdout.write(JSON.stringify({ protocolVersion: 1, port: app.port }) + '\n');
