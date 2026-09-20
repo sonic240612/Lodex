@@ -102,6 +102,7 @@ fn start_daemon(app: &tauri::App) -> Result<Daemon, Box<dyn std::error::Error>> 
     // Development loads only this workspace's .env, never the selected project's.
     // Installed builds use application data, with LODEX_ENV_FILE as an explicit override.
     let development_env = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../.env");
+    let development_env = dunce::canonicalize(&development_env).unwrap_or(development_env);
     let env_file = if cfg!(debug_assertions) && development_env.is_file() {
         development_env
     } else {
