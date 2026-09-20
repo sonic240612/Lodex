@@ -31,6 +31,7 @@ import { Markdown } from './Markdown';
 import { ConversationHistory } from './ConversationHistory';
 import { ExecutionPanel } from './ExecutionPanel';
 import { AutopilotPanel } from './AutopilotPanel';
+import { appendPlanTask, normalizePlanDraft, removePlanTask } from './plan-draft';
 import type { SkillSelectionSave } from './SkillManager';
 import type { McpSelectionSave } from './McpManager';
 import type { McpContentPreview } from '@lodex/contracts';
@@ -1108,6 +1109,7 @@ function PlanEditor({
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [taskTitle, setTaskTitle] = useState('');
+  const addingTask = useRef(false);
   const connected = useWorkspace((state) => state.connected);
   const storedPlan = JSON.stringify(session?.plan ?? defaultPlan());
   const editBase = useRef(storedPlan);
@@ -1118,8 +1120,8 @@ function PlanEditor({
     }
   }, [storedPlan, dirty]);
   const completed = draft.tasks.filter((task) => task.done).length;
-  const update = (value: Plan) => {
-    setDraft(value);
+  const update = (value: Plan | ((current: Plan) => Plan)) => {
+    setDraft((current) => (typeof value === 'function' ? value(current) : value));
     setDirty(true);
   };
   async function save() {
@@ -1129,12 +1131,14 @@ function PlanEditor({
         throw new Error(
           '편집 중 저장된 계획이 변경되었습니다. 저장된 계획을 불러온 뒤 다시 편집하세요.',
         );
+      const cleaned = normalizePlanDraft(draft);
+      if (JSON.stringify(cleaned) !== JSON.stringify(draft)) setDraft(cleaned);
       const target = session ?? (await ensureSession());
       const result = await sendCommand({
         type: 'save_plan',
         sessionId: target.id,
         expectedVersion: target.version,
-        plan: draft,
+        plan: cleaned,
       });
       useWorkspace.getState().upsert(result.session);
       setDirty(false);
@@ -1146,13 +1150,15 @@ function PlanEditor({
   }
   function addTask(event: FormEvent) {
     event.preventDefault();
-    if (!taskTitle.trim()) return;
-    update({
-      ...draft,
-      tasks: [...draft.tasks, { id: crypto.randomUUID(), title: taskTitle.trim(), done: false }],
-    });
+    const title = taskTitle.trim();
+    if (!title || addingTask.current) return;
+    addingTask.current = true;
+    update((current) => appendPlanTask(current, title, crypto.randomUUID()));
     setTaskTitle('');
   }
+  useEffect(() => {
+    if (!taskTitle) addingTask.current = false;
+  }, [taskTitle]);
   return (
     <div className="plan-editor">
       <label className="section-label" htmlFor="goal">
@@ -1247,12 +1253,12 @@ function PlanEditor({
                   aria-label={task.title + ' 완료'}
                   checked={task.done}
                   onChange={(event) =>
-                    update({
-                      ...draft,
-                      tasks: draft.tasks.map((item) =>
+                    update((current) => ({
+                      ...current,
+                      tasks: current.tasks.map((item) =>
                         item.id === task.id ? { ...item, done: event.target.checked } : item,
                       ),
-                    })
+                    }))
                   }
                 />
                 <input
@@ -1261,28 +1267,34 @@ function PlanEditor({
                   value={task.title}
                   maxLength={500}
                   onChange={(event) =>
-                    update({
-                      ...draft,
-                      tasks: draft.tasks.map((item) =>
+                    update((current) => ({
+                      ...current,
+                      tasks: current.tasks.map((item) =>
                         item.id === task.id ? { ...item, title: event.target.value } : item,
                       ),
-                    })
+                    }))
                   }
+                  onBlur={() => {
+                    const title = task.title.trim();
+                    if (title && title === task.title) return;
+                    update((current) =>
+                      title
+                        ? {
+                            ...current,
+                            tasks: current.tasks.map((item) =>
+                              item.id === task.id ? { ...item, title } : item,
+                            ),
+                          }
+                        : removePlanTask(current, task.id),
+                    );
+                  }}
+                  placeholder="할 일 제목"
                 />
                 <button
+                  type="button"
                   className="icon-button"
                   aria-label={task.title + ' 삭제'}
-                  onClick={() =>
-                    update({
-                      ...draft,
-                      tasks: draft.tasks
-                        .filter((item) => item.id !== task.id)
-                        .map((item) => ({
-                          ...item,
-                          dependsOn: item.dependsOn?.filter((id) => id !== task.id),
-                        })),
-                    })
-                  }
+                  onClick={() => update((current) => removePlanTask(current, task.id))}
                 >
                   <Icon name="close" size={13} />
                 </button>
@@ -1299,14 +1311,14 @@ function PlanEditor({
                     placeholder="예: npm test -- --run regression"
                     value={task.verificationCommand ?? ''}
                     onChange={(event) =>
-                      update({
-                        ...draft,
-                        tasks: draft.tasks.map((item) =>
+                      update((current) => ({
+                        ...current,
+                        tasks: current.tasks.map((item) =>
                           item.id === task.id
                             ? { ...item, verificationCommand: event.target.value }
                             : item,
                         ),
-                      })
+                      }))
                     }
                   />
                 </label>
@@ -1317,12 +1329,12 @@ function PlanEditor({
                   maxLength={2000}
                   value={task.criteria ?? ''}
                   onChange={(event) =>
-                    update({
-                      ...draft,
-                      tasks: draft.tasks.map((item) =>
+                    update((current) => ({
+                      ...current,
+                      tasks: current.tasks.map((item) =>
                         item.id === task.id ? { ...item, criteria: event.target.value } : item,
                       ),
-                    })
+                    }))
                   }
                 />
                 {draft.tasks
@@ -1333,9 +1345,9 @@ function PlanEditor({
                         type="checkbox"
                         checked={task.dependsOn?.includes(item.id) ?? false}
                         onChange={(event) =>
-                          update({
-                            ...draft,
-                            tasks: draft.tasks.map((t) =>
+                          update((current) => ({
+                            ...current,
+                            tasks: current.tasks.map((t) =>
                               t.id === task.id
                                 ? {
                                     ...t,
@@ -1345,7 +1357,7 @@ function PlanEditor({
                                   }
                                 : t,
                             ),
-                          })
+                          }))
                         }
                       />
                       {item.title}
@@ -1354,15 +1366,28 @@ function PlanEditor({
                 <div className="edit-actions">
                   {[-1, 1].map((direction) => (
                     <button
+                      type="button"
                       key={direction}
                       disabled={index + direction < 0 || index + direction >= draft.tasks.length}
                       onClick={() => {
-                        const tasks = [...draft.tasks];
-                        [tasks[index], tasks[index + direction]] = [
-                          tasks[index + direction]!,
-                          tasks[index]!,
-                        ];
-                        update({ ...draft, tasks });
+                        update((current) => {
+                          const currentIndex = current.tasks.findIndex(
+                            (item) => item.id === task.id,
+                          );
+                          const destination = currentIndex + direction;
+                          if (
+                            currentIndex < 0 ||
+                            destination < 0 ||
+                            destination >= current.tasks.length
+                          )
+                            return current;
+                          const tasks = [...current.tasks];
+                          [tasks[currentIndex], tasks[destination]] = [
+                            tasks[destination]!,
+                            tasks[currentIndex]!,
+                          ];
+                          return { ...current, tasks };
+                        });
                       }}
                     >
                       {direction === -1 ? '위로' : '아래로'}
