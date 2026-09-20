@@ -494,12 +494,8 @@ export function App() {
       Date.parse(session.contextCompaction.createdAt) > Date.parse(session.run.startedAt));
   const contextBase = compactionIsNewer
     ? session!.contextCompaction!.compactedEstimateTokens
-    : (latestUsage?.inputTokens ?? session?.run?.context?.inputEstimateTokens ?? 0);
-  const generatedEstimate =
-    !compactionIsNewer && latestAssistant && latestAssistant.id === session?.run?.messageId
-      ? (latestUsage?.outputTokens ?? new TextEncoder().encode(latestAssistant.content).length)
-      : 0;
-  const contextUsed = Math.max(0, contextBase + generatedEstimate);
+    : (session?.run?.context?.inputEstimateTokens ?? 0);
+  const contextUsed = Math.max(0, contextBase);
   const contextPercent = Math.min(
     100,
     Math.max(0, Math.round((contextUsed / Math.max(1, config.contextBudgetTokens)) * 100)),
@@ -1013,7 +1009,7 @@ export function App() {
                 <strong>컨텍스트 사용량</strong>
                 <dl>
                   <div>
-                    <dt>현재 / 예산</dt>
+                    <dt>활성 입력 추정 / 예산</dt>
                     <dd>
                       {contextUsed.toLocaleString()} / {config.contextBudgetTokens.toLocaleString()}
                     </dd>
