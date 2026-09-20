@@ -153,7 +153,25 @@ describe('reviewed file change sets', () => {
     await writeChanges(project, changes, 'apply', signal);
     expect((await checkChanges(project, changes, signal)).status).toBe('applied');
   });
-  it.each(['../escape.ts', '.env', 'src/NUL.txt', 'src/space. ', 'missing/file.ts'])(
+  it('creates and can undo a reviewed project dotenv without exposing it to read tools', async () => {
+    const { path, project } = await setup();
+    const dotenv = { kind: 'create' as const, path: '.env', content: 'APP_MODE=local\n' };
+    const changes = await proposeChanges(project, { files: [dotenv] }, signal);
+    await writeChanges(project, changes, 'apply', signal);
+    expect(await readFile(join(path, '.env'), 'utf8')).toBe(dotenv.content);
+    expect((await checkChanges(project, changes, signal)).status).toBe('applied');
+    expect(
+      JSON.parse(
+        await runProjectTool(project, 'read_file', JSON.stringify({ path: '.env' }), signal),
+      ).error,
+    ).toBe('PATH_DENIED');
+    await expect(
+      proposeChanges(project, { files: [{ ...dotenv, content: 'APP_MODE=cloud\n' }] }, signal),
+    ).rejects.toMatchObject({ code: 'CREATE_EXISTS' });
+    await writeChanges(project, { ...changes, operation: 'undo' }, 'undo', signal);
+    await expect(lstat(join(path, '.env'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+  it.each(['../escape.ts', 'src/.env', 'src/NUL.txt', 'src/space. ', 'missing/file.ts'])(
     'rejects unsupported creation path %s',
     async (path) => {
       const { project } = await setup();

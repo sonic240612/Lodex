@@ -34,6 +34,7 @@ const blocked = (name: string) =>
   ignored.has(name.toLowerCase()) ||
   ['secrets.json', 'credentials.json'].includes(name.toLowerCase()) ||
   /^\.env(?:\.|$)|^\.lodex-edit-|\.(?:pem|key|p12|pfx)$/i.test(name);
+const dotenvName = (name: string) => /^\.env(?:\.|$)/i.test(name);
 const pathSchema = z.string().min(1).max(4096).default('.');
 const schemas = {
   propose_changes: changeInputSchema,
@@ -57,7 +58,7 @@ const schemas = {
 };
 const descriptions: Record<keyof typeof schemas, string> = {
   propose_changes:
-    'Propose a reviewed set of 1-8 UTF-8 file changes. kind edit requires read_file sha256, one exact oldText and newText. kind create requires a nonexistent path inside an EXISTING directory and content. Paths must be distinct. Total tool arguments stay under 16 KiB. NEVER writes; user reviews and applies the entire set in the UI. No directories, deletion or commands.',
+    'Propose a reviewed set of 1-8 UTF-8 file changes. kind edit requires read_file sha256, one exact oldText and newText. kind create requires a nonexistent path inside an EXISTING directory and content. A missing project-root .env or .env.* file may be created this way, but existing dotenv files cannot be read or edited. Paths must be distinct. Total tool arguments stay under 16 KiB. NEVER writes; user reviews and applies the entire set in the UI. No directories, deletion or commands.',
   propose_edit:
     'Propose one exact text replacement in an existing UTF-8 project file. First read_file for its sha256 as expectedHash; oldText must match exactly once, without line numbers. Preserves CRLF. Produces a diff for user review; NEVER writes a file. The user applies it in the UI after the response ends. No creation, deletion or commands.',
   list_files:
@@ -99,17 +100,17 @@ export async function inspectProject(path: unknown): Promise<Project> {
 }
 
 /** Filesystem containment checks, not a hostile-process OS sandbox. */
-export async function resolveTarget(project: Project, path: string) {
+export async function resolveTarget(project: Project, path: string, allowProjectDotenv = false) {
   if (isAbsolute(path) || path.includes(':') || /[\x00-\x1f\x7f]/.test(path))
     throw new AppError('PATH_DENIED', '프로젝트 내부 상대 경로만 사용할 수 있습니다.');
   const parts = path.split(/[\\/]/).filter((p) => p && p !== '.');
   if (
     parts.some(
-      (p) =>
+      (p, index) =>
         p === '..' ||
         /[. ]$/.test(p) ||
         /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(p) ||
-        blocked(p),
+        (blocked(p) && !(allowProjectDotenv && parts.length === 1 && index === 0 && dotenvName(p))),
     )
   )
     throw new AppError('PATH_DENIED', '상위 폴더·제외 폴더·비밀 파일에는 접근할 수 없습니다.');
@@ -125,7 +126,14 @@ export async function resolveTarget(project: Project, path: string) {
   }
   const canonical = await realpath(current);
   const rel = relative(root, canonical);
-  if (rel.split(/[\\/]/).some(blocked))
+  const relativeParts = rel.split(/[\\/]/);
+  if (
+    relativeParts.some(
+      (part, index) =>
+        blocked(part) &&
+        !(allowProjectDotenv && relativeParts.length === 1 && index === 0 && dotenvName(part)),
+    )
+  )
     throw new AppError('PATH_DENIED', '제외된 경로에는 접근할 수 없습니다.');
   if (rel === '..' || rel.startsWith('..' + sep) || isAbsolute(rel))
     throw new AppError('PATH_DENIED', '프로젝트 밖의 경로입니다.');
@@ -136,9 +144,10 @@ export async function readText(
   path: string,
   signal: AbortSignal,
   allowStagingLink = false,
+  allowProjectDotenv = false,
 ): Promise<string> {
   signal.throwIfAborted();
-  const target = await resolveTarget(project, path);
+  const target = await resolveTarget(project, path, allowProjectDotenv);
   if (
     !target.info.isFile() ||
     (target.info.nlink > 1 && !allowStagingLink) ||
@@ -163,7 +172,7 @@ export async function readText(
       if (!bytesRead) break;
       total += bytesRead;
     }
-    const resolvedAfter = await resolveTarget(project, path);
+    const resolvedAfter = await resolveTarget(project, path, allowProjectDotenv);
     if (resolvedAfter.info.ino !== info.ino || resolvedAfter.info.dev !== info.dev)
       throw new AppError('FILE_CHANGED', '읽는 동안 파일이 교체되었습니다.');
     const after = await handle.stat();

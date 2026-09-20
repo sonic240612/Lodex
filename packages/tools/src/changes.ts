@@ -44,11 +44,12 @@ const isCreate = (file: FileChange): file is CreatedFileProposal =>
   'kind' in file && file.kind === 'create';
 const absent = (error: unknown) => (error as NodeJS.ErrnoException)?.code === 'ENOENT';
 type Observation = NonNullable<ChangeSet['observations']>[number];
+const projectDotenv = (path: string) => /^\.env(?:\.|$)/i.test(path.replaceAll('\\', '/'));
 
 // Validate the entire supplied path, including a nonexistent leaf, before using its parent.
-async function destination(project: Project, path: string) {
+async function destination(project: Project, path: string, allowProjectDotenv = false) {
   try {
-    await resolveTarget(project, path);
+    await resolveTarget(project, path, allowProjectDotenv);
   } catch (error) {
     if (!absent(error)) throw error;
   }
@@ -74,7 +75,8 @@ export async function proposeChanges(
   const paths = new Set<string>();
   for (const item of args.files) {
     signal.throwIfAborted();
-    const target = await destination(project, item.path);
+    const allowProjectDotenv = item.kind === 'create' && projectDotenv(item.path);
+    const target = await destination(project, item.path, allowProjectDotenv);
     // Also reject case aliases on case-sensitive systems so a set stays portable.
     const key = target.toLowerCase();
     if (paths.has(key))
@@ -128,7 +130,8 @@ async function releaseStagingLink(
   file: CreatedFileProposal,
   signal: AbortSignal,
 ) {
-  const target = await resolveTarget(project, file.path);
+  const allowProjectDotenv = projectDotenv(file.path);
+  const target = await resolveTarget(project, file.path, allowProjectDotenv);
   if (target.info.nlink === 1) return;
   const staged = temporary(target.path, file);
   const info = await lstat(staged);
@@ -144,12 +147,14 @@ async function releaseStagingLink(
       'FILE_UNSUPPORTED',
       '소유권을 확인할 수 없는 하드 링크는 처리하지 않습니다.',
     );
-  if (digest(await readText(project, file.path, signal, true)) !== file.afterHash)
+  if (
+    digest(await readText(project, file.path, signal, true, allowProjectDotenv)) !== file.afterHash
+  )
     throw new AppError(
       'EDIT_CONFLICT',
       '생성 파일이 변경되었습니다. 임시 링크를 정리하지 않았습니다.',
     );
-  const current = await resolveTarget(project, file.path);
+  const current = await resolveTarget(project, file.path, allowProjectDotenv);
   const stagedNow = await lstat(staged);
   if (
     current.info.ino !== info.ino ||
@@ -168,7 +173,7 @@ async function inspectFile(
 ): Promise<Observation> {
   signal.throwIfAborted();
   if (isCreate(file)) {
-    const path = await destination(project, file.path);
+    const path = await destination(project, file.path, projectDotenv(file.path));
     try {
       await lstat(path);
     } catch (error) {
@@ -180,7 +185,9 @@ async function inspectFile(
       return { path: file.path, state: 'conflict' };
     await releaseStagingLink(project, file, signal);
   }
-  const hash = digest(await readText(project, file.path, signal));
+  const hash = digest(
+    await readText(project, file.path, signal, false, isCreate(file) && projectDotenv(file.path)),
+  );
   return {
     path: file.path,
     state:
@@ -236,7 +243,8 @@ async function createFile(
   signal: AbortSignal,
   recordIdentity?: (file: CreatedFileProposal) => Promise<void>,
 ) {
-  const path = await destination(project, file.path);
+  const allowProjectDotenv = projectDotenv(file.path);
+  const path = await destination(project, file.path, allowProjectDotenv);
   const staged = temporary(path, file);
   if (digest(file.content) !== file.afterHash)
     throw new AppError('EDIT_INVALID', '생성 내용의 해시가 일치하지 않습니다.');
@@ -286,7 +294,7 @@ async function createFile(
   // undo to delete a file independently created by the user.
   await recordIdentity?.(file);
   signal.throwIfAborted();
-  if ((await destination(project, file.path)) !== path)
+  if ((await destination(project, file.path, allowProjectDotenv)) !== path)
     throw new AppError('PROJECT_MOVED', '대상 폴더가 변경되었습니다.');
   // Hard-link publication is atomic for this file and fails if any target exists.
   // No rename fallback: it could overwrite a concurrently created user file.
@@ -303,12 +311,15 @@ async function createFile(
   await releaseStagingLink(project, file, signal);
 }
 async function removeCreatedFile(project: Project, file: CreatedFileProposal, signal: AbortSignal) {
-  const before = await resolveTarget(project, file.path);
+  const allowProjectDotenv = projectDotenv(file.path);
+  const before = await resolveTarget(project, file.path, allowProjectDotenv);
   if (file.identity !== before.info.dev + ':' + before.info.ino)
     throw new AppError('EDIT_CONFLICT', '다른 파일로 교체되어 삭제하지 않았습니다.', 409);
-  if (digest(await readText(project, file.path, signal)) !== file.afterHash)
+  if (
+    digest(await readText(project, file.path, signal, false, allowProjectDotenv)) !== file.afterHash
+  )
     throw new AppError('EDIT_CONFLICT', '생성 후 변경된 파일은 삭제하지 않습니다.', 409);
-  const current = await resolveTarget(project, file.path);
+  const current = await resolveTarget(project, file.path, allowProjectDotenv);
   if (
     before.path !== current.path ||
     before.info.ino !== current.info.ino ||
