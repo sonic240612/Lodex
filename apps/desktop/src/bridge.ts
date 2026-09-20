@@ -189,7 +189,21 @@ async function previewCommand(command: Command): Promise<CommandResult> {
     else if (command.type === 'stop_autopilot') {
       if (session.autopilot) session.autopilot.status = 'cancelled';
     } else if (command.type === 'set_mode') session.mode = command.mode;
-    else if (command.type === 'configure_execution')
+    else if (command.type === 'compact_context') {
+      const complete = session.messages.filter((message) => message.status === 'complete');
+      if (!complete.length) throw new Error('압축할 완료된 대화 기록이 없습니다.');
+      session.contextCompaction = {
+        throughMessageId: complete.at(-1)!.id,
+        summary: complete
+          .map((message) => `${message.role}: ${message.content.slice(0, 500)}`)
+          .join('\n'),
+        createdAt: new Date().toISOString(),
+        reason: 'manual',
+        compactedMessageCount: complete.length,
+        originalEstimateTokens: 0,
+        compactedEstimateTokens: 0,
+      };
+    } else if (command.type === 'configure_execution')
       throw new Error('명령 실행은 데스크톱 앱에서 설정할 수 있습니다.');
     else if (command.type === 'adopt_plan') {
       const proposal = session.messages

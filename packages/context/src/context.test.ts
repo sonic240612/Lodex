@@ -181,13 +181,27 @@ describe('context compiler', () => {
     expect(result.request.messages[1]?.content).toBe('Keep this constraint.');
     expect(result.manifest.excludedMessageIds).toHaveLength(4);
   });
-  it('reserves output and template headroom, and rejects overflow without trimming', () => {
+  it('reserves output and template headroom, and checkpoints history before overflow', () => {
+    const source = session();
+    source.config = { ...source.config, contextBudgetTokens: 4000, maxTokens: 1000 };
+    source.messages = [message('user', 'x'.repeat(2600))];
+    const before = structuredClone(source);
+    const result = compileContext(source, 'hello');
+    expect(result.compaction).toMatchObject({
+      throughMessageId: source.messages[0]!.id,
+      reason: 'automatic',
+      compactedMessageCount: 1,
+    });
+    expect(result.manifest.compaction?.reason).toBe('automatic');
+    expect(
+      result.request.messages.some((entry) => entry.content.includes('conversation checkpoint')),
+    ).toBe(true);
+    expect(source).toEqual(before);
+  });
+  it('still rejects an oversized current request that history compression cannot reduce', () => {
     const source = session();
     source.config = { ...source.config, contextBudgetTokens: 2048, maxTokens: 1024 };
-    source.messages = [message('user', 'x'.repeat(1100))];
-    const before = structuredClone(source);
-    expect(() => compileContext(source, 'hello')).toThrow('앱 컨텍스트 예산');
-    expect(source).toEqual(before);
+    expect(() => compileContext(source, 'x'.repeat(1100))).toThrow('앱 컨텍스트 예산');
   });
   it('uses an exact 80/20 input-output split when automatic output tokens are enabled', () => {
     const source = session();
@@ -224,11 +238,59 @@ describe('context compiler', () => {
     expect(eco.manifest.requestSha256).not.toBe(normal.manifest.requestSha256);
     expect(eco.request.messages[0]?.content).toContain('Preserve constraints');
   });
-  it('includes system and plan content in the independent byte cap', () => {
+  it('uses Eco to checkpoint earlier while a normal request still fits', () => {
+    const source = session();
+    source.config = {
+      ...source.config,
+      contextBudgetTokens: 10_000,
+      maxTokens: 2_000,
+      autoMaxTokens: true,
+    };
+    source.messages = Array.from({ length: 8 }, (_, index) =>
+      message(index % 2 ? 'assistant' : 'user', String(index).repeat(650)),
+    );
+    expect(compileContext(source, 'next').compaction).toBeUndefined();
+    source.config.eco = true;
+    expect(compileContext(source, 'next').compaction?.reason).toBe('eco');
+  });
+  it('applies a persisted checkpoint and supports a forced manual checkpoint', () => {
+    const source = session();
+    source.messages = Array.from({ length: 8 }, (_, index) =>
+      message(index % 2 ? 'assistant' : 'user', `turn-${index}`),
+    );
+    const manual = compileContext(source, '', [], undefined, { forceCompaction: true });
+    expect(manual.compaction?.reason).toBe('manual');
+    if (!manual.compaction) throw new Error('Expected manual checkpoint.');
+    source.contextCompaction = manual.compaction;
+    const next = compileContext(source, 'continue');
+    expect(next.compaction).toBeUndefined();
+    expect(next.manifest.compaction?.throughMessageId).toBe(manual.compaction?.throughMessageId);
+    expect(JSON.stringify(next.request.messages)).toContain('conversation checkpoint');
+    expect(next.request.messages.at(-1)?.content).toBe('continue');
+  });
+  it('extends an existing checkpoint when newer turns would overflow', () => {
+    const source = session();
+    source.messages = Array.from({ length: 8 }, (_, index) =>
+      message(index % 2 ? 'assistant' : 'user', `turn-${index}`),
+    );
+    const first = compileContext(source, '', [], undefined, { forceCompaction: true }).compaction;
+    if (!first) throw new Error('Expected initial checkpoint.');
+    source.contextCompaction = first;
+    source.messages.push(message('user', 'x'.repeat(6000)));
+    source.config = {
+      ...source.config,
+      contextBudgetTokens: 6000,
+      maxTokens: 1200,
+      autoMaxTokens: true,
+    };
+    const extended = compileContext(source, 'next');
+    expect(extended.compaction?.reason).toBe('automatic');
+    expect(extended.compaction!.compactedMessageCount).toBeGreaterThan(first.compactedMessageCount);
+  });
+  it('includes current system and plan content in the independent byte cap', () => {
     const source = session();
     source.config.contextBudgetTokens = 2097152;
     source.plan = { ...defaultPlan(), includeInContext: true, goal: '한'.repeat(4000) };
-    source.messages = [message('user', 'x'.repeat(251000))];
-    expect(() => compileContext(source, 'hello')).toThrow('256 KiB');
+    expect(() => compileContext(source, 'x'.repeat(251000))).toThrow('256 KiB');
   });
 });

@@ -298,6 +298,7 @@ export const commandSchema = z.discriminatedUnion('type', [
   }),
   z.strictObject({ ...envelope, ...target, type: z.literal('save_plan'), plan: planSchema }),
   z.strictObject({ ...envelope, ...target, type: z.literal('set_mode'), mode: modeSchema }),
+  z.strictObject({ ...envelope, ...target, type: z.literal('compact_context') }),
   z.strictObject({
     ...envelope,
     ...target,
@@ -390,6 +391,17 @@ export interface Message {
   activities?: Activity[];
   continuation?: InferenceMessage[];
 }
+export const contextCompactionSchema = z.strictObject({
+  /** Complete messages at or before this message are replaced by the checkpoint for inference. */
+  throughMessageId: idSchema,
+  summary: z.string().trim().min(1).max(20000),
+  createdAt: z.iso.datetime(),
+  reason: z.enum(['manual', 'automatic', 'eco']),
+  compactedMessageCount: z.number().int().positive(),
+  originalEstimateTokens: z.number().int().nonnegative(),
+  compactedEstimateTokens: z.number().int().nonnegative(),
+});
+export type ContextCompaction = z.infer<typeof contextCompactionSchema>;
 export interface SubagentRecord {
   id: string;
   task: string;
@@ -516,7 +528,7 @@ export interface ContextManifest {
   mcpAttachmentIds?: string[];
   mcpTools?: string[];
   skillCatalog?: { includedIds: string[]; omittedIds: string[]; serializedBytes: number };
-  compilerVersion: 'context-v1';
+  compilerVersion: 'context-v1' | 'context-v2';
   sourceSessionVersion: number;
   requestSha256: string;
   estimateSource: 'utf8_bytes_v1';
@@ -530,6 +542,11 @@ export interface ContextManifest {
   excludedMessageIds: string[];
   planIncluded: boolean;
   eco: boolean;
+  compaction?: {
+    throughMessageId: string;
+    reason: ContextCompaction['reason'];
+    compactedMessageCount: number;
+  };
 }
 export interface Session {
   routing?: AgentRoutingConfig;
@@ -554,6 +571,7 @@ export interface Session {
   config: ModelConfig;
   plan: Plan;
   messages: Message[];
+  contextCompaction?: ContextCompaction;
   run: Run | null;
   projectId?: string | null;
 }

@@ -268,6 +268,23 @@ export function App() {
       setBusy(false);
     }
   }
+  async function compactContext() {
+    if (!session || busy || running || !workspace.connected) return;
+    setBusy(true);
+    setError('');
+    try {
+      const result = await sendCommand({
+        type: 'compact_context',
+        sessionId: session.id,
+        expectedVersion: session.version,
+      });
+      workspace.upsert(result.session);
+    } catch (failure) {
+      setError(messageError(failure));
+    } finally {
+      setBusy(false);
+    }
+  }
   async function changePermissionMode(value: PermissionMode) {
     if (!session || busy || !workspace.connected) {
       setError('먼저 대화를 만드세요.');
@@ -447,7 +464,24 @@ export function App() {
       setBusy(false);
     }
   }
-  const latestUsage = session?.messages.filter((m) => m.role === 'assistant').at(-1)?.usage;
+  const latestAssistant = session?.messages.filter((m) => m.role === 'assistant').at(-1);
+  const latestUsage = latestAssistant?.usage;
+  const compactionIsNewer =
+    !!session?.contextCompaction &&
+    (!session.run ||
+      Date.parse(session.contextCompaction.createdAt) > Date.parse(session.run.startedAt));
+  const contextBase = compactionIsNewer
+    ? session!.contextCompaction!.compactedEstimateTokens
+    : (latestUsage?.inputTokens ?? session?.run?.context?.inputEstimateTokens ?? 0);
+  const generatedEstimate =
+    !compactionIsNewer && latestAssistant && latestAssistant.id === session?.run?.messageId
+      ? (latestUsage?.outputTokens ?? new TextEncoder().encode(latestAssistant.content).length)
+      : 0;
+  const contextUsed = Math.max(0, contextBase + generatedEstimate);
+  const contextPercent = Math.min(
+    100,
+    Math.max(0, Math.round((contextUsed / Math.max(1, config.contextBudgetTokens)) * 100)),
+  );
   return (
     <div
       className={`app ${light ? 'light' : ''} ${sidebarOpen ? '' : 'sidebar-closed'} ${planOpen ? '' : 'plan-closed'}`}
@@ -924,12 +958,77 @@ export function App() {
                           : '전체 접근으로 호스트 파일·명령·네트워크를 사용할 수 있습니다.'
                   : '프로젝트를 연결하면 파일을 살펴보며 작업할 수 있습니다.'}
             </span>
-            <span className="metrics-mini">
-              <Icon name="bolt" size={12} />
-              {latestUsage?.decodeTps
-                ? latestUsage.decodeTps.value.toFixed(1) + ' tok/s'
-                : '속도 미측정'}
-            </span>
+            <div className="context-meter">
+              <button
+                type="button"
+                className="context-meter-trigger"
+                aria-label={`컨텍스트 사용량 ${contextPercent}%`}
+                aria-haspopup="dialog"
+              >
+                <span className="context-meter-track" aria-hidden="true">
+                  <span style={{ width: contextPercent + '%' }} />
+                </span>
+                컨텍스트 {contextPercent}%
+              </button>
+              <div className="context-popover" role="dialog" aria-label="컨텍스트 상세 정보">
+                <strong>컨텍스트 사용량</strong>
+                <dl>
+                  <div>
+                    <dt>현재 / 예산</dt>
+                    <dd>
+                      {contextUsed.toLocaleString()} / {config.contextBudgetTokens.toLocaleString()}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>토큰 생성 속도</dt>
+                    <dd>
+                      {latestUsage?.decodeTps
+                        ? latestUsage.decodeTps.value.toFixed(1) + ' tok/s'
+                        : '미측정'}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>프리필 속도</dt>
+                    <dd>
+                      {latestUsage?.prefillTps
+                        ? latestUsage.prefillTps.value.toFixed(1) + ' tok/s'
+                        : '미측정'}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>첫 토큰 지연</dt>
+                    <dd>
+                      {latestUsage?.ttftMs
+                        ? (latestUsage.ttftMs.value / 1000).toFixed(2) + ' s'
+                        : '미측정'}
+                    </dd>
+                  </div>
+                </dl>
+                <button
+                  type="button"
+                  className="compact-context-button"
+                  disabled={
+                    !session?.messages.some((message) => message.status === 'complete') ||
+                    busy ||
+                    running
+                  }
+                  onClick={() => void compactContext()}
+                >
+                  <Icon name="leaf" size={14} />
+                  지금 컨텍스트 압축
+                </button>
+                {session?.contextCompaction && (
+                  <small>
+                    최근 압축: {session.contextCompaction.compactedMessageCount}개 메시지 ·{' '}
+                    {session.contextCompaction.reason === 'eco'
+                      ? 'ECO 자동'
+                      : session.contextCompaction.reason === 'automatic'
+                        ? '용량 초과 자동'
+                        : '수동'}
+                  </small>
+                )}
+              </div>
+            </div>
           </div>
         </div>
       </main>

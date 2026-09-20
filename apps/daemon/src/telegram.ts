@@ -95,6 +95,8 @@ export class Telegram {
   private token: string | null = null;
   private error: string | undefined;
   private abort: AbortController | undefined;
+  private pollAbort: AbortController | undefined;
+  private wakePending = false;
   private task: Promise<void> | undefined;
   private operations: Promise<unknown> = Promise.resolve();
   private constructor(private options: Options) {}
@@ -379,6 +381,11 @@ export class Telegram {
       abort.abort();
     });
   }
+  /** Interrupt only the current long poll so completed model output is processed immediately. */
+  wake() {
+    this.wakePending = true;
+    this.pollAbort?.abort();
+  }
   private async stop() {
     this.abort?.abort();
     await this.task;
@@ -414,17 +421,27 @@ export class Telegram {
       await this.process(signal);
       await this.deliver(signal);
       signal.throwIfAborted();
+      if (this.wakePending) {
+        this.wakePending = false;
+        continue;
+      }
       let updates: unknown;
+      const pollAbort = new AbortController();
+      this.pollAbort = pollAbort;
       try {
         updates = await this.api(
           'getUpdates',
           { offset: this.state.offset, limit: 50, timeout: 10, allowed_updates: ['message'] },
-          signal,
+          AbortSignal.any([signal, pollAbort.signal]),
         );
         failures = 0;
         this.error = undefined;
       } catch (error) {
         if (signal.aborted) return;
+        if (pollAbort.signal.aborted) {
+          this.wakePending = false;
+          continue;
+        }
         this.error = error instanceof AppError ? error.message : 'Telegram 수신 실패';
         if (error instanceof BotError && error.definite && !error.retryAfter) throw error;
         await delay(
@@ -435,6 +452,8 @@ export class Telegram {
           { signal },
         ).catch(() => undefined);
         continue;
+      } finally {
+        if (this.pollAbort === pollAbort) this.pollAbort = undefined;
       }
       signal.throwIfAborted();
       if (!Array.isArray(updates) || updates.length > 100)

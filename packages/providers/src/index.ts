@@ -17,8 +17,12 @@ export { privateServerFetch } from './network';
 type Fetch = (input: string, init: RequestInit) => Promise<Response>;
 type RetryWait = (milliseconds: number, signal: AbortSignal) => Promise<void>;
 const modelRetryDelaysMs = [2000, 5000, 7000] as const;
-const retryableModelStatus = (status: number): boolean =>
-  status === 408 || status === 425 || status === 429 || status >= 500;
+const retryableModelStatus = (status: number, provider: Exclude<ProviderId, 'demo'>): boolean =>
+  (provider === 'openrouter' && status === 400) ||
+  status === 408 ||
+  status === 425 ||
+  status === 429 ||
+  status >= 500;
 const waitForRetry: RetryWait = (milliseconds, signal) =>
   new Promise<void>((resolve, reject) => {
     signal.throwIfAborted();
@@ -121,7 +125,7 @@ export class ChatCompletionProvider implements InferenceProvider {
       const response = await this.fetchResponse('/chat/completions', init);
       if (
         response.ok ||
-        !retryableModelStatus(response.status) ||
+        !retryableModelStatus(response.status, this.kind) ||
         attempt >= modelRetryDelaysMs.length
       )
         return response;

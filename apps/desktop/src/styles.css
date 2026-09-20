@@ -1058,7 +1058,7 @@ button {
   display: flex;
   justify-content: space-between;
   gap: 8px;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.55;
   color: var(--subtle);
   padding: 10px 5px 0;
@@ -1071,6 +1071,113 @@ button {
   align-items: center;
   gap: 4px;
   white-space: nowrap;
+}
+.context-meter {
+  position: relative;
+  flex: 0 0 auto;
+}
+.context-meter-trigger {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  border: 0;
+  padding: 2px 0;
+  color: var(--muted);
+  background: transparent;
+  font: inherit;
+  white-space: nowrap;
+  cursor: default;
+}
+.context-meter-track {
+  width: 38px;
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--border);
+}
+.context-meter-track > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+.context-popover {
+  position: absolute;
+  z-index: 40;
+  right: 0;
+  bottom: calc(100% + 9px);
+  width: 286px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: 0 12px 36px var(--shadow);
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(5px);
+  transition:
+    opacity 0.14s ease,
+    transform 0.14s ease,
+    visibility 0.14s;
+}
+.context-popover::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  bottom: -10px;
+  left: 0;
+  height: 10px;
+}
+.context-meter:hover .context-popover,
+.context-meter:focus-within .context-popover {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+}
+.context-popover dl {
+  margin: 9px 0 11px;
+}
+.context-popover dl > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 7px 0;
+}
+.context-popover dt {
+  color: var(--subtle);
+}
+.context-popover dd {
+  margin: 0;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.compact-context-button {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 34px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  color: var(--text);
+  background: var(--surface);
+  cursor: pointer;
+}
+.compact-context-button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+.compact-context-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.context-popover small {
+  display: block;
+  margin-top: 9px;
+  color: var(--subtle);
+  line-height: 1.45;
 }
 .error-banner {
   background: #ad4b361a;

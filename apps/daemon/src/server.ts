@@ -202,6 +202,7 @@ export async function startServer(options: ServerOptions) {
     };
   };
   const active = new Map<string, ActiveRun>();
+  let telegram!: Telegram;
   const streams = new Set<ServerResponse>();
   let queue: Promise<unknown> = Promise.resolve();
   let closing = false;
@@ -515,6 +516,7 @@ export async function startServer(options: ServerOptions) {
         .catch(() => undefined);
     } finally {
       active.delete(session.run!.id);
+      telegram?.wake();
     }
   }
   async function command(command: Command) {
@@ -762,8 +764,19 @@ export async function startServer(options: ServerOptions) {
           ? skillCatalog(selectedSkills, { maxBytes: session.config.eco ? 3000 : 6000 })
           : undefined,
       );
+    } else if (command.type === 'compact_context') {
+      const session = await store.session(command.sessionId);
+      if (command.expectedVersion !== session.version)
+        throw new AppError(
+          'VERSION_CONFLICT',
+          '대화가 변경되었습니다. 최신 상태를 불러온 뒤 다시 시도하세요.',
+          409,
+        );
+      context = compileContext(session, '', [], undefined, { forceCompaction: true });
+      if (!context.compaction)
+        throw new AppError('COMPACTION_EMPTY', '압축할 완료된 대화 기록이 없습니다.');
     }
-    const result = await store.apply(command, context?.manifest, attachment);
+    const result = await store.apply(command, context?.manifest, attachment, context?.compaction);
     if (command.type === 'attach_mcp_content' && !result.replayed)
       contentPreviews.consume(command.previewId);
     if (
@@ -793,7 +806,7 @@ export async function startServer(options: ServerOptions) {
     telegramTokenSource = secret.source;
     return secret.token;
   };
-  const telegram = await Telegram.open({
+  telegram = await Telegram.open({
     store,
     loadToken: resolveTelegramToken,
     tokenSource: () => telegramTokenSource,

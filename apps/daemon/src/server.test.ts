@@ -78,6 +78,72 @@ afterEach(async () => {
   for (const close of cleanup.splice(0)) await close();
 });
 describe('authenticated daemon integration', () => {
+  it('persists manual checkpoints and automatically compacts a request that would overflow', async () => {
+    const requests: InferenceRequest[] = [];
+    const provider: InferenceProvider = {
+      listModels: async () => [],
+      capabilities: async () => ({ tools: true, streaming: true }),
+      async *generate(request) {
+        requests.push(request);
+        yield { type: 'text_delta', text: 'done' };
+        yield { type: 'finished', reason: 'stop' };
+      },
+    };
+    const app = await setup(provider);
+    let session = await app.create({
+      provider: 'llama-server',
+      model: 'fixture',
+      contextBudgetTokens: 12000,
+      maxTokens: 2400,
+      autoMaxTokens: true,
+    });
+    session = (
+      await app.store.apply(
+        makeCommand({
+          type: 'send_message',
+          sessionId: session.id,
+          expectedVersion: session.version,
+          content: 'x'.repeat(10000),
+        }),
+      )
+    ).session;
+    session = await app.store.updateRun({
+      sessionId: session.id,
+      runId: session.run!.id,
+      text: 'old answer',
+      status: 'completed',
+    });
+    const automaticResponse = await app.command(
+      makeCommand({
+        type: 'send_message',
+        sessionId: session.id,
+        expectedVersion: session.version,
+        content: 'continue',
+      }),
+    );
+    if (automaticResponse.status !== 200)
+      throw new Error('Automatic compaction failed: ' + (await automaticResponse.clone().text()));
+    session = ((await automaticResponse.json()) as CommandResult).session;
+    expect(session.contextCompaction?.reason).toBe('automatic');
+    await expect.poll(() => requests.length).toBe(1);
+    expect(JSON.stringify(requests[0]!.messages)).toContain('conversation checkpoint');
+    await expect
+      .poll(async () => (await app.store.session(session.id)).run?.status)
+      .toBe('completed');
+    session = await app.store.session(session.id);
+    const manualResponse = await app.command(
+      makeCommand({
+        type: 'compact_context',
+        sessionId: session.id,
+        expectedVersion: session.version,
+      }),
+    );
+    expect(manualResponse.status).toBe(200);
+    const manuallyCompacted = ((await manualResponse.json()) as CommandResult).session;
+    expect(manuallyCompacted.contextCompaction).toMatchObject({ reason: 'manual' });
+    expect((await app.store.session(session.id)).contextCompaction?.reason).toBe('manual');
+  });
+
   it.each(['pass', 'fail', 'budget', 'no_progress'] as const)(
     'runs a bounded local Autopilot and persists %s distinctly',
     async (outcome) => {

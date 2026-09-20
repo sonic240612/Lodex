@@ -21,6 +21,7 @@ import {
   type LocalProfile,
   type Activity,
   type McpContextAttachment,
+  type ContextCompaction,
 } from '@lodex/contracts';
 import type { RunUpdate } from './engine';
 export type { RunUpdate } from './engine';
@@ -195,8 +196,9 @@ export class Store {
     command: Command,
     context?: ContextManifest,
     attachment?: McpContextAttachment,
+    compaction?: ContextCompaction,
   ): Promise<CommandResult> {
-    return this.call('apply', command, context, attachment);
+    return this.call('apply', command, context, attachment, compaction);
   }
   updateRun(update: RunUpdate): Promise<Session> {
     return this.call('updateRun', update);

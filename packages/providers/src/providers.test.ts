@@ -410,6 +410,28 @@ describe('provider adapters', () => {
     expect(retryWait).toHaveBeenCalledTimes(3);
     expect(waits).toEqual([2000, 5000, 7000]);
   });
+  it('retries an OpenRouter HTTP 400 response with the same bounded schedule', async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(null, { status: 400 }));
+    const waits: number[] = [];
+    const retryWait = vi.fn(async (milliseconds: number) => {
+      waits.push(milliseconds);
+    });
+    await expect(
+      collect(
+        new ChatCompletionProvider(
+          'openrouter',
+          '',
+          'fixture-secret',
+          fetcher,
+          retryWait,
+        ).generate(request(), signal()),
+      ),
+    ).rejects.toThrow('HTTP 400');
+    expect(fetcher).toHaveBeenCalledTimes(4);
+    expect(waits).toEqual([2000, 5000, 7000]);
+  });
   it('continues normally when a transient model request retry succeeds', async () => {
     const fetcher = vi
       .fn<typeof fetch>()

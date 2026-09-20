@@ -44,6 +44,8 @@ import {
   permissionModeSchema,
   defaultPermissionMode,
   type ApprovalAction,
+  type ContextCompaction,
+  contextCompactionSchema,
 } from '@lodex/contracts';
 
 // Additive JSON fields are defaulted on all read paths, including old SSE events.
@@ -55,6 +57,9 @@ function hydrate(session: Session): Session {
   return {
     ...stored,
     permissionMode,
+    ...(session.contextCompaction
+      ? { contextCompaction: contextCompactionSchema.parse(session.contextCompaction) }
+      : {}),
     mode: session.mode ?? 'build',
     routing: agentRoutingConfigSchema.parse(session.routing ?? {}),
     mcp: mcpSelectionsSchema.parse(session.mcp ?? []),
@@ -603,6 +608,7 @@ export class StorageEngine {
     command: Command,
     context?: ContextManifest,
     attachment?: McpContextAttachment,
+    compaction?: ContextCompaction,
   ): CommandResult {
     return this.transaction(() => {
       const previous = this.receipt(command);
@@ -642,6 +648,25 @@ export class StorageEngine {
             '대화가 변경되었습니다. 최신 상태를 불러온 뒤 다시 시도하세요.',
             409,
           );
+        const acceptCompaction = () => {
+          if (!compaction)
+            throw new AppError('COMPACTION_REQUIRED', '저장할 컨텍스트 체크포인트가 없습니다.');
+          const complete = session.messages.filter((message) => message.status === 'complete');
+          const through = complete.findIndex(
+            (message) => message.id === compaction.throughMessageId,
+          );
+          if (
+            through < 0 ||
+            compaction.compactedMessageCount !== through + 1 ||
+            !compaction.summary.trim() ||
+            Buffer.byteLength(compaction.summary, 'utf8') > 20000
+          )
+            throw new AppError(
+              'COMPACTION_INVALID',
+              '컨텍스트 체크포인트가 대화 기록과 맞지 않습니다.',
+            );
+          session.contextCompaction = structuredClone(compaction);
+        };
         if (command.type === 'cancel_run') {
           if (session.run?.id !== command.runId)
             throw new AppError('RUN_CONFLICT', '중지하려는 실행이 현재 실행과 다릅니다.', 409);
@@ -692,6 +717,10 @@ export class StorageEngine {
           if (session.run?.status === 'running' && session.autopilot?.runId === session.run.id)
             throw new AppError('BUSY', 'Autopilot을 중지한 뒤 실행 계획을 편집하세요.', 409);
           session.plan = command.plan;
+        } else if (command.type === 'compact_context') {
+          if (session.run?.status === 'running')
+            throw new AppError('BUSY', '응답이 끝난 뒤 컨텍스트를 압축하세요.', 409);
+          acceptCompaction();
         } else if (
           command.type === 'set_mode' ||
           command.type === 'adopt_plan' ||
@@ -842,6 +871,7 @@ export class StorageEngine {
                 '입력을 구성한 대화 버전이 현재 상태와 다릅니다.',
                 409,
               );
+            if (compaction) acceptCompaction();
             if (context?.skillCatalog?.includedIds.length) session.hasSkillHistory = true;
             if (context?.mcpTools?.length) session.hasMcpHistory = true;
             if (context?.mcpAttachmentIds?.length) session.hasMcpHistory = true;

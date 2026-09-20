@@ -216,7 +216,7 @@ describe('durable Telegram channel', () => {
       text: 'completed answer',
       status: 'completed',
     });
-    app.bot.push([]);
+    app.manager.wake();
     await expect
       .poll(() =>
         app.bot.sent.some((message) => message.text.includes('[complete]\ncompleted answer')),
