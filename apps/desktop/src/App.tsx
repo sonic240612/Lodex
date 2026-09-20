@@ -1809,9 +1809,10 @@ function Settings({
                   기본값 사용
                 </label>
               </div>
-              <label className="field">
-                호출당 최대 출력 토큰
+              <div className={`field${draft.autoMaxTokens ? ' generation-value-disabled' : ''}`}>
+                <label htmlFor="max-output-token-setting">호출당 최대 출력 토큰</label>
                 <input
+                  id="max-output-token-setting"
                   aria-label="최대 출력 토큰"
                   type="number"
                   min="1"
@@ -1823,7 +1824,7 @@ function Settings({
                     setDraft({ ...draft, maxTokens: Number(event.target.value) })
                   }
                 />
-              </label>
+              </div>
             </div>
             <label className="check-field auto-token-setting">
               <input

@@ -288,7 +288,8 @@ export function RoutingSettings({
                           key={key}
                           className={
                             (key === 'temperature' && config.useDefaultTemperature) ||
-                            (key === 'topP' && config.useDefaultTopP)
+                            (key === 'topP' && config.useDefaultTopP) ||
+                            (key === 'maxTokens' && config.autoMaxTokens)
                               ? 'generation-value-disabled'
                               : undefined
                           }
