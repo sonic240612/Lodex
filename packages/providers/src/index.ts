@@ -15,6 +15,25 @@ import { privateServerFetch, connectionError } from './network';
 export { decodeSse } from './sse';
 export { privateServerFetch } from './network';
 type Fetch = (input: string, init: RequestInit) => Promise<Response>;
+type RetryWait = (milliseconds: number, signal: AbortSignal) => Promise<void>;
+const modelRetryDelaysMs = [2000, 5000, 7000] as const;
+const retryableModelStatus = (status: number): boolean =>
+  status === 408 || status === 425 || status === 429 || status >= 500;
+const waitForRetry: RetryWait = (milliseconds, signal) =>
+  new Promise<void>((resolve, reject) => {
+    signal.throwIfAborted();
+    const timer = setTimeout(done, milliseconds);
+    function done() {
+      signal.removeEventListener('abort', abort);
+      resolve();
+    }
+    function abort() {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', abort);
+      reject(signal.reason);
+    }
+    signal.addEventListener('abort', abort, { once: true });
+  });
 const object = (value: unknown): Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -68,6 +87,7 @@ export class ChatCompletionProvider implements InferenceProvider {
     baseUrl: string,
     private key: string | null,
     fetcher?: Fetch,
+    private retryWait: RetryWait = waitForRetry,
   ) {
     this.fetcher = fetcher ?? (kind === 'llama-server' ? privateServerFetch : fetch);
     this.baseUrl =
@@ -95,6 +115,19 @@ export class ChatCompletionProvider implements InferenceProvider {
       'Content-Type': 'application/json',
       ...(this.key ? { Authorization: 'Bearer ' + this.key } : {}),
     };
+  }
+  private async fetchModelResponse(init: RequestInit, signal: AbortSignal): Promise<Response> {
+    for (let attempt = 0; ; attempt += 1) {
+      const response = await this.fetchResponse('/chat/completions', init);
+      if (
+        response.ok ||
+        !retryableModelStatus(response.status) ||
+        attempt >= modelRetryDelaysMs.length
+      )
+        return response;
+      await response.body?.cancel().catch(() => undefined);
+      await this.retryWait(modelRetryDelaysMs[attempt]!, signal);
+    }
   }
   async listModels(signal?: AbortSignal): Promise<ModelDescriptor[]> {
     const response = await this.fetchResponse('/models', {
@@ -154,7 +187,7 @@ export class ChatCompletionProvider implements InferenceProvider {
     const toolIndexesById = new Map<string, number>();
     const implicitToolIndexes: number[] = [];
     let nextToolIndex = 0;
-    const response = await this.fetchResponse('/chat/completions', {
+    const response = await this.fetchModelResponse({
       method: 'POST',
       headers: this.headers(),
       signal,
@@ -204,7 +237,7 @@ export class ChatCompletionProvider implements InferenceProvider {
             }
           : {}),
       }),
-    });
+    }, signal);
     if (!response.ok)
       throw new AppError(
         'PROVIDER_HTTP',

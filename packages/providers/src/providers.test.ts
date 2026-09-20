@@ -385,6 +385,55 @@ describe('provider adapters', () => {
         ),
       ),
     ).rejects.toThrow('HTTP 401');
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+  it('retries transient model HTTP failures after 2, 5, and 7 seconds', async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(null, { status: 429 }));
+    const waits: number[] = [];
+    const retryWait = vi.fn(async (milliseconds: number) => {
+      waits.push(milliseconds);
+    });
+    await expect(
+      collect(
+        new ChatCompletionProvider(
+          'openrouter',
+          '',
+          'fixture-secret',
+          fetcher,
+          retryWait,
+        ).generate(request(), signal()),
+      ),
+    ).rejects.toThrow('HTTP 429');
+    expect(fetcher).toHaveBeenCalledTimes(4);
+    expect(retryWait).toHaveBeenCalledTimes(3);
+    expect(waits).toEqual([2000, 5000, 7000]);
+  });
+  it('continues normally when a transient model request retry succeeds', async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(null, { status: 503 }))
+      .mockResolvedValueOnce(
+        response(
+          data({ choices: [{ delta: { content: 'recovered' }, finish_reason: 'stop' }] }) +
+            'data: [DONE]\n\n',
+        ),
+      );
+    const retryWait = vi.fn(async () => undefined);
+    const events = await collect(
+      new ChatCompletionProvider(
+        'openrouter',
+        '',
+        'fixture-secret',
+        fetcher,
+        retryWait,
+      ).generate(request(), signal()),
+    );
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(retryWait).toHaveBeenCalledWith(2000, expect.any(AbortSignal));
+    expect(events).toContainEqual({ type: 'text_delta', text: 'recovered' });
+    expect(events).toContainEqual({ type: 'finished', reason: 'stop' });
   });
   it.each([
     ['No endpoints found that support tool use', '도구 호출'],
