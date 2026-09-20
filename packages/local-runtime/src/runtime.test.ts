@@ -10,7 +10,13 @@ import {
   type LocalProfileInput,
   type RuntimeSettings,
 } from '@lodex/contracts';
-import { RuntimeManager, engineArguments, inspectProfile, type RuntimeRepository } from './index';
+import {
+  RuntimeManager,
+  engineArguments,
+  inspectProfile,
+  parseNvidiaSmi,
+  type RuntimeRepository,
+} from './index';
 
 const managers: RuntimeManager[] = [],
   dirs: string[] = [];
@@ -113,6 +119,30 @@ server.listen(Number(arg('--port')),arg('--host'));`,
   return { profile, repo, manager, dir, script };
 }
 describe('managed local engines', () => {
+  it('parses bounded NVIDIA resource measurements and ignores malformed rows', () => {
+    expect(
+      parseNvidiaSmi(
+        '0, NVIDIA GeForce RTX 3090, 24576, 1024, 23552, 7\ninvalid\n1, GPU 2, 8192, 4096, 4096, N/A',
+      ),
+    ).toEqual([
+      {
+        index: 0,
+        name: 'NVIDIA GeForce RTX 3090',
+        totalVramMb: 24576,
+        usedVramMb: 1024,
+        freeVramMb: 23552,
+        utilizationPercent: 7,
+      },
+      {
+        index: 1,
+        name: 'GPU 2',
+        totalVramMb: 8192,
+        usedVramMb: 4096,
+        freeVramMb: 4096,
+        utilizationPercent: null,
+      },
+    ]);
+  });
   it('starts an authenticated fixture, hides its transport key, protects active leases and evicts idle engines', async () => {
     const { manager, profile, repo } = await fixture();
     const a = await manager.acquire(profile.id, AbortSignal.timeout(5000));

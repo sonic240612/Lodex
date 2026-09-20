@@ -1,8 +1,10 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { lstat, open, realpath } from 'node:fs/promises';
-import { isAbsolute, dirname } from 'node:path';
+import { isAbsolute, dirname, join } from 'node:path';
 import { createServer } from 'node:net';
 import { randomBytes, randomUUID } from 'node:crypto';
+import { freemem, platform, totalmem } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
 import { StringDecoder } from 'node:string_decoder';
 import {
@@ -15,6 +17,8 @@ import {
   type RuntimeInstance,
   type RuntimeSettings,
   type RuntimeSnapshot,
+  type GpuResourceSnapshot,
+  type RuntimeResources,
 } from '@lodex/contracts';
 import { privateServerFetch } from '@lodex/providers';
 
@@ -262,12 +266,114 @@ async function stopChild(instance: Instance) {
     );
 }
 
+const mib = 1024 * 1024;
+function numberField(value: string): number | null {
+  const parsed = Number(value.trim());
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+export function parseNvidiaSmi(output: string): GpuResourceSnapshot[] {
+  return output
+    .split(/\r?\n/)
+    .filter((line) => line.trim())
+    .flatMap((line) => {
+      const fields = line.split(',').map((value) => value.trim());
+      if (fields.length !== 6) return [];
+      const index = numberField(fields[0]!);
+      const totalVramMb = numberField(fields[2]!);
+      const usedVramMb = numberField(fields[3]!);
+      const freeVramMb = numberField(fields[4]!);
+      const utilizationPercent = numberField(fields[5]!);
+      if (
+        index === null ||
+        !Number.isInteger(index) ||
+        !fields[1] ||
+        totalVramMb === null ||
+        usedVramMb === null ||
+        freeVramMb === null
+      )
+        return [];
+      return [
+        {
+          index,
+          name: fields[1].slice(0, 200),
+          totalVramMb,
+          usedVramMb,
+          freeVramMb,
+          utilizationPercent:
+            utilizationPercent === null ? null : Math.min(100, utilizationPercent),
+        },
+      ];
+    });
+}
+function nvidiaSmiPath(): string | null {
+  const candidates =
+    platform() === 'win32'
+      ? [
+          process.env.SystemRoot && join(process.env.SystemRoot, 'System32', 'nvidia-smi.exe'),
+          process.env.ProgramW6432 &&
+            join(process.env.ProgramW6432, 'NVIDIA Corporation', 'NVSMI', 'nvidia-smi.exe'),
+          process.env.ProgramFiles &&
+            join(process.env.ProgramFiles, 'NVIDIA Corporation', 'NVSMI', 'nvidia-smi.exe'),
+        ]
+      : ['/usr/bin/nvidia-smi', '/usr/local/bin/nvidia-smi'];
+  return candidates.find((path): path is string => !!path && existsSync(path)) ?? null;
+}
+async function gpuResources(): Promise<GpuResourceSnapshot[]> {
+  const executable = nvidiaSmiPath();
+  if (!executable) return [];
+  return new Promise((resolve) => {
+    const child = spawn(
+      executable,
+      [
+        '--query-gpu=index,name,memory.total,memory.used,memory.free,utilization.gpu',
+        '--format=csv,noheader,nounits',
+      ],
+      { env: environment(), windowsHide: true, shell: false },
+    );
+    let output = '';
+    let settled = false;
+    const done = (value: GpuResourceSnapshot[]) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve(value);
+    };
+    const timeout = setTimeout(() => {
+      child.kill('SIGKILL');
+      done([]);
+    }, 2000);
+    child.stdout.on('data', (chunk: Buffer) => {
+      output += chunk.toString('utf8');
+      if (output.length > 65536) {
+        child.kill('SIGKILL');
+        done([]);
+      }
+    });
+    child.on('error', () => done([]));
+    child.on('close', (code) => done(code === 0 ? parseNvidiaSmi(output) : []));
+  });
+}
+async function measureResources(): Promise<RuntimeResources> {
+  const systemRamTotalMb = Math.round(totalmem() / mib);
+  const systemRamFreeMb = Math.round(freemem() / mib);
+  const gpus = await gpuResources();
+  return {
+    measuredAt: new Date().toISOString(),
+    systemRamTotalMb,
+    systemRamUsedMb: Math.max(0, systemRamTotalMb - systemRamFreeMb),
+    systemRamFreeMb,
+    gpuSource: gpus.length ? 'nvidia-smi' : 'unavailable',
+    gpus,
+  };
+}
+
 /** Manages only its own child handles; external llama-server processes are never stopped. */
 export class RuntimeManager {
   private instances = new Map<string, Instance>();
   private queue: Promise<unknown> = Promise.resolve();
   private closing = new AbortController();
   private closePromise?: Promise<void>;
+  private resourceCache?: { measuredAt: number; value: Promise<RuntimeResources> };
   constructor(
     private repository: RuntimeRepository,
     private supervisorPath: string,
@@ -278,9 +384,17 @@ export class RuntimeManager {
     return next;
   }
   async snapshot(): Promise<RuntimeSnapshot> {
+    const now = Date.now();
+    if (!this.resourceCache || now - this.resourceCache.measuredAt >= 2000)
+      this.resourceCache = { measuredAt: now, value: measureResources() };
+    const [profiles, settings, resources] = await Promise.all([
+      this.repository.localProfiles(),
+      this.repository.runtimeSettings(),
+      this.resourceCache.value,
+    ]);
     return {
-      profiles: await this.repository.localProfiles(),
-      settings: await this.repository.runtimeSettings(),
+      profiles,
+      settings,
       instances: [...this.instances.values()].map(
         ({
           child: _child,
@@ -294,6 +408,7 @@ export class RuntimeManager {
           log: instance.log.replaceAll(key, '[redacted]'),
         }),
       ),
+      resources,
     };
   }
   register(input: LocalProfileInput) {

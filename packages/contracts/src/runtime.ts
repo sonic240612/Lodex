@@ -74,8 +74,25 @@ export interface RuntimeInstance {
   log: string;
   error?: string;
 }
+export interface GpuResourceSnapshot {
+  index: number;
+  name: string;
+  totalVramMb: number;
+  usedVramMb: number;
+  freeVramMb: number;
+  utilizationPercent: number | null;
+}
+export interface RuntimeResources {
+  measuredAt: string;
+  systemRamTotalMb: number;
+  systemRamUsedMb: number;
+  systemRamFreeMb: number;
+  gpuSource: 'nvidia-smi' | 'unavailable';
+  gpus: GpuResourceSnapshot[];
+}
 export interface RuntimeSnapshot {
   profiles: LocalProfile[];
   settings: RuntimeSettings;
   instances: RuntimeInstance[];
+  resources: RuntimeResources;
 }

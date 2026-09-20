@@ -40,6 +40,14 @@ export function ModelManager({
     profiles: [],
     instances: [],
     settings: runtimeSettingsSchema.parse({}),
+    resources: {
+      measuredAt: new Date(0).toISOString(),
+      systemRamTotalMb: 0,
+      systemRamUsedMb: 0,
+      systemRamFreeMb: 0,
+      gpuSource: 'unavailable',
+      gpus: [],
+    },
   });
   const [draft, setDraft] = useState(blank),
     [budget, setBudget] = useState(runtimeSettingsSchema.parse({}));
@@ -54,6 +62,11 @@ export function ModelManager({
   const savedProfile = state.profiles.find((profile) => profile.id === draft.id);
   const profileConflict = !!draft.id && savedProfile?.version !== draft.expectedVersion;
   const unavailable = !nativeDesktop || !loaded;
+  const reservedVramMb = state.instances.reduce(
+    (total, instance) => total + instance.reservedVramMb,
+    0,
+  );
+  const usableVramMb = Math.max(0, state.settings.vramBudgetMb - state.settings.headroomMb);
   async function refresh() {
     const request = ++snapshotRequest.current;
     try {
@@ -228,6 +241,52 @@ export function ModelManager({
               </div>
             )}
           </fieldset>
+        </section>
+        <section className="runtime-resources" aria-labelledby="runtime-resources-title">
+          <div className="resource-heading">
+            <h3 id="runtime-resources-title">현재 자원</h3>
+            <span>{loaded ? '2초 간격 측정' : '측정 대기'}</span>
+          </div>
+          <div className="resource-grid">
+            <article>
+              <span>앱 VRAM 예약</span>
+              <strong>
+                {(reservedVramMb / 1024).toFixed(1)} / {(usableVramMb / 1024).toFixed(1)} GiB
+              </strong>
+              <progress max={Math.max(1, usableVramMb)} value={reservedVramMb} />
+              <small>로드된 관리형 모델의 예약 합계</small>
+            </article>
+            <article>
+              <span>시스템 RAM</span>
+              <strong>
+                {(state.resources.systemRamUsedMb / 1024).toFixed(1)} /{' '}
+                {(state.resources.systemRamTotalMb / 1024).toFixed(1)} GiB
+              </strong>
+              <progress
+                max={Math.max(1, state.resources.systemRamTotalMb)}
+                value={state.resources.systemRamUsedMb}
+              />
+              <small>{(state.resources.systemRamFreeMb / 1024).toFixed(1)} GiB 사용 가능</small>
+            </article>
+            {state.resources.gpus.map((gpu) => (
+              <article key={gpu.index}>
+                <span>
+                  GPU {gpu.index} · {gpu.name}
+                </span>
+                <strong>
+                  {(gpu.usedVramMb / 1024).toFixed(1)} / {(gpu.totalVramMb / 1024).toFixed(1)} GiB
+                </strong>
+                <progress max={Math.max(1, gpu.totalVramMb)} value={gpu.usedVramMb} />
+                <small>
+                  VRAM {(gpu.freeVramMb / 1024).toFixed(1)} GiB 여유
+                  {gpu.utilizationPercent === null ? '' : ` · GPU ${gpu.utilizationPercent}%`}
+                </small>
+              </article>
+            ))}
+          </div>
+          {loaded && state.resources.gpuSource === 'unavailable' && (
+            <p>지원되는 NVIDIA 측정 도구를 찾지 못해 실제 GPU 사용량은 표시할 수 없습니다.</p>
+          )}
         </section>
         <section className="local-model-list" aria-label="등록한 모델">
           {loaded && !state.profiles.length && (
