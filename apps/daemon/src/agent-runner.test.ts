@@ -12,7 +12,7 @@ describe('tool call assembly', () => {
     ]);
   });
   it('rejects unbounded, sparse, missing-ID and duplicate calls', () => {
-    expect(() => new ToolCallAssembler().add({ index: 4 })).toThrow();
+    expect(() => new ToolCallAssembler().add({ index: 128 })).toThrow();
     const sparse = new ToolCallAssembler();
     sparse.add({ index: 1, id: 'a', name: 'read_file' });
     expect(() => sparse.finish()).toThrow();
@@ -24,5 +24,11 @@ describe('tool call assembly', () => {
     duplicate.add({ index: 1, id: 'a', name: 'read_file' });
     expect(() => duplicate.finish()).toThrow();
     expect(() => new ToolCallAssembler().add({ index: 0, arguments: 'x'.repeat(17000) })).toThrow();
+  });
+  it('accepts more than four parallel calls within the agent tool budget', () => {
+    const assembler = new ToolCallAssembler();
+    for (let index = 0; index < 12; index++)
+      assembler.add({ index, id: `call-${index}`, name: 'read_file', arguments: '{}' });
+    expect(assembler.finish()).toHaveLength(12);
   });
 });

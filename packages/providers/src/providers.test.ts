@@ -248,6 +248,74 @@ describe('provider adapters', () => {
     expect(events.filter((e) => e.type === 'tool_call_delta')).toHaveLength(2);
     expect(events.at(-1)).toEqual({ type: 'finished', reason: 'tool_calls' });
   });
+  it('assigns a stable index when a compatible server omits tool call indexes', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      response(
+        data({
+          choices: [
+            {
+              delta: {
+                tool_calls: [{ id: 'call_1', function: { name: 'read_file', arguments: '{"pa' } }],
+              },
+            },
+          ],
+        }) +
+          data({
+            choices: [
+              {
+                delta: { tool_calls: [{ function: { arguments: 'th":"a"}' } }] },
+              },
+            ],
+          }) +
+          data({
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    { id: 'call_2', function: { name: 'list_files', arguments: '{"pa' } },
+                  ],
+                },
+              },
+            ],
+          }) +
+          data({
+            choices: [
+              {
+                delta: { tool_calls: [{ function: { arguments: 'th":"."}' } }] },
+                finish_reason: 'tool_calls',
+              },
+            ],
+          }) +
+          'data: [DONE]\n\n',
+      ),
+    );
+    const events = await collect(
+      new ChatCompletionProvider(
+        'llama-server',
+        'http://localhost:8080/v1',
+        null,
+        fetcher,
+      ).generate(request(), signal()),
+    );
+    expect(events.filter((event) => event.type === 'tool_call_delta')).toEqual([
+      {
+        type: 'tool_call_delta',
+        index: 0,
+        id: 'call_1',
+        name: 'read_file',
+        arguments: '{"pa',
+      },
+      { type: 'tool_call_delta', index: 0, arguments: 'th":"a"}' },
+      {
+        type: 'tool_call_delta',
+        index: 1,
+        id: 'call_2',
+        name: 'list_files',
+        arguments: '{"pa',
+      },
+      { type: 'tool_call_delta', index: 1, arguments: 'th":"."}' },
+    ]);
+  });
   it.each([
     ['missing DONE', data({ choices: [{ delta: { content: 'partial' }, finish_reason: 'stop' }] })],
     ['mid-stream error', data({ error: { message: 'raw private detail' } })],

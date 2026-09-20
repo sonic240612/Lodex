@@ -139,6 +139,9 @@ export class ChatCompletionProvider implements InferenceProvider {
     const config = request.config;
     const splitter = new ThinkingSplitter();
     let structuredThinking = false;
+    const toolIndexesById = new Map<string, number>();
+    const implicitToolIndexes: number[] = [];
+    let nextToolIndex = 0;
     const response = await this.fetchResponse('/chat/completions', {
       method: 'POST',
       headers: this.headers(),
@@ -264,13 +267,26 @@ export class ChatCompletionProvider implements InferenceProvider {
         yield { type: part.thinking ? 'reasoning_delta' : 'text_delta', text: part.text };
       }
       if (Array.isArray(delta.tool_calls)) {
-        for (const item of delta.tool_calls) {
+        for (const [position, item] of delta.tool_calls.entries()) {
           const call = object(item),
             fn = object(call.function);
+          const id = typeof call.id === 'string' ? call.id : undefined;
+          const explicitIndex =
+            typeof call.index === 'number' && Number.isInteger(call.index) && call.index >= 0
+              ? call.index
+              : undefined;
+          const index =
+            explicitIndex ??
+            (id
+              ? (toolIndexesById.get(id) ?? nextToolIndex)
+              : (implicitToolIndexes[position] ?? nextToolIndex));
+          nextToolIndex = Math.max(nextToolIndex, index + 1);
+          implicitToolIndexes[position] = index;
+          if (id) toolIndexesById.set(id, index);
           yield {
             type: 'tool_call_delta',
-            index: typeof call.index === 'number' ? call.index : -1,
-            ...(typeof call.id === 'string' ? { id: call.id } : {}),
+            index,
+            ...(id ? { id } : {}),
             ...(typeof fn.name === 'string' ? { name: fn.name } : {}),
             ...(typeof fn.arguments === 'string' ? { arguments: fn.arguments } : {}),
           };

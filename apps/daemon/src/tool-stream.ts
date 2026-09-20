@@ -2,7 +2,7 @@ import { AppError, type ToolCall } from '@lodex/contracts';
 export class ToolCallAssembler {
   private calls = new Map<number, ToolCall>();
   add(event: { index: number; id?: string; name?: string; arguments?: string }): ToolCall {
-    if (!Number.isInteger(event.index) || event.index < 0 || event.index > 3)
+    if (!Number.isInteger(event.index) || event.index < 0 || event.index > 127)
       throw new AppError('TOOL_FORMAT', '도구 호출 번호가 잘못되었습니다.');
     const call = this.calls.get(event.index) ?? { id: '', name: '', arguments: '' };
     if (event.id && event.id !== call.id) call.id += event.id;
