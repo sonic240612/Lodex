@@ -152,7 +152,7 @@ button {
   font-weight: 650;
 }
 .version {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--muted);
   border: 1px solid var(--border);
   border-radius: 4px;
@@ -193,12 +193,12 @@ button {
   background: var(--surface-hover);
 }
 .new-chat span {
-  font-size: 9px;
+  font-size: 11px;
   color: var(--subtle);
   margin-left: auto;
 }
 .nav-caption {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--subtle);
   letter-spacing: 0.5px;
   margin: 27px 12px 9px;
@@ -467,7 +467,7 @@ button {
 .local-card small {
   display: block;
   color: var(--subtle);
-  font-size: 9px;
+  font-size: 11px;
   margin-top: 3px;
 }
 .status-dot {
@@ -523,7 +523,7 @@ button {
   white-space: nowrap;
 }
 .profile-button small {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--subtle);
   display: block;
   margin-top: 2px;
@@ -584,7 +584,7 @@ button {
   border-radius: 7px;
   background: transparent;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 11px;
   white-space: nowrap;
 }
 .autopilot-toggle.is-on {
@@ -597,7 +597,7 @@ button {
   animation: pulse 1.4s infinite;
 }
 .mode-badge {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--muted);
   padding: 5px 8px;
   border: 1px solid var(--border);
@@ -607,7 +607,7 @@ button {
 .preview-banner {
   padding: 7px 20px;
   text-align: center;
-  font-size: 10px;
+  font-size: 11px;
   color: var(--accent);
   background: var(--accent-surface);
   border-bottom: 1px solid var(--border);
@@ -632,7 +632,7 @@ button {
   margin-bottom: 24px;
 }
 .eyebrow {
-  font-size: 9px;
+  font-size: 10px;
   letter-spacing: 1.9px;
   font-weight: 600;
   color: var(--subtle);
@@ -683,7 +683,7 @@ button {
   white-space: nowrap;
 }
 .suggestions span {
-  font-size: 10px;
+  font-size: 11px;
   margin-top: 5px;
   color: var(--subtle);
   white-space: nowrap;
@@ -693,7 +693,7 @@ button {
   align-items: center;
   gap: 5px;
   color: var(--subtle);
-  font-size: 9px;
+  font-size: 11px;
 }
 .messages {
   width: 100%;
@@ -718,7 +718,7 @@ button {
   font-weight: 550;
 }
 .message-label span {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--subtle);
   margin-left: 3px;
 }
@@ -858,7 +858,7 @@ button {
 }
 .message-status {
   display: block;
-  font-size: 10px;
+  font-size: 11px;
   color: var(--subtle);
   margin-top: 10px;
 }
@@ -906,11 +906,11 @@ button {
   flex-direction: column;
 }
 .permission-banner strong {
-  font-size: 11px;
+  font-size: 12px;
 }
 .permission-banner span {
   color: var(--muted);
-  font-size: 10px;
+  font-size: 11px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -961,7 +961,7 @@ button {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 10px;
+  font-size: 11px;
   color: var(--muted);
   padding: 5px 7px;
   border-radius: 6px;
@@ -970,7 +970,7 @@ button {
   background: var(--surface-hover);
 }
 .eco-tag {
-  font-size: 10px;
+  font-size: 11px;
   display: flex;
   align-items: center;
   gap: 4px;
@@ -980,7 +980,7 @@ button {
   flex: 1;
 }
 .composer-hint {
-  font-size: 9px;
+  font-size: 11px;
   color: var(--subtle);
 }
 .send-button {
@@ -1006,9 +1006,13 @@ button {
   display: flex;
   justify-content: space-between;
   gap: 8px;
-  font-size: 9px;
+  font-size: 11px;
+  line-height: 1.55;
   color: var(--subtle);
   padding: 10px 5px 0;
+}
+.composer-footer > span:first-child {
+  min-width: 0;
 }
 .metrics-mini {
   display: flex;
@@ -1060,7 +1064,7 @@ button {
 }
 .small-badge {
   display: inline-block;
-  font-size: 9px;
+  font-size: 10px;
   border: 1px solid var(--border);
   border-radius: 4px;
   padding: 1px 5px;
@@ -1074,7 +1078,7 @@ button {
   padding: 24px 21px 22px;
 }
 .section-label {
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.65px;
   font-weight: 550;
   color: var(--muted);
@@ -1100,7 +1104,7 @@ button {
   margin: 25px 0 11px;
 }
 .task-heading > span:last-child {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--subtle);
   font-variant-numeric: tabular-nums;
 }
@@ -1216,7 +1220,7 @@ button {
   background: var(--surface-hover);
 }
 .subtle-note {
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.8;
   color: var(--subtle);
   margin-top: 12px;
@@ -1287,7 +1291,7 @@ button {
 }
 .activity-card summary small {
   float: right;
-  font-size: 10px;
+  font-size: 11px;
   margin-left: 12px;
 }
 .activity-dot {
@@ -1341,7 +1345,7 @@ button {
   display: flex;
   justify-content: space-between;
   margin: 10px 0;
-  font-size: 11px;
+  font-size: 12px;
 }
 .metrics-list dt {
   color: var(--subtle);
@@ -1367,7 +1371,7 @@ button {
   font-weight: 500;
 }
 .upcoming p {
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.7;
   margin-top: 4px;
 }
@@ -1453,7 +1457,7 @@ button {
   width: 100%;
 }
 .field small {
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.8;
   color: var(--subtle);
 }
@@ -1491,14 +1495,14 @@ button {
   font-size: 11px;
 }
 .field .key-ok {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--accent);
 }
 .check-field {
   display: flex;
   align-items: flex-start;
   gap: 7px;
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.8;
   color: var(--muted);
 }
@@ -1541,7 +1545,7 @@ input[type='checkbox'] {
   color: var(--accent);
 }
 .eco-setting p {
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.8;
   color: var(--subtle);
   margin-top: 7px;
@@ -1559,7 +1563,7 @@ input[type='checkbox'] {
   gap: 15px;
 }
 .dialog-footer > span {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--subtle);
 }
 .primary-button {
@@ -1658,7 +1662,7 @@ input[type='checkbox'] {
     padding: 15px 12px;
   }
   .suggestions span {
-    font-size: 9px;
+    font-size: 10px;
   }
   .new-chat span {
     display: none;
@@ -1724,17 +1728,17 @@ input[type='checkbox'] {
     min-height: 105px;
   }
   .suggestions strong {
-    font-size: 10px;
+    font-size: 11px;
   }
   .suggestions span {
-    font-size: 8px;
+    font-size: 10px;
     white-space: normal;
   }
   .welcome-note {
-    font-size: 8px;
+    font-size: 10px;
   }
   .composer-footer {
-    font-size: 8px;
+    font-size: 11px;
   }
   .settings-body,
   .dialog-header,
@@ -1743,7 +1747,7 @@ input[type='checkbox'] {
     padding-right: 18px;
   }
   .provider-options > button {
-    font-size: 10px;
+    font-size: 11px;
     gap: 4px;
   }
   .provider-options > button svg {
@@ -1879,7 +1883,7 @@ input[type='checkbox'] {
 }
 .resource-heading span {
   color: var(--muted);
-  font-size: 10px;
+  font-size: 11px;
 }
 .resource-grid {
   display: grid;
@@ -1899,7 +1903,7 @@ input[type='checkbox'] {
 .resource-grid article > small {
   overflow: hidden;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
