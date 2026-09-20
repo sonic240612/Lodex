@@ -300,6 +300,7 @@ export const commandSchema = z.discriminatedUnion('type', [
   z.strictObject({ ...envelope, ...target, type: z.literal('save_plan'), plan: planSchema }),
   z.strictObject({ ...envelope, ...target, type: z.literal('set_mode'), mode: modeSchema }),
   z.strictObject({ ...envelope, ...target, type: z.literal('compact_context') }),
+  z.strictObject({ ...envelope, ...target, type: z.literal('quick_compact_context') }),
   z.strictObject({
     ...envelope,
     ...target,
@@ -401,6 +402,9 @@ export const contextCompactionSchema = z.strictObject({
   compactedMessageCount: z.number().int().positive(),
   originalEstimateTokens: z.number().int().nonnegative(),
   compactedEstimateTokens: z.number().int().nonnegative(),
+  /** Older checkpoints omit this field and are treated as fast/extractive compactions. */
+  method: z.enum(['semantic', 'fast']).optional(),
+  model: z.string().trim().min(1).max(200).optional(),
 });
 export type ContextCompaction = z.infer<typeof contextCompactionSchema>;
 export interface SubagentRecord {

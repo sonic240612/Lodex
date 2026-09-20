@@ -190,6 +190,10 @@ async function previewCommand(command: Command): Promise<CommandResult> {
       if (session.autopilot) session.autopilot.status = 'cancelled';
     } else if (command.type === 'set_mode') session.mode = command.mode;
     else if (command.type === 'compact_context') {
+      throw new Error(
+        'LLM 컨텍스트 압축은 데스크톱 앱에서 실제 모델을 연결한 뒤 사용할 수 있습니다.',
+      );
+    } else if (command.type === 'quick_compact_context') {
       const complete = session.messages.filter((message) => message.status === 'complete');
       if (!complete.length) throw new Error('압축할 완료된 대화 기록이 없습니다.');
       session.contextCompaction = {
@@ -202,6 +206,7 @@ async function previewCommand(command: Command): Promise<CommandResult> {
         compactedMessageCount: complete.length,
         originalEstimateTokens: 0,
         compactedEstimateTokens: 0,
+        method: 'fast',
       };
     } else if (command.type === 'configure_execution')
       throw new Error('명령 실행은 데스크톱 앱에서 설정할 수 있습니다.');

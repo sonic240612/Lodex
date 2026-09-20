@@ -1166,6 +1166,14 @@ button {
   background: var(--surface);
   cursor: pointer;
 }
+.context-compaction-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.compact-context-button.secondary {
+  color: var(--muted);
+}
 .compact-context-button:hover:not(:disabled) {
   border-color: var(--accent);
 }
@@ -1178,6 +1186,7 @@ button {
   margin-top: 9px;
   color: var(--subtle);
   line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 .error-banner {
   background: #ad4b361a;

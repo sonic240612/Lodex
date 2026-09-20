@@ -268,13 +268,13 @@ export function App() {
       setBusy(false);
     }
   }
-  async function compactContext() {
+  async function compactContext(quick = false) {
     if (!session || busy || running || !workspace.connected) return;
     setBusy(true);
     setError('');
     try {
       const result = await sendCommand({
-        type: 'compact_context',
+        type: quick ? 'quick_compact_context' : 'compact_context',
         sessionId: session.id,
         expectedVersion: session.version,
       });
@@ -1004,19 +1004,36 @@ export function App() {
                     </dd>
                   </div>
                 </dl>
-                <button
-                  type="button"
-                  className="compact-context-button"
-                  disabled={
-                    !session?.messages.some((message) => message.status === 'complete') ||
-                    busy ||
-                    running
-                  }
-                  onClick={() => void compactContext()}
-                >
-                  <Icon name="leaf" size={14} />
-                  지금 컨텍스트 압축
-                </button>
+                <div className="context-compaction-actions">
+                  <button
+                    type="button"
+                    className="compact-context-button"
+                    disabled={
+                      !session?.messages.some((message) => message.status === 'complete') ||
+                      busy ||
+                      running
+                    }
+                    onClick={() => void compactContext(false)}
+                    title="현재 모델이 목표, 결정, 진행 상태를 요약합니다."
+                  >
+                    <Icon name="leaf" size={14} />
+                    컨텍스트 압축
+                  </button>
+                  <button
+                    type="button"
+                    className="compact-context-button secondary"
+                    disabled={
+                      !session?.messages.some((message) => message.status === 'complete') ||
+                      busy ||
+                      running
+                    }
+                    onClick={() => void compactContext(true)}
+                    title="모델 호출 없이 기존 규칙으로 즉시 압축합니다."
+                  >
+                    <Icon name="bolt" size={14} />
+                    빠른 압축
+                  </button>
+                </div>
                 {session?.contextCompaction && (
                   <small>
                     최근 압축: {session.contextCompaction.compactedMessageCount}개 메시지 ·{' '}
@@ -1024,7 +1041,9 @@ export function App() {
                       ? 'ECO 자동'
                       : session.contextCompaction.reason === 'automatic'
                         ? '용량 초과 자동'
-                        : '수동'}
+                        : session.contextCompaction.method === 'semantic'
+                          ? `LLM 수동${session.contextCompaction.model ? ` · ${session.contextCompaction.model}` : ''}`
+                          : '빠른 수동'}
                   </small>
                 )}
               </div>

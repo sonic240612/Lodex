@@ -165,7 +165,12 @@ describe('authenticated daemon integration', () => {
       capabilities: async () => ({ tools: true, streaming: true }),
       async *generate(request) {
         requests.push(request);
-        yield { type: 'text_delta', text: 'done' };
+        yield {
+          type: 'text_delta',
+          text: request.messages[0]?.content.includes('context checkpoint')
+            ? '## Goal\nContinue the saved task.\n\n## Progress\nEarlier work and exact constraints are preserved.'
+            : 'done',
+        };
         yield { type: 'finished', reason: 'stop' };
       },
     };
@@ -220,8 +225,29 @@ describe('authenticated daemon integration', () => {
     );
     expect(manualResponse.status).toBe(200);
     const manuallyCompacted = ((await manualResponse.json()) as CommandResult).session;
-    expect(manuallyCompacted.contextCompaction).toMatchObject({ reason: 'manual' });
-    expect((await app.store.session(session.id)).contextCompaction?.reason).toBe('manual');
+    expect(manuallyCompacted.contextCompaction).toMatchObject({
+      reason: 'manual',
+      method: 'semantic',
+      model: 'fixture',
+    });
+    expect(requests).toHaveLength(2);
+    expect(requests[1]!.tools).toBeUndefined();
+    expect(requests[1]!.messages[0]?.content).toContain('## Critical context');
+    const quickResponse = await app.command(
+      makeCommand({
+        type: 'quick_compact_context',
+        sessionId: session.id,
+        expectedVersion: manuallyCompacted.version,
+      }),
+    );
+    expect(quickResponse.status).toBe(200);
+    expect(((await quickResponse.json()) as CommandResult).session.contextCompaction).toMatchObject(
+      {
+        reason: 'manual',
+        method: 'fast',
+      },
+    );
+    expect(requests).toHaveLength(2);
   });
 
   it.each(['pass', 'fail', 'budget', 'no_progress'] as const)(

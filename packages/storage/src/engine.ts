@@ -717,7 +717,7 @@ export class StorageEngine {
           if (session.run?.status === 'running' && session.autopilot?.runId === session.run.id)
             throw new AppError('BUSY', 'Autopilot을 중지한 뒤 실행 계획을 편집하세요.', 409);
           session.plan = command.plan;
-        } else if (command.type === 'compact_context') {
+        } else if (command.type === 'compact_context' || command.type === 'quick_compact_context') {
           if (session.run?.status === 'running')
             throw new AppError('BUSY', '응답이 끝난 뒤 컨텍스트를 압축하세요.', 409);
           acceptCompaction();

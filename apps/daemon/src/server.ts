@@ -36,7 +36,12 @@ import {
 } from '@lodex/contracts';
 import { Store } from '@lodex/storage';
 import { ChatCompletionProvider, DemoProvider } from '@lodex/providers';
-import { compileContext, type CompiledContext } from '@lodex/context';
+import {
+  compileContext,
+  finishSemanticCompaction,
+  prepareSemanticCompaction,
+  type CompiledContext,
+} from '@lodex/context';
 import {
   inspectProject,
   projectTools,
@@ -779,7 +784,7 @@ export async function startServer(options: ServerOptions) {
           ? skillCatalog(selectedSkills, { maxBytes: session.config.eco ? 3000 : 6000 })
           : undefined,
       );
-    } else if (command.type === 'compact_context') {
+    } else if (command.type === 'compact_context' || command.type === 'quick_compact_context') {
       const session = await store.session(command.sessionId);
       if (command.expectedVersion !== session.version)
         throw new AppError(
@@ -790,6 +795,48 @@ export async function startServer(options: ServerOptions) {
       context = compileContext(session, '', [], undefined, { forceCompaction: true });
       if (!context.compaction)
         throw new AppError('COMPACTION_EMPTY', '압축할 완료된 대화 기록이 없습니다.');
+      if (command.type === 'compact_context') {
+        const resolved = { ...session, config: resolveModelConfig(session) };
+        if (resolved.config.provider === 'demo')
+          throw new AppError(
+            'COMPACTION_MODEL_REQUIRED',
+            'LLM 컨텍스트 압축에는 실제 모델 연결이 필요합니다. 빠른 압축은 모델 없이 사용할 수 있습니다.',
+          );
+        const preparation = prepareSemanticCompaction(resolved);
+        let summary = '',
+          finishReason: string | null = null,
+          toolCall = false;
+        const signal = AbortSignal.timeout(120_000);
+        try {
+          for await (const event of inference
+            .provider(resolved)
+            .generate(preparation.request, signal)) {
+            if (event.type === 'text_delta') summary += event.text;
+            else if (event.type === 'tool_call_delta') toolCall = true;
+            else if (event.type === 'finished') finishReason = event.reason;
+            else if (event.type === 'error') throw new AppError(event.code, event.message, 502);
+          }
+        } catch (error) {
+          throw error instanceof AppError
+            ? error
+            : new AppError(
+                'COMPACTION_MODEL_FAILED',
+                'LLM 컨텍스트 압축에 실패했습니다. 연결을 확인하거나 빠른 압축을 사용하세요.',
+                502,
+              );
+        }
+        if (finishReason !== 'stop' || toolCall)
+          throw new AppError(
+            'COMPACTION_MODEL_INVALID',
+            '모델이 정상적인 압축 요약을 완료하지 않았습니다. 빠른 압축을 사용하세요.',
+            502,
+          );
+        context.compaction = finishSemanticCompaction(
+          preparation.fallback,
+          summary,
+          resolved.config.model,
+        );
+      } else context.compaction = { ...context.compaction, method: 'fast' };
     }
     const result = await store.apply(command, context?.manifest, attachment, context?.compaction);
     if (command.type === 'attach_mcp_content' && !result.replayed)
