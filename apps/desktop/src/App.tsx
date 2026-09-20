@@ -11,10 +11,11 @@ import {
   type AgentRoutingConfig,
   resolveModelConfig,
   autopilotLimitsSchema,
-  activityProposal,
+  defaultPermissionMode,
+  type PermissionMode,
 } from '@lodex/contracts';
 import {
-  editAction,
+  approvalAction,
   models,
   nativeDesktop,
   saveKey,
@@ -57,6 +58,11 @@ const WorktreeManager = lazy(() =>
 const providerName = (provider: string) =>
   provider === 'openrouter' ? 'OpenRouter' : provider === 'demo' ? '데모' : 'llama-server';
 const messageError = (error: unknown) => (error instanceof Error ? error.message : String(error));
+const permissionLabel: Record<PermissionMode, string> = {
+  ask: '승인 요청',
+  auto: '대신 승인',
+  full: '전체 접근',
+};
 
 export function App() {
   const workspace = useWorkspace();
@@ -69,6 +75,8 @@ export function App() {
   const [skillManager, setSkillManager] = useState(false);
   const [mcpManager, setMcpManager] = useState(false);
   const [projectDialog, setProjectDialog] = useState(false);
+  const [permissionMenu, setPermissionMenu] = useState(false);
+  const [confirmFullAccess, setConfirmFullAccess] = useState(false);
   const [showActivities, setShowActivities] = useState(() => {
     try {
       return localStorage.getItem('lodex.showActivities') !== 'false';
@@ -101,11 +109,10 @@ export function App() {
       ? 'openrouter'
       : config.provider;
   const running = session?.run?.status === 'running';
-  const autopilotOn = session?.autoApprove === true;
+  const permissionMode = session?.permissionMode ?? defaultPermissionMode();
   const pendingApproval = session?.messages
     .flatMap((message) => message.activities ?? [])
-    .map((activity) => ({ activity, edit: activityProposal(activity) }))
-    .find((entry) => entry.edit?.status === 'proposed');
+    .find((activity) => activity.approval?.status === 'pending');
   const project = workspace.projects.find((p) => p.id === workspace.selectedProjectId);
   const visibleSessions = workspace.sessions.filter(
     (s) => (s.projectId ?? null) === workspace.selectedProjectId,
@@ -261,7 +268,7 @@ export function App() {
       setBusy(false);
     }
   }
-  async function toggleAutopilot() {
+  async function changePermissionMode(value: PermissionMode) {
     if (!session || busy || !workspace.connected) {
       setError('먼저 대화를 만드세요.');
       return;
@@ -270,31 +277,33 @@ export function App() {
     setError('');
     try {
       const result = await sendCommand({
-        type: 'set_auto_approve',
+        type: 'set_permission_mode',
         sessionId: session.id,
-        enabled: !autopilotOn,
+        expectedVersion: session.version,
+        mode: value,
       });
       workspace.upsert(result.session);
+      setPermissionMenu(false);
     } catch (failure) {
       setError(messageError(failure));
     } finally {
       setBusy(false);
     }
   }
-  async function decideApproval(action: 'apply' | 'reject') {
-    if (!session || !pendingApproval?.edit || busy) return;
+  async function decideApproval(action: 'approve' | 'reject') {
+    if (!session || !pendingApproval || busy) return;
     setBusy(true);
     setError('');
     try {
-      let updated = await editAction({
+      let updated = await approvalAction({
         sessionId: session.id,
         expectedVersion: session.version,
-        activityId: pendingApproval.activity.id,
+        activityId: pendingApproval.id,
         action,
       });
       workspace.upsert(updated);
       if (
-        action === 'apply' &&
+        action === 'approve' &&
         updated.autopilot?.goalDriven &&
         updated.autopilot.status === 'paused'
       ) {
@@ -740,14 +749,19 @@ export function App() {
           )}
         </div>
         <div className="composer-area">
-          {pendingApproval?.edit && (
-            <div className="permission-banner" role="alertdialog" aria-label="파일 변경 권한 요청">
+          {pendingApproval?.approval && (
+            <div className="permission-banner" role="alertdialog" aria-label="작업 권한 요청">
               <div>
-                <strong>파일 변경 권한 요청</strong>
+                <strong>
+                  {pendingApproval.approval.kind === 'file'
+                    ? '파일 변경 권한 요청'
+                    : pendingApproval.approval.kind === 'command'
+                      ? '명령 실행 권한 요청'
+                      : 'MCP 작업 권한 요청'}
+                </strong>
                 <span>
-                  {'files' in pendingApproval.edit
-                    ? `${pendingApproval.edit.files.length}개 파일 변경`
-                    : pendingApproval.edit.path}
+                  {pendingApproval.approval.reason} ·{' '}
+                  {pendingApproval.arguments || pendingApproval.label}
                 </span>
               </div>
               <button disabled={busy} onClick={() => void decideApproval('reject')}>
@@ -756,7 +770,7 @@ export function App() {
               <button
                 className="permission-allow"
                 disabled={busy || mode === 'plan'}
-                onClick={() => void decideApproval('apply')}
+                onClick={() => void decideApproval('approve')}
               >
                 수락
               </button>
@@ -818,18 +832,50 @@ export function App() {
                 {providerName(config.provider)}
                 <Icon name="down" size={12} />
               </button>
-              <button
-                type="button"
-                className={`autopilot-toggle ${autopilotOn ? 'is-on' : ''}`}
-                aria-label={`Autopilot ${autopilotOn ? '끄기' : '켜기'}`}
-                aria-pressed={autopilotOn}
-                disabled={!session || busy || running || !workspace.connected}
-                title="파일 수정안 자동 승인"
-                onClick={() => void toggleAutopilot()}
-              >
-                <span className="status-dot" />
-                Autopilot {autopilotOn ? 'ON' : 'OFF'}
-              </button>
+              <div className="permission-control">
+                <button
+                  type="button"
+                  className={`autopilot-toggle permission-${permissionMode}`}
+                  aria-label={`Autopilot 권한: ${permissionLabel[permissionMode]}`}
+                  aria-haspopup="menu"
+                  aria-expanded={permissionMenu}
+                  disabled={!session || busy || running || !workspace.connected}
+                  title="작업 승인 정책 선택"
+                  onClick={() => setPermissionMenu((open) => !open)}
+                >
+                  <span className="status-dot" />
+                  Autopilot · {permissionLabel[permissionMode]}
+                  <Icon name="down" size={12} />
+                </button>
+                {permissionMenu && (
+                  <div className="permission-menu" role="menu" aria-label="Autopilot 권한 단계">
+                    {(['ask', 'auto', 'full'] as const).map((value) => (
+                      <button
+                        type="button"
+                        role="menuitemradio"
+                        aria-checked={permissionMode === value}
+                        className={permissionMode === value ? 'selected' : ''}
+                        key={value}
+                        onClick={() => {
+                          setPermissionMenu(false);
+                          if (value === 'full' && permissionMode !== 'full')
+                            setConfirmFullAccess(true);
+                          else void changePermissionMode(value);
+                        }}
+                      >
+                        <strong>{permissionLabel[value]}</strong>
+                        <span>
+                          {value === 'ask'
+                            ? '변경과 외부 작업 전에 확인'
+                            : value === 'auto'
+                              ? '일반 작업은 자동, 위험 작업은 확인'
+                              : '호스트와 네트워크를 추가 확인 없이 사용'}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
               {config.eco && (
                 <span className="eco-tag">
                   <Icon name="leaf" size={14} />
@@ -871,7 +917,11 @@ export function App() {
                     ? '프로젝트 파일 전송이 꺼져 있습니다. 설정에서 허용할 수 있습니다.'
                     : mode === 'plan'
                       ? '파일을 읽고 계획을 제안합니다. 파일 변경은 Build에서 가능합니다.'
-                      : '파일 탐색과 수정안을 사용할 수 있습니다. 변경은 검토 후 적용합니다.'
+                      : permissionMode === 'ask'
+                        ? '변경과 실행은 승인 후 진행합니다.'
+                        : permissionMode === 'auto'
+                          ? '일반 작업은 자동 승인하고 위험 작업은 확인합니다.'
+                          : '전체 접근으로 호스트 파일·명령·네트워크를 사용할 수 있습니다.'
                   : '프로젝트를 연결하면 파일을 살펴보며 작업할 수 있습니다.'}
             </span>
             <span className="metrics-mini">
@@ -986,6 +1036,15 @@ export function App() {
           )}
         </aside>
       )}
+      {confirmFullAccess && (
+        <FullAccessDialog
+          onClose={() => setConfirmFullAccess(false)}
+          onConfirm={() => {
+            setConfirmFullAccess(false);
+            void changePermissionMode('full');
+          }}
+        />
+      )}
       {modelManager && (
         <Suspense fallback={<div role="status">모델 관리 화면을 여는 중…</div>}>
           <ModelManager onClose={() => setModelManager(false)} onChoose={chooseLocalModel} />
@@ -1073,6 +1132,48 @@ export function App() {
         </Suspense>
       )}
     </div>
+  );
+}
+
+export function FullAccessDialog({
+  onClose,
+  onConfirm,
+}: {
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    dialog.current?.showModal();
+  }, []);
+  return (
+    <dialog
+      ref={dialog}
+      className="delete-dialog full-access-dialog"
+      aria-labelledby="full-access-title"
+      onCancel={onClose}
+      onClick={(event) => {
+        if (event.target === dialog.current) onClose();
+      }}
+    >
+      <h2 id="full-access-title">전체 접근을 사용하시겠어요?</h2>
+      <p>이 대화의 모델과 도구에 다음 권한을 추가 승인 없이 허용합니다.</p>
+      <ul>
+        <li>프로젝트 밖의 파일을 읽고 수정할 수 있습니다.</li>
+        <li>호스트 명령과 네트워크를 제한 없이 사용할 수 있습니다.</li>
+        <li>.env, SSH 키, 인증 파일을 읽을 수 있습니다.</li>
+        <li>OpenRouter 사용 시 파일 내용이나 명령 출력이 전송될 수 있습니다.</li>
+        <li>Telegram에서도 원격 전체 접근 작업을 실행할 수 있습니다.</li>
+      </ul>
+      <div className="dialog-actions">
+        <button type="button" onClick={onClose}>
+          취소
+        </button>
+        <button type="button" className="danger-button" onClick={onConfirm}>
+          전체 접근 사용
+        </button>
+      </div>
+    </dialog>
   );
 }
 

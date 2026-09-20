@@ -93,6 +93,7 @@ async function fixture() {
                 required: ['text'],
                 additionalProperties: false,
               },
+              annotations: { readOnlyHint: true },
             },
           ],
         };

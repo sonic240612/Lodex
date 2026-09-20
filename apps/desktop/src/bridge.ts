@@ -20,6 +20,8 @@ import {
   type DeleteSessionsResult,
   type DeleteSessions,
   type EditAction,
+  type ApprovalAction,
+  defaultPermissionMode,
   localUrlSchema,
   type RuntimeSnapshot,
   type LocalProfileInput,
@@ -167,6 +169,7 @@ async function previewCommand(command: Command): Promise<CommandResult> {
       config: { ...command.config, provider: 'demo', model: 'demo' },
       ...(command.routing ? { routing: command.routing } : {}),
       mode: command.mode,
+      permissionMode: defaultPermissionMode(),
       projectId: command.projectId,
       plan: defaultPlan(),
       messages: [],
@@ -176,7 +179,7 @@ async function previewCommand(command: Command): Promise<CommandResult> {
   } else {
     if (!session) throw new Error('대화를 찾을 수 없습니다.');
     if (command.type === 'save_plan') session.plan = command.plan;
-    else if (command.type === 'set_auto_approve') session.autoApprove = command.enabled;
+    else if (command.type === 'set_permission_mode') session.permissionMode = command.mode;
     else if (
       command.type === 'start_autopilot' ||
       command.type === 'start_goal' ||
@@ -393,6 +396,15 @@ export async function editAction(action: EditAction): Promise<Session> {
   const result = await invoke<{ session: Session }>('daemon_request', {
     method: 'POST',
     path: '/v1/edits',
+    body: action,
+  });
+  return result.session;
+}
+export async function approvalAction(action: ApprovalAction): Promise<Session> {
+  if (!nativeDesktop) throw new Error('실제 권한 결정은 데스크톱 앱에서 사용할 수 있습니다.');
+  const result = await invoke<{ session: Session }>('daemon_request', {
+    method: 'POST',
+    path: '/v1/approvals',
     body: action,
   });
   return result.session;

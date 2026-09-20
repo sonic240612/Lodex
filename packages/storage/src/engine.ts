@@ -41,12 +41,20 @@ import {
   mcpSelectionsSchema,
   mcpAttachmentSchema,
   type McpContextAttachment,
+  permissionModeSchema,
+  defaultPermissionMode,
+  type ApprovalAction,
 } from '@lodex/contracts';
 
 // Additive JSON fields are defaulted on all read paths, including old SSE events.
 function hydrate(session: Session): Session {
+  const permissionMode = permissionModeSchema.parse(
+    session.permissionMode ?? (session.autoApprove ? 'auto' : defaultPermissionMode()),
+  );
+  const { autoApprove: _legacyAutoApprove, ...stored } = session;
   return {
-    ...session,
+    ...stored,
+    permissionMode,
     mode: session.mode ?? 'build',
     routing: agentRoutingConfigSchema.parse(session.routing ?? {}),
     mcp: mcpSelectionsSchema.parse(session.mcp ?? []),
@@ -615,7 +623,7 @@ export class StorageEngine {
           updatedAt: now,
           config: command.config,
           routing: agentRoutingConfigSchema.parse(command.routing ?? {}),
-          autoApprove: false,
+          permissionMode: defaultPermissionMode(),
           mode: command.mode,
           skills: [],
           skillCloudConsent: false,
@@ -649,6 +657,11 @@ export class StorageEngine {
               message.status = 'cancelled';
               for (const activity of message.activities ?? []) {
                 if (activity.status === 'running') activity.status = 'cancelled';
+                if (activity.approval?.status === 'pending') {
+                  activity.approval.status = 'rejected';
+                  activity.approval.decidedBy = 'policy';
+                  activity.approval.decidedAt = now;
+                }
                 for (const child of activity.subagents ?? []) {
                   if (child.status === 'queued' || child.status === 'running') {
                     child.status = 'cancelled';
@@ -664,8 +677,10 @@ export class StorageEngine {
               }
             }
           }
-        } else if (command.type === 'set_auto_approve') {
-          session.autoApprove = command.enabled;
+        } else if (command.type === 'set_permission_mode') {
+          if (session.run?.status === 'running')
+            throw new AppError('BUSY', '응답이 끝난 뒤 Autopilot 권한을 변경하세요.', 409);
+          session.permissionMode = command.mode;
         } else if (command.type === 'stop_autopilot') {
           if (session.run?.status === 'running')
             throw new AppError('BUSY', '실행 중인 응답은 먼저 중지하세요.', 409);
@@ -877,6 +892,7 @@ export class StorageEngine {
               status: 'running',
               startedAt: now,
               finishedAt: null,
+              actor: command.actor,
               ...(context ? { context } : {}),
             };
             if (session.messages.length === 2)
@@ -926,6 +942,11 @@ export class StorageEngine {
             update.error ?? '실행이 멈췄습니다. 기록을 확인한 뒤 다시 실행할 수 있습니다.';
         }
         for (const activity of message.activities ?? []) {
+          if (activity.approval?.status === 'pending') {
+            activity.approval.status = 'rejected';
+            activity.approval.decidedBy = 'policy';
+            activity.approval.decidedAt = session.run.finishedAt!;
+          }
           for (const child of activity.subagents ?? []) {
             if (child.status === 'queued' || child.status === 'running') {
               child.status = update.status === 'cancelled' ? 'cancelled' : 'interrupted';
@@ -994,6 +1015,27 @@ export class StorageEngine {
         throw new AppError('EXECUTION_NOT_FOUND', '명령 실행 기록을 찾을 수 없습니다.', 409);
       activity.execution = execution;
       this.persist(session); // Also accepts late cancellation results; never loses a container owner.
+      return session;
+    });
+  }
+  decideApproval(action: ApprovalAction): Session {
+    return this.transaction(() => {
+      const session = this.session(action.sessionId);
+      if (session.version !== action.expectedVersion)
+        throw new AppError(
+          'VERSION_CONFLICT',
+          '대화가 변경되었습니다. 최신 권한 요청을 확인해 주세요.',
+          409,
+        );
+      const activity = session.messages
+        .flatMap((message) => message.activities ?? [])
+        .find((entry) => entry.id === action.activityId);
+      if (!activity?.approval || activity.approval.status !== 'pending')
+        throw new AppError('APPROVAL_NOT_FOUND', '대기 중인 권한 요청을 찾을 수 없습니다.', 404);
+      activity.approval.status = action.action === 'approve' ? 'approved' : 'rejected';
+      activity.approval.decidedBy = 'user';
+      activity.approval.decidedAt = new Date().toISOString();
+      this.persist(session);
       return session;
     });
   }

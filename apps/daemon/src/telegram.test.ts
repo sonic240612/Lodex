@@ -245,6 +245,40 @@ describe('durable Telegram channel', () => {
     expect(app.bot.sent[1]?.text).toContain('지원하지 않는 명령');
   });
 
+  it('allows a paired account to run a Full Access conversation remotely', async () => {
+    const app = await fixture();
+    await app.pair();
+    let session = (
+      await app.store.apply(
+        makeCommand({
+          type: 'set_mode',
+          sessionId: app.session.id,
+          expectedVersion: app.session.version,
+          mode: 'build',
+        }),
+      )
+    ).session;
+    session = (
+      await app.store.apply(
+        makeCommand({
+          type: 'set_permission_mode',
+          sessionId: session.id,
+          expectedVersion: session.version,
+          mode: 'full',
+        }),
+      )
+    ).session;
+    app.bot.push([update(2, '/ask inspect host')]);
+    await expect.poll(() => app.dispatch.mock.calls.length).toBe(1);
+    expect(app.dispatch.mock.calls[0]![0]).toMatchObject({
+      actor: 'telegram',
+      type: 'send_message',
+      sessionId: session.id,
+      content: 'inspect host',
+    });
+    expect((await app.store.session(session.id)).run?.actor).toBe('telegram');
+  });
+
   it('records uncertain sends without replay and retries only an explicit rate-limit rejection', async () => {
     const app = await fixture();
     await app.pair();

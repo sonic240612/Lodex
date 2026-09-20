@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
+import { lstat, realpath } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { relative } from 'node:path';
+import { isAbsolute, relative, resolve } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { setTimeout as delay } from 'node:timers/promises';
 import {
@@ -21,6 +22,15 @@ export const executionTool: ToolDefinition = {
     name: 'run_command',
     description:
       'Execute a shell command in the user-enabled Linux Docker container with the selected project mounted at /workspace. cwd is project-relative. Receives bounded output and an exit code; nonzero means failure. Files in the mounted project can be changed by commands. The image, network and resource limits are fixed by the user. stdin is written once then closed. No interactive terminal or background services. Never assume a proposed edit has been applied; inspect current files before testing.',
+    parameters: z.toJSONSchema(runCommandSchema),
+  },
+};
+export const hostExecutionTool: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'run_host_command',
+    description:
+      'FULL ACCESS ONLY. Execute a command directly on the user host with the user account, inherited environment, unrestricted filesystem and network. Windows uses PowerShell; macOS and Linux use /bin/sh. cwd may be project-relative or absolute. Output and duration remain bounded and cancellation terminates the owned process tree.',
     parameters: z.toJSONSchema(runCommandSchema),
   },
 };
@@ -118,6 +128,98 @@ export function runCli(
   });
 }
 export const dockerCli: DockerCli = (...args) => runCli('docker', ...args);
+
+export type HostCommandRunner = (
+  command: string,
+  cwd: string,
+  signal: AbortSignal,
+  input?: string,
+  progress?: (output: string) => void,
+) => Promise<CliResult>;
+
+export const hostCommandRunner: HostCommandRunner = (command, cwd, signal, input = '', progress) =>
+  new Promise((resolveResult, reject) => {
+    signal.throwIfAborted();
+    const windows = process.platform === 'win32';
+    const child = spawn(
+      windows ? 'powershell.exe' : '/bin/sh',
+      windows
+        ? ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command]
+        : ['-lc', command],
+      {
+        cwd,
+        windowsHide: true,
+        detached: !windows,
+        env: process.env,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      },
+    );
+    let output = '',
+      total = 0,
+      truncated = false,
+      settled = false;
+    let forceKill: NodeJS.Timeout | undefined;
+    const decoders = [new StringDecoder('utf8'), new StringDecoder('utf8')];
+    const terminate = () => {
+      if (!child.pid) return;
+      if (windows)
+        spawn('taskkill.exe', ['/pid', String(child.pid), '/t', '/f'], {
+          windowsHide: true,
+          stdio: 'ignore',
+        }).unref();
+      else {
+        try {
+          process.kill(-child.pid, 'SIGTERM');
+          forceKill ??= setTimeout(() => {
+            try {
+              process.kill(-child.pid!, 'SIGKILL');
+            } catch {
+              /* The process group already exited. */
+            }
+          }, 1000);
+          forceKill.unref();
+        } catch {
+          child.kill();
+        }
+      }
+    };
+    const append = (text: string) => {
+      total += Buffer.byteLength(text);
+      output += text;
+      if (output.length > 24000) {
+        output = output.slice(0, 8000) + '\n[output truncated]\n' + output.slice(-15000);
+        truncated = true;
+      }
+      progress?.(output);
+      if (total > 1048576) terminate();
+    };
+    const abort = () => terminate();
+    signal.addEventListener('abort', abort, { once: true });
+    child.stdout.on('data', (chunk: Buffer) => append(decoders[0]!.write(chunk)));
+    child.stderr.on('data', (chunk: Buffer) => append(decoders[1]!.write(chunk)));
+    child.stdin.on('error', () => undefined);
+    child.on('error', (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(forceKill);
+      signal.removeEventListener('abort', abort);
+      reject(error);
+    });
+    child.on('close', (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(forceKill);
+      signal.removeEventListener('abort', abort);
+      append(decoders[0]!.end() + decoders[1]!.end());
+      resolveResult({
+        code: signal.aborted || total > 1048576 ? null : code,
+        output,
+        truncated: truncated || total > 1048576,
+      });
+    });
+    child.stdin.end(input);
+    if (signal.aborted) terminate();
+  });
 
 function localDockerHost(host: string): boolean {
   return (
@@ -314,6 +416,7 @@ export async function executeCommand(options: {
   const id = randomUUID();
   const execution: CommandExecution = {
     id,
+    environment: 'docker',
     containerName: 'lodex-' + id,
     command: input.command,
     cwd: relative(root.path, cwd.path).replaceAll('\\', '/') || '.',
@@ -427,6 +530,82 @@ export async function executeCommand(options: {
         ? '컨테이너 종료를 확인하지 못했습니다. Docker를 실행한 뒤 정리해야 합니다.'
         : '컨테이너 생성 결과가 확인되지 않았습니다. Docker가 응답하면 정리를 다시 시도하세요. 목록에 없다는 이유만으로 정리가 완료되지는 않습니다.';
     }
+    execution.finishedAt = new Date().toISOString();
+    await pending;
+    await record(execution);
+  }
+  return execution;
+}
+
+export async function executeHostCommand(options: {
+  project: Project;
+  argumentsJson: string;
+  signal: AbortSignal;
+  record: (execution: CommandExecution) => Promise<void>;
+  runner?: HostCommandRunner;
+}): Promise<CommandExecution> {
+  const { project, signal: parent, record, runner = hostCommandRunner } = options;
+  const input = runCommandSchema.parse(JSON.parse(options.argumentsJson));
+  const requestedCwd = isAbsolute(input.cwd) ? input.cwd : resolve(project.path, input.cwd);
+  const cwd = await realpath(requestedCwd);
+  if (!(await lstat(cwd)).isDirectory())
+    throw new AppError('COMMAND_CWD', '명령의 작업 경로는 폴더여야 합니다.');
+  const id = randomUUID();
+  const execution: CommandExecution = {
+    id,
+    containerName: 'host-' + id,
+    environment: 'host',
+    command: input.command,
+    cwd,
+    status: 'starting',
+    startedAt: new Date().toISOString(),
+    exitCode: null,
+    output: '',
+    truncated: false,
+    cleanupPending: false,
+  };
+  await record(execution);
+  const signal = AbortSignal.any([parent, AbortSignal.timeout(input.timeoutMs)]);
+  let pending: Promise<void> = Promise.resolve(),
+    lastSave = 0;
+  try {
+    execution.status = 'running';
+    await record(execution);
+    const result = await runner(input.command, cwd, signal, input.stdin, (output) => {
+      execution.output = output;
+      if (performance.now() - lastSave > 250) {
+        lastSave = performance.now();
+        const copy = structuredClone(execution);
+        pending = pending.then(() => record(copy));
+        void pending.catch(() => undefined);
+      }
+    });
+    execution.output = result.output;
+    execution.truncated = result.truncated;
+    execution.exitCode = result.code;
+    execution.status = signal.aborted
+      ? parent.aborted
+        ? 'cancelled'
+        : 'failed'
+      : result.code === 0
+        ? 'completed'
+        : 'failed';
+    if (signal.aborted)
+      execution.error = parent.aborted
+        ? '사용자가 명령을 중지했습니다.'
+        : '명령 실행 시간이 초과되었습니다.';
+    else if (result.code === null)
+      execution.error = '출력 한도를 초과했거나 실행 결과를 확인하지 못했습니다.';
+  } catch (error) {
+    execution.status = parent.aborted ? 'cancelled' : 'failed';
+    execution.error = signal.aborted
+      ? parent.aborted
+        ? '사용자가 명령을 중지했습니다.'
+        : '명령 실행 시간이 초과되었습니다.'
+      : error instanceof AppError
+        ? error.message
+        : '호스트 명령 실행이 중단되었습니다. 결과를 확인하세요.';
+  } finally {
     execution.finishedAt = new Date().toISOString();
     await pending;
     await record(execution);

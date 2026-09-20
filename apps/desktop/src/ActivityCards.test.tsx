@@ -110,4 +110,35 @@ describe('activity disclosure', () => {
     expect(html).not.toContain('<script>');
     expect(html).not.toContain('Lodex');
   });
+  it('shows the permission decision and risk reason in the activity audit', () => {
+    const html = renderToStaticMarkup(
+      <ActivityCards
+        activities={[
+          {
+            id: 'approval',
+            kind: 'tool',
+            label: 'run_command',
+            status: 'completed',
+            text: 'rejected',
+            approval: {
+              kind: 'command',
+              target: 'npm install',
+              actor: 'desktop',
+              mode: 'auto',
+              risk: 'high',
+              reason: 'Docker 명령이 외부 네트워크에 접근할 수 있습니다.',
+              status: 'rejected',
+              decidedBy: 'user',
+              requestedAt: '2026-09-20T00:00:00.000Z',
+              decidedAt: '2026-09-20T00:00:01.000Z',
+            },
+          },
+        ]}
+      />,
+    );
+    expect(html).toContain('권한 · 대신 승인');
+    expect(html).toContain('사용자 거절');
+    expect(html).toContain('높은 위험');
+    expect(html).toContain('외부 네트워크');
+  });
 });

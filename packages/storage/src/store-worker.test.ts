@@ -1196,6 +1196,8 @@ describe('durable worker storage', () => {
             delete session.skills;
             delete session.skillCloudConsent;
             delete session.hasSkillHistory;
+            delete session.permissionMode;
+            session.autoApprove = true;
             db.prepare('UPDATE ' + table + ' SET ' + column + '=? WHERE ' + column + '=?').run(JSON.stringify(value), row.body);
           }
         }
@@ -1222,7 +1224,28 @@ describe('durable worker storage', () => {
       expect(session.skills).toEqual([]);
       expect(session.skillCloudConsent).toBe(false);
       expect(session.hasSkillHistory).toBe(false);
+      expect(session.permissionMode).toBe('auto');
+      expect(session.autoApprove).toBeUndefined();
     }
+  });
+  it('persists the selected permission mode across restart', async () => {
+    const { store, path } = await db();
+    const session = await create(store);
+    expect(session.permissionMode).toBe('ask');
+    const changed = (
+      await store.apply(
+        makeCommand({
+          type: 'set_permission_mode',
+          sessionId: session.id,
+          expectedVersion: session.version,
+          mode: 'full',
+        }),
+      )
+    ).session;
+    expect(changed.permissionMode).toBe('full');
+    await close(store);
+    const reopened = await open(path);
+    expect((await reopened.session(session.id)).permissionMode).toBe('full');
   });
   it('deduplicates identical commands and rejects altered reuse', async () => {
     const { store } = await db();
@@ -1289,11 +1312,37 @@ describe('durable worker storage', () => {
       }),
     );
     const run = sent.session.run!;
-    await store.updateRun({ sessionId: session.id, runId: run.id, text: '부분 응답' });
+    await store.updateRun({
+      sessionId: session.id,
+      runId: run.id,
+      text: '부분 응답',
+      activities: [
+        {
+          id: crypto.randomUUID(),
+          kind: 'tool',
+          label: 'run_command',
+          status: 'running',
+          text: '',
+          approval: {
+            kind: 'command',
+            target: 'npm test',
+            actor: 'desktop',
+            mode: 'ask',
+            risk: 'low',
+            reason: '프로젝트 명령을 실행합니다.',
+            status: 'pending',
+            requestedAt: new Date().toISOString(),
+          },
+        },
+      ],
+    });
     await close(store);
     const reopened = await open(path);
     expect((await reopened.session(session.id)).run?.status).toBe('interrupted');
     expect((await reopened.session(session.id)).messages.at(-1)?.content).toBe('부분 응답');
+    expect(
+      (await reopened.session(session.id)).messages.at(-1)?.activities?.[0]?.approval,
+    ).toMatchObject({ status: 'rejected', decidedBy: 'policy' });
     const seq = (await reopened.snapshot()).lastSeq;
     await close(reopened);
     const reopenedAgain = await open(path);

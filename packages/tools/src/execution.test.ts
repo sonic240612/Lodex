@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { defaultExecutionConfig, type CommandExecution } from '@lodex/contracts';
@@ -8,6 +8,7 @@ import {
   cleanupExecution,
   dockerEnvironment,
   executeCommand,
+  executeHostCommand,
   inspectDocker,
   runCli,
   type DockerCli,
@@ -55,6 +56,27 @@ async function project() {
   return inspectProject(dir);
 }
 describe('owned Docker command execution', () => {
+  it('records a host execution with an absolute cwd and bounded adapter result', async () => {
+    const selected = await project();
+    const outside = await mkdtemp(join(tmpdir(), 'lodex-host-cwd-'));
+    dirs.push(outside);
+    const records: CommandExecution[] = [];
+    const result = await executeHostCommand({
+      project: selected,
+      argumentsJson: JSON.stringify({ command: 'fixture', cwd: outside, timeoutMs: 1000 }),
+      signal: new AbortController().signal,
+      record: async (execution) => {
+        records.push(structuredClone(execution));
+      },
+      runner: async (command, cwd) => {
+        expect(command).toBe('fixture');
+        expect(cwd).toBe(await realpath(outside));
+        return { code: 0, output: 'ok', truncated: false };
+      },
+    });
+    expect(result).toMatchObject({ environment: 'host', status: 'completed', output: 'ok' });
+    expect(records.at(-1)).toMatchObject({ environment: 'host', status: 'completed' });
+  });
   it('uses a sanitized process environment and literal argv with bounded UTF-8 output', async () => {
     expect(
       dockerEnvironment({

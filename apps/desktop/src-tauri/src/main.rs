@@ -209,7 +209,8 @@ fn route_allowed(method: &str, path: &str) -> bool {
         | ("POST", "/v1/mcp/oauth/status")
         | ("POST", "/v1/mcp/oauth/cancel")
         | ("POST", "/v1/mcp/oauth/disconnect")
-        | ("POST", "/v1/edits") => true,
+        | ("POST", "/v1/edits")
+        | ("POST", "/v1/approvals") => true,
         ("GET", value)
             if value.starts_with("/v1/models?") || value.starts_with("/v1/execution/check?") =>
         {

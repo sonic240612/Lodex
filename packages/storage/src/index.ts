@@ -13,6 +13,7 @@ import {
   type DeleteSessions,
   type DeleteSessionsResult,
   type EditAction,
+  type ApprovalAction,
   type ChangeSet,
   type ChangeStatus,
   type CommandExecution,
@@ -158,6 +159,9 @@ export class Store {
     execution: CommandExecution,
   ): Promise<Session> {
     return this.call('recordExecution', sessionId, activityId, execution);
+  }
+  decideApproval(action: ApprovalAction): Promise<Session> {
+    return this.call('decideApproval', action);
   }
   recordSkillRead(
     sessionId: string,

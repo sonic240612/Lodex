@@ -38,6 +38,20 @@ export class RunMcp {
       resolveOAuthToken?: (config: McpConfig, signal: AbortSignal) => Promise<string | undefined>;
     },
   ) {}
+  permission(name: string) {
+    const selected = this.options.selections.find(
+      (value) => mcpToolName(value.server.id, value.selection.toolName) === name,
+    );
+    if (!selected) throw new AppError('MCP_TOOL', '이 대화에 허용되지 않은 MCP 도구입니다.', 403);
+    const annotations = selected.server.tools.find(
+      (tool) => tool.name === selected.selection.toolName,
+    )?.definition.annotations;
+    return {
+      readOnly: annotations?.readOnlyHint === true,
+      destructive: annotations?.destructiveHint === true,
+      openWorld: annotations?.openWorldHint === true,
+    };
+  }
   async call(options: {
     name: string;
     argumentsJson: string;

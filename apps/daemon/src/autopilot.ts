@@ -55,6 +55,35 @@ export function completeGoal(state: AutopilotState, argumentsJson: string) {
   return { completed: true, evidence };
 }
 
+export function autopilotVerificationRequest(
+  state: AutopilotState,
+  name: string,
+  argumentsJson: string,
+) {
+  if (name === 'verify_task') {
+    const input = taskInput.parse(JSON.parse(argumentsJson));
+    const task = readyAutopilotTasks(state).find((entry) => entry.id === input.taskId);
+    if (!task)
+      throw new AppError(
+        'TASK_NOT_READY',
+        '선택 범위의 선행 검증을 통과한 작업만 검증할 수 있습니다.',
+      );
+    return {
+      taskId: input.taskId as string | null,
+      command: task.verificationCommand?.trim() || undefined,
+      suppliedEvidence: input.evidence,
+    };
+  }
+  const input = goalInput.parse(JSON.parse(argumentsJson));
+  if (state.taskIds.some((id) => !state.completedTaskIds.includes(id)))
+    throw new AppError('GOAL_PENDING', '선택한 작업의 검증이 모두 통과해야 합니다.');
+  return {
+    taskId: null,
+    command: state.plan.verificationCommand?.trim() || undefined,
+    suppliedEvidence: input.evidence,
+  };
+}
+
 export async function verifyAutopilot(options: {
   state: AutopilotState;
   name: string;
@@ -66,27 +95,11 @@ export async function verifyAutopilot(options: {
   executor?: typeof executeCommand;
 }) {
   const { state, name } = options;
-  let taskId: string | null = null,
-    command: string | undefined,
-    suppliedEvidence: string | undefined;
-  if (name === 'verify_task') {
-    const input = taskInput.parse(JSON.parse(options.argumentsJson));
-    taskId = input.taskId;
-    suppliedEvidence = input.evidence;
-    const task = readyAutopilotTasks(state).find((task) => task.id === taskId);
-    if (!task)
-      throw new AppError(
-        'TASK_NOT_READY',
-        '선택 범위의 선행 검증을 통과한 작업만 검증할 수 있습니다.',
-      );
-    command = task.verificationCommand?.trim() || undefined;
-  } else {
-    const input = goalInput.parse(JSON.parse(options.argumentsJson));
-    suppliedEvidence = input.evidence;
-    if (state.taskIds.some((id) => !state.completedTaskIds.includes(id)))
-      throw new AppError('GOAL_PENDING', '선택한 작업의 검증이 모두 통과해야 합니다.');
-    command = state.plan.verificationCommand?.trim() || undefined;
-  }
+  const { taskId, command, suppliedEvidence } = autopilotVerificationRequest(
+    state,
+    name,
+    options.argumentsJson,
+  );
   if (!command || !options.project || !options.config || !options.record) {
     if (!suppliedEvidence)
       throw new AppError(

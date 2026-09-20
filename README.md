@@ -13,6 +13,7 @@ A desktop agent harness for local LLMs and OpenRouter.
 - Switch between Plan and Build, review AI plans, and edit task criteria and dependencies.
 - Run commands in an opt-in Docker container, with collapsible output and cancellation.
 - Run local Autopilot with task dependencies, saved verification commands, and explicit budgets.
+- Choose Ask, Approve for me, or Full Access per conversation; Plan always stays read-only.
 - Select local SKILL.md folders per conversation and load instructions only when needed.
 - Connect stdio or Streamable HTTP MCP servers and choose tools per conversation.
 - Adjust generation settings and see token usage, generation speed, and prefill speed.
@@ -46,9 +47,9 @@ Use **Role models** to set each role's connection and generation settings. Subag
 
 **Worktree** creates a separate branch and project from the current commit. Uncommitted changes stay in the original folder. Review and apply edits in the new project; merging and cleanup remain manual.
 
-Open a project conversation and expand **Command execution** in the plan panel. Select a local Linux Docker image with `/bin/sh`, check the engine and image, then enable project access. Commands run in Build mode. Network access is off by default; images are never downloaded automatically. Container integration is experimental; host shell and interactive PTY support are pending.
+Open a project conversation and expand **Command execution** in the plan panel. Docker commands run with the saved image and limits. Full Access adds host files, the host shell, inherited environment, and network access after a warning. Interactive PTY support is pending.
 
-For **Autopilot**, save task criteria and verification commands, enable the plan in model context, and choose the scope and budgets. Passing checks and manual checkboxes have separate records. File proposals pause for review; interrupted runs never restart automatically. Currently local models only.
+For **Autopilot**, save task criteria and verification commands, enable the plan in model context, and choose the scope and budgets. Passing checks and manual checkboxes have separate records. Interrupted runs never restart automatically.
 
 ## Skills & MCP
 
@@ -62,7 +63,7 @@ Keep API keys in `.env` using `LODEX_MCP_` references. OAuth supports pre-regist
 
 Create a bot with [BotFather](https://core.telegram.org/bots/tutorial#obtain-your-bot-token), paste its token in Telegram settings, and select a conversation. You can use `TELEGRAM_BOT_TOKEN` in `.env` instead. Enable transmission, generate a pairing code, and approve your numeric user/chat IDs in the desktop app.
 
-Use `/ask`, `/status`, `/plan`, or `/stop`. Build requests require separate permission. File approvals stay on desktop; Lodex must remain running. Uncertain message deliveries are recorded without automatic resend.
+Use `/ask`, `/status`, `/plan`, or `/stop`. Paired accounts can run a Full Access conversation remotely; other Build requests follow the Telegram permission setting. Lodex must remain running. Uncertain deliveries are recorded without automatic resend.
 
 ## Packages
 

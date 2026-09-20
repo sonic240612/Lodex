@@ -437,6 +437,10 @@ button {
   border-color: #bc3f49;
   color: white;
 }
+.full-access-dialog li {
+  margin: 7px 0;
+  line-height: 1.5;
+}
 .history-item span:first-child {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -587,14 +591,62 @@ button {
   font-size: 11px;
   white-space: nowrap;
 }
-.autopilot-toggle.is-on {
+.autopilot-toggle.permission-auto,
+.autopilot-toggle.permission-full {
   color: var(--accent);
   border-color: color-mix(in srgb, var(--accent) 45%, transparent);
   background: var(--accent-surface);
 }
-.autopilot-toggle.is-on .status-dot {
+.autopilot-toggle.permission-auto .status-dot,
+.autopilot-toggle.permission-full .status-dot {
   background: var(--accent);
-  animation: pulse 1.4s infinite;
+}
+.autopilot-toggle.permission-full {
+  color: #ef9a9a;
+  border-color: #bc3f4977;
+  background: #bc3f4917;
+}
+.autopilot-toggle.permission-full .status-dot {
+  background: #d95d67;
+}
+.permission-control {
+  position: relative;
+}
+.permission-menu {
+  position: absolute;
+  z-index: 20;
+  left: 0;
+  bottom: calc(100% + 8px);
+  width: min(310px, calc(100vw - 40px));
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: 0 16px 48px var(--shadow);
+}
+.permission-menu button {
+  width: 100%;
+  padding: 10px 11px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  color: var(--text);
+  background: transparent;
+  border-radius: 8px;
+  text-align: left;
+}
+.permission-menu button:hover,
+.permission-menu button.selected {
+  background: var(--surface);
+}
+.permission-menu strong {
+  font-size: 12px;
+}
+.permission-menu span {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
 }
 .mode-badge {
   font-size: 11px;

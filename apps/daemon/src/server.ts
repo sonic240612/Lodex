@@ -6,9 +6,11 @@ import {
   commandSchema,
   deleteSessionsSchema,
   editActionSchema,
+  approvalActionSchema,
   type ChangeStatus,
   type ChangeSet,
   type EditAction,
+  type ApprovalAction,
   type SecretSource,
   activityProposal,
   providerSchema,
@@ -44,6 +46,8 @@ import {
   writeChanges,
   checkChanges,
   executionTool,
+  hostExecutionTool,
+  hostFileTools,
   inspectDocker,
   cleanupExecution,
   executeCommand,
@@ -259,13 +263,21 @@ export async function startServer(options: ServerOptions) {
   };
   const reviewEdit = async (action: EditAction): Promise<Session> => {
     const session = await store.session(action.sessionId);
-    const edit = activityProposal(
-      session.messages
-        .flatMap((message) => message.activities ?? [])
-        .find((a) => a.id === action.activityId),
-    );
+    const activity = session.messages
+      .flatMap((message) => message.activities ?? [])
+      .find((entry) => entry.id === action.activityId);
+    const edit = activityProposal(activity);
     if (!edit || !session.projectId)
       throw new AppError('EDIT_NOT_FOUND', '수정안을 찾을 수 없습니다.', 404);
+    if (
+      activity?.approval?.status === 'pending' &&
+      (action.action === 'apply' || action.action === 'reject')
+    )
+      throw new AppError(
+        'APPROVAL_REQUIRED',
+        '진행 중인 작업은 범용 권한 요청에서 수락하거나 거절해 주세요.',
+        409,
+      );
     if (action.action === 'apply' && edit.status === 'applied') {
       finishApproval(session, action.activityId);
       return session;
@@ -357,6 +369,43 @@ export async function startServer(options: ServerOptions) {
     finishApproval(finished, action.activityId);
     return finished;
   };
+  const reviewApproval = async (action: ApprovalAction): Promise<Session> => {
+    const current = await store.session(action.sessionId);
+    const pendingActivity = current.messages
+      .flatMap((message) => message.activities ?? [])
+      .find((entry) => entry.id === action.activityId);
+    if (
+      pendingActivity?.approval?.kind !== 'file' &&
+      (!current.run ||
+        active.get(current.run.id)?.approval?.activityId !== action.activityId)
+    )
+      throw new AppError(
+        'APPROVAL_EXPIRED',
+        '이 명령 또는 MCP 요청은 더 이상 실행 중이 아니어서 결정할 수 없습니다.',
+        409,
+      );
+    const decided = await store.decideApproval(action);
+    const activity = decided.messages
+      .flatMap((message) => message.activities ?? [])
+      .find((entry) => entry.id === action.activityId);
+    if (!activity?.approval)
+      throw new AppError('APPROVAL_NOT_FOUND', '권한 요청을 찾을 수 없습니다.', 404);
+    if (activity.approval.kind === 'file') {
+      try {
+        return await reviewEdit({
+          sessionId: decided.id,
+          expectedVersion: decided.version,
+          activityId: action.activityId,
+          action: action.action === 'approve' ? 'apply' : 'reject',
+        });
+      } catch (error) {
+        decided.run && active.get(decided.run.id)?.approval?.reject(error);
+        throw error;
+      }
+    }
+    finishApproval(decided, action.activityId);
+    return decided;
+  };
   async function execute(
     session: Session,
     controller: AbortController,
@@ -424,9 +473,8 @@ export async function startServer(options: ServerOptions) {
         pricing: (config) => pricing.get(config.provider + '\0' + config.model),
         waitForApproval: (activityId, signal) =>
           waitForApproval(session.run!.id, session.id, activityId, signal),
-        autoApprove: async (activityId) => {
+        applyApprovedEdit: async (activityId) => {
           const current = await store.session(session.id);
-          if (!current.autoApprove) return;
           try {
             await serial(() =>
               reviewEdit({
@@ -677,6 +725,21 @@ export async function startServer(options: ServerOptions) {
         tools.some((tool) => tool.function.name === 'read_file')
       )
         tools.push(executionTool);
+      if (
+        session.mode !== 'plan' &&
+        session.permissionMode === 'full' &&
+        tools.some((tool) => tool.function.name === 'read_file')
+      )
+        tools.push(hostExecutionTool);
+      if (
+        session.permissionMode === 'full' &&
+        tools.some((tool) => tool.function.name === 'read_file')
+      )
+        tools.push(
+          ...hostFileTools.filter(
+            (tool) => session.mode !== 'plan' || tool.function.name !== 'host_write_file',
+          ),
+        );
       let content: string;
       if (command.type === 'start_autopilot') {
         const autopilot = prepareAutopilot(session, command.taskIds, command.limits);
@@ -1114,6 +1177,13 @@ export async function startServer(options: ServerOptions) {
           throw new AppError('INVALID_COMMAND', '파일 변경 요청이 올바르지 않습니다.');
         json(response, 200, {
           session: await serial(() => reviewEdit(parsed.data)),
+        });
+      } else if (request.method === 'POST' && url.pathname === '/v1/approvals') {
+        const parsed = approvalActionSchema.safeParse(await readJson(request));
+        if (!parsed.success)
+          throw new AppError('INVALID_COMMAND', '권한 결정 요청이 올바르지 않습니다.');
+        json(response, 200, {
+          session: await serial(() => reviewApproval(parsed.data)),
         });
       } else if (request.method === 'POST' && url.pathname === '/v1/sessions/delete') {
         const parsed = deleteSessionsSchema.safeParse(await readJson(request));

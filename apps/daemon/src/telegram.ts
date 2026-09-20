@@ -589,7 +589,11 @@ export class Telegram {
                 'TELEGRAM_COMMAND',
                 '지원하지 않는 명령입니다. /help 를 확인하세요.',
               );
-            if (session.mode !== 'plan' && !this.state.config.allowBuild)
+            if (
+              session.mode !== 'plan' &&
+              !this.state.config.allowBuild &&
+              session.permissionMode !== 'full'
+            )
               throw new AppError(
                 'TELEGRAM_BUILD',
                 'Build 원격 요청은 데스크톱에서 허용해야 합니다.',

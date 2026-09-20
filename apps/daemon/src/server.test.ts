@@ -181,6 +181,18 @@ describe('authenticated daemon integration', () => {
           )
           .then((r) => r.json())
       ).session;
+      session = (
+        await app
+          .command(
+            makeCommand({
+              type: 'set_permission_mode',
+              sessionId: session.id,
+              expectedVersion: session.version,
+              mode: 'auto',
+            }),
+          )
+          .then((r) => r.json())
+      ).session;
       const response = await app.command(
         makeCommand({
           type: 'start_autopilot',
@@ -289,6 +301,111 @@ describe('authenticated daemon integration', () => {
       expect.objectContaining({ taskId, passed: true, summary: expect.any(String) }),
       expect.objectContaining({ taskId: null, passed: true, summary: expect.any(String) }),
     ]);
+  });
+  it('continues the same response after a manual Docker command approval', async () => {
+    let round = 0,
+      executions = 0;
+    const provider: InferenceProvider = {
+      listModels: async () => [],
+      capabilities: async () => ({ tools: true, streaming: true }),
+      async *generate(request) {
+        if (round++ === 0) {
+          yield {
+            type: 'tool_call_delta',
+            index: 0,
+            id: 'manual-command',
+            name: 'run_command',
+            arguments: JSON.stringify({ command: 'npm test' }),
+          };
+          yield { type: 'finished', reason: 'tool_calls' };
+        } else {
+          expect(request.messages.at(-1)).toMatchObject({
+            role: 'tool',
+            toolCallId: 'manual-command',
+          });
+          yield { type: 'text_delta', text: '승인된 검사를 완료했습니다.' };
+          yield { type: 'finished', reason: 'stop' };
+        }
+      },
+    };
+    const executor: typeof executeCommand = async (options) => {
+      executions++;
+      const id = crypto.randomUUID();
+      const execution = {
+        id,
+        environment: 'docker' as const,
+        containerName: 'lodex-' + id,
+        command: 'npm test',
+        cwd: '.',
+        status: 'completed' as const,
+        startedAt: new Date().toISOString(),
+        finishedAt: new Date().toISOString(),
+        exitCode: 0,
+        output: 'passed',
+        truncated: false,
+        cleanupPending: false,
+      };
+      await options.record(execution);
+      return execution;
+    };
+    const app = await setup(provider, undefined, executor);
+    const { project } = await app
+      .request('/v1/projects', { method: 'POST', body: JSON.stringify({ path: app.dir }) })
+      .then((response) => response.json());
+    let session = await app.create({}, project.id);
+    session = (
+      await app
+        .command(
+          makeCommand({
+            type: 'configure_execution',
+            sessionId: session.id,
+            expectedVersion: session.version,
+            execution: { ...defaultExecutionConfig(), backend: 'docker', projectAccess: true },
+          }),
+        )
+        .then((response) => response.json())
+    ).session;
+    await app.command(
+      makeCommand({
+        type: 'send_message',
+        sessionId: session.id,
+        expectedVersion: session.version,
+        content: '검사를 실행해 줘',
+      }),
+    );
+    await vi.waitFor(async () => {
+      const current = await app.store.session(session.id);
+      expect(current.run?.status).toBe('running');
+      expect(
+        current.messages
+          .at(-1)
+          ?.activities?.some((activity) => activity.approval?.status === 'pending'),
+      ).toBe(true);
+    });
+    expect(executions).toBe(0);
+    session = await app.store.session(session.id);
+    const activity = session.messages
+      .at(-1)!
+      .activities!.find((entry) => entry.approval?.status === 'pending')!;
+    const approved = await app.request('/v1/approvals', {
+      method: 'POST',
+      body: JSON.stringify({
+        sessionId: session.id,
+        expectedVersion: session.version,
+        activityId: activity.id,
+        action: 'approve',
+      }),
+    });
+    expect(approved.status).toBe(200);
+    await vi.waitFor(async () =>
+      expect((await app.store.session(session.id)).run?.status).toBe('completed'),
+    );
+    expect(executions).toBe(1);
+    const completed = await app.store.session(session.id);
+    expect(completed.messages.at(-1)?.content).toContain('승인된 검사를 완료했습니다.');
+    expect(
+      completed.messages.at(-1)?.activities?.find((entry) => entry.id === activity.id)?.approval,
+    ).toMatchObject({ status: 'approved', decidedBy: 'user' });
   });
   it('runs a slash goal independently from the saved plan until the model completes it', async () => {
     let calls = 0;
@@ -720,7 +837,18 @@ describe('authenticated daemon integration', () => {
     expect(card.changes?.files).toHaveLength(2);
     expect(card.changes?.status).toBe('proposed');
     await expect(readFile(join(app.dir, 'new.txt'))).rejects.toMatchObject({ code: 'ENOENT' });
-    const act = async (action: 'apply' | 'undo' | 'check') => {
+    const approved = await app.request('/v1/approvals', {
+      method: 'POST',
+      body: JSON.stringify({
+        sessionId: session.id,
+        expectedVersion: session.version,
+        activityId: card.id,
+        action: 'approve',
+      }),
+    });
+    expect(approved.status).toBe(200);
+    session = (await approved.json()).session;
+    const act = async (action: 'undo' | 'check') => {
       const response = await app.request('/v1/edits', {
         method: 'POST',
         body: JSON.stringify({
@@ -734,7 +862,7 @@ describe('authenticated daemon integration', () => {
       session = (await response.json()).session;
       return session.messages.at(-1)!.activities!.find((a) => a.id === card.id)!.changes!;
     };
-    const applied = await act('apply');
+    const applied = session.messages.at(-1)!.activities!.find((a) => a.id === card.id)!.changes!;
     expect(applied.status).toBe('applied');
     expect(applied.files[1]).toHaveProperty('identity');
     expect(await readFile(join(app.dir, 'new.txt'), 'utf8')).toBe('new content');
@@ -839,20 +967,22 @@ describe('authenticated daemon integration', () => {
       expect(
         current.messages
           .at(-1)
-          ?.activities?.some((activity) => activity.edit?.status === 'proposed'),
+          ?.activities?.some((activity) => activity.approval?.status === 'pending'),
       ).toBe(true);
     });
     const proposed = await app.store.session(session.id);
     const card = proposed.messages.at(-1)!.activities!.find((a) => a.edit)!;
     expect(card.edit!.status).toBe('proposed');
     expect(await readFile(file, 'utf8')).toBe(before);
-    const body = JSON.stringify({
+    const approvalBody = JSON.stringify({
       sessionId: session.id,
       expectedVersion: proposed.version,
       activityId: card.id,
-      action: 'apply',
+      action: 'approve',
     });
-    const applied = await app.request('/v1/edits', { method: 'POST', body }).then((r) => r.json());
+    const applied = await app
+      .request('/v1/approvals', { method: 'POST', body: approvalBody })
+      .then((r) => r.json());
     expect(
       applied.session.messages.at(-1).activities.find((a: { id: string }) => a.id === card.id).edit
         .status,
@@ -863,7 +993,15 @@ describe('authenticated daemon integration', () => {
     );
     const completed = await app.store.session(session.id);
     await writeFile(file, 'user edit');
-    expect((await app.request('/v1/edits', { method: 'POST', body })).status).toBe(200);
+    const editApplyBody = JSON.stringify({
+      sessionId: session.id,
+      expectedVersion: proposed.version,
+      activityId: card.id,
+      action: 'apply',
+    });
+    expect((await app.request('/v1/edits', { method: 'POST', body: editApplyBody })).status).toBe(
+      200,
+    );
     expect(await readFile(file, 'utf8')).toBe('user edit');
     const checked = await app
       .request('/v1/edits', {
@@ -954,14 +1092,15 @@ describe('authenticated daemon integration', () => {
       await app
         .command(
           makeCommand({
-            type: 'set_auto_approve',
+            type: 'set_permission_mode',
             sessionId: session.id,
-            enabled: true,
+            expectedVersion: session.version,
+            mode: 'auto',
           }),
         )
         .then((response) => response.json())
     ).session;
-    expect(session.autoApprove).toBe(true);
+    expect(session.permissionMode).toBe('auto');
     await app.command(
       makeCommand({
         type: 'send_message',
@@ -1027,13 +1166,13 @@ describe('authenticated daemon integration', () => {
       expect(
         current.messages
           .at(-1)
-          ?.activities?.some((activity) => activity.edit?.status === 'proposed'),
+          ?.activities?.some((activity) => activity.approval?.status === 'pending'),
       ).toBe(true);
     });
     const proposed = await app.store.session(session.id);
     const card = proposed.messages.at(-1)!.activities!.find((activity) => activity.edit)!;
     const rejected = await app
-      .request('/v1/edits', {
+      .request('/v1/approvals', {
         method: 'POST',
         body: JSON.stringify({
           sessionId: session.id,
@@ -1048,6 +1187,11 @@ describe('authenticated daemon integration', () => {
         .at(-1)
         .activities.find((activity: { id: string }) => activity.id === card.id).edit.status,
     ).toBe('rejected');
+    expect(
+      rejected.session.messages
+        .at(-1)
+        .activities.find((activity: { id: string }) => activity.id === card.id).approval,
+    ).toMatchObject({ status: 'rejected', decidedBy: 'user' });
     expect(await readFile(file, 'utf8')).toBe(before);
     await vi.waitFor(async () =>
       expect((await app.store.session(session.id)).run?.status).toBe('completed'),
@@ -1186,6 +1330,68 @@ describe('authenticated daemon integration', () => {
       await vi.waitFor(() => expect(captured).toBeDefined());
       expect(!!captured!.tools?.some((tool) => tool.function.name === 'read_file')).toBe(consent);
       expect(JSON.stringify(captured)).not.toContain(app.dir);
+    },
+  );
+  it.each([
+    ['build', true],
+    ['plan', false],
+  ] as const)(
+    'exposes full host tools while keeping %s mode read-only=%s',
+    async (mode, writes) => {
+      let captured: InferenceRequest | undefined;
+      const provider: InferenceProvider = {
+        listModels: async () => [],
+        capabilities: async () => ({ tools: true, streaming: true }),
+        async *generate(request) {
+          captured = request;
+          yield { type: 'finished', reason: 'stop' };
+        },
+      };
+      const app = await setup(provider);
+      const { project } = await app
+        .request('/v1/projects', { method: 'POST', body: JSON.stringify({ path: app.dir }) })
+        .then((response) => response.json());
+      let session = await app.create({}, project.id);
+      if (mode === 'plan')
+        session = (
+          await app
+            .command(
+              makeCommand({
+                type: 'set_mode',
+                sessionId: session.id,
+                expectedVersion: session.version,
+                mode,
+              }),
+            )
+            .then((response) => response.json())
+        ).session;
+      session = (
+        await app
+          .command(
+            makeCommand({
+              type: 'set_permission_mode',
+              sessionId: session.id,
+              expectedVersion: session.version,
+              mode: 'full',
+            }),
+          )
+          .then((response) => response.json())
+      ).session;
+      await app.command(
+        makeCommand({
+          type: 'send_message',
+          sessionId: session.id,
+          expectedVersion: session.version,
+          content: 'inspect',
+        }),
+      );
+      await vi.waitFor(() => expect(captured).toBeDefined());
+      const names = captured!.tools?.map((tool) => tool.function.name) ?? [];
+      expect(names).toContain('host_read_file');
+      expect(names).toContain('host_list_files');
+      expect(names.includes('host_write_file')).toBe(writes);
+      expect(names.includes('run_host_command')).toBe(writes);
+      expect(names.includes('propose_edit')).toBe(writes);
     },
   );
   it('does not execute tool deltas from an interrupted provider stream', async () => {

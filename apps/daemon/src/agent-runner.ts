@@ -12,18 +12,26 @@ import {
   type Usage,
   readyAutopilotTasks,
   activityProposal,
+  defaultPermissionMode,
+  runCommandSchema,
 } from '@lodex/contracts';
 import { measureRequest, type CompiledContext } from '@lodex/context';
-import { runProjectTool, executeCommand } from '@lodex/tools';
+import { runProjectTool, executeCommand, executeHostCommand, runHostFileTool } from '@lodex/tools';
 import type { Store } from '@lodex/storage';
 import { proposePlan } from './planning';
-import { completeGoal, verifyAutopilot } from './autopilot';
+import { autopilotVerificationRequest, completeGoal, verifyAutopilot } from './autopilot';
 import { runSkillTool } from './skills';
 import type { RunMcp } from './mcp';
 import type { RegisteredSkill } from '@lodex/skills';
 import { parseDelegation, runSubagents } from './subagents';
 
 import { ToolCallAssembler, mergeDetails } from './tool-stream';
+import {
+  approvedDecision,
+  pendingDecision,
+  permissionDecision,
+  type PermissionRequest,
+} from './permissions';
 export { ToolCallAssembler } from './tool-stream';
 
 function aggregate(rounds: Partial<Usage>[], cloud: boolean): Partial<Usage> {
@@ -57,7 +65,7 @@ export async function runAgent(options: {
   subagents?: { config: ModelConfig; provider: InferenceProvider };
   pricing?: (config: ModelConfig) => ModelPricing | undefined;
   waitForApproval?: (activityId: string, signal: AbortSignal) => Promise<Activity>;
-  autoApprove?: (activityId: string) => Promise<void>;
+  applyApprovedEdit?: (activityId: string) => Promise<void>;
 }) {
   const { store, session, provider, context, controller, project } = options;
   const runId = session.run!.id;
@@ -127,6 +135,26 @@ export async function runAgent(options: {
       ...(error ? { error } : {}),
     });
     lastSave = performance.now();
+  };
+  const authorize = async (card: Activity, request: PermissionRequest): Promise<boolean> => {
+    const decision = permissionDecision(
+      session.permissionMode ?? defaultPermissionMode(),
+      request,
+      session.run?.actor ?? 'desktop',
+    );
+    if (decision.action === 'allow') {
+      card.approval = approvedDecision(decision);
+      await save();
+      return true;
+    }
+    if (!options.waitForApproval)
+      throw new AppError('APPROVAL_UNAVAILABLE', '이 작업의 권한을 확인할 수 없습니다.', 403);
+    card.approval = pendingDecision(decision);
+    const approval = options.waitForApproval(card.id, signal);
+    await save();
+    const decided = await approval;
+    if (decided.approval) card.approval = decided.approval;
+    return decided.approval?.status === 'approved';
   };
   const reserveModelCall = async (config: ModelConfig, inputEstimateTokens: number) => {
     signal.throwIfAborted();
@@ -420,23 +448,45 @@ export async function runAgent(options: {
               'Autopilot에서만 검증 도구를 사용할 수 있습니다.',
             );
           try {
-            const verification = await verifyAutopilot({
-              state: autopilot,
-              name: call.name,
-              argumentsJson: call.arguments,
-              signal,
-              ...(project && session.execution?.backend === 'docker'
-                ? { project, config: session.execution }
-                : {}),
-              ...(options.commandExecutor ? { executor: options.commandExecutor } : {}),
-              record: async (execution) => {
-                card.execution = structuredClone(execution);
-                await store.recordExecution(session.id, card.id, execution);
-              },
-            });
-            result = JSON.stringify(verification);
-            if ('cleanupPending' in verification && verification.cleanupPending)
-              throw new AppError('CLEANUP_REQUIRED', '검증 컨테이너 정리가 필요합니다.');
+            const verificationRequest = autopilotVerificationRequest(
+              autopilot,
+              call.name,
+              call.arguments,
+            );
+            const commandAllowed =
+              !verificationRequest.command ||
+              !project ||
+              session.execution?.backend !== 'docker' ||
+              (await authorize(card, {
+                kind: 'command',
+                command: verificationRequest.command,
+                network: session.execution.network,
+                environment: 'docker',
+              }));
+            if (!commandAllowed)
+              result = JSON.stringify({
+                status: 'rejected',
+                message: 'The user rejected this verification command. Do not claim it ran.',
+              });
+            else {
+              const verification = await verifyAutopilot({
+                state: autopilot,
+                name: call.name,
+                argumentsJson: call.arguments,
+                signal,
+                ...(project && session.execution?.backend === 'docker'
+                  ? { project, config: session.execution }
+                  : {}),
+                ...(options.commandExecutor ? { executor: options.commandExecutor } : {}),
+                record: async (execution) => {
+                  card.execution = structuredClone(execution);
+                  await store.recordExecution(session.id, card.id, execution);
+                },
+              });
+              result = JSON.stringify(verification);
+              if ('cleanupPending' in verification && verification.cleanupPending)
+                throw new AppError('CLEANUP_REQUIRED', '검증 컨테이너 정리가 필요합니다.');
+            }
           } catch (error) {
             if (card.execution?.cleanupPending) throw error;
             result = JSON.stringify({
@@ -446,17 +496,29 @@ export async function runAgent(options: {
           }
         } else if (call.name.startsWith('mcp_')) {
           if (!options.mcp) throw new AppError('MCP_DISABLED', 'MCP 도구가 연결되지 않았습니다.');
-          result = await options.mcp.call({
-            name: call.name,
-            argumentsJson: call.arguments,
-            mode: session.mode ?? 'build',
-            signal,
-            maxBytes: session.config.eco ? 12288 : 24576,
-            record: async (audit) => {
-              card.mcpCall = structuredClone(audit);
-              await store.recordMcpCall(session.id, card.id, audit);
-            },
-          });
+          if (
+            !(await authorize(card, {
+              kind: 'mcp',
+              target: call.name,
+              ...options.mcp.permission(call.name),
+            }))
+          )
+            result = JSON.stringify({
+              status: 'rejected',
+              message: 'The user rejected this MCP call. Do not claim it ran.',
+            });
+          else
+            result = await options.mcp.call({
+              name: call.name,
+              argumentsJson: call.arguments,
+              mode: session.mode ?? 'build',
+              signal,
+              maxBytes: session.config.eco ? 12288 : 24576,
+              record: async (audit) => {
+                card.mcpCall = structuredClone(audit);
+                await store.recordMcpCall(session.id, card.id, audit);
+              },
+            });
         } else if (call.name === 'read_skill' || call.name === 'read_skill_resource') {
           result = await runSkillTool({
             skills: options.skills ?? [],
@@ -484,6 +546,17 @@ export async function runAgent(options: {
               message: 'Provide valid JSON, unique task keys, existing dependencies and no cycles.',
             });
           }
+        } else if (call.name.startsWith('host_') && call.name !== 'run_host_command') {
+          if ((session.permissionMode ?? defaultPermissionMode()) !== 'full')
+            throw new AppError(
+              'FULL_ACCESS_REQUIRED',
+              '호스트 파일 도구에는 전체 접근 권한이 필요합니다.',
+              403,
+            );
+          const parsed = JSON.parse(call.arguments) as { path?: unknown };
+          const path = typeof parsed.path === 'string' ? parsed.path : '';
+          await authorize(card, { kind: 'file', paths: [path] });
+          result = await runHostFileTool(call.name, call.arguments, session.mode ?? 'build');
         } else if (call.name === 'run_command') {
           if (!project || session.mode === 'plan' || session.execution?.backend !== 'docker')
             throw new AppError(
@@ -491,9 +564,63 @@ export async function runAgent(options: {
               '이 대화의 명령 실행이 허용되지 않았습니다.',
               403,
             );
-          const execution = await (options.commandExecutor ?? executeCommand)({
+          const command = runCommandSchema.parse(JSON.parse(call.arguments)).command;
+          if (
+            !(await authorize(card, {
+              kind: 'command',
+              command,
+              network: session.execution.network,
+              environment: 'docker',
+            }))
+          )
+            result = JSON.stringify({
+              status: 'rejected',
+              message: 'The user rejected this command. Do not claim it ran.',
+            });
+          else {
+            const execution = await (options.commandExecutor ?? executeCommand)({
+              project,
+              config: session.execution,
+              argumentsJson: call.arguments,
+              signal,
+              record: async (execution) => {
+                card.execution = structuredClone(execution);
+                await store.recordExecution(session.id, card.id, execution);
+              },
+            });
+            result = JSON.stringify({
+              ...(execution.status !== 'completed'
+                ? { error: execution.error ?? 'COMMAND_FAILED' }
+                : {}),
+              executionId: execution.id,
+              exitCode: execution.exitCode,
+              status: execution.status,
+              output: execution.output,
+              truncated: execution.truncated,
+              cleanupPending: execution.cleanupPending,
+            });
+            if (execution.cleanupPending) throw new AppError('CLEANUP_REQUIRED', execution.error!);
+          }
+        } else if (call.name === 'run_host_command') {
+          if (
+            !project ||
+            session.mode === 'plan' ||
+            (session.permissionMode ?? defaultPermissionMode()) !== 'full'
+          )
+            throw new AppError(
+              'FULL_ACCESS_REQUIRED',
+              '호스트 명령에는 Build 모드와 전체 접근 권한이 필요합니다.',
+              403,
+            );
+          const hostCommand = runCommandSchema.parse(JSON.parse(call.arguments)).command;
+          await authorize(card, {
+            kind: 'command',
+            command: hostCommand,
+            network: 'bridge',
+            environment: 'host',
+          });
+          const execution = await executeHostCommand({
             project,
-            config: session.execution,
             argumentsJson: call.arguments,
             signal,
             record: async (execution) => {
@@ -510,9 +637,7 @@ export async function runAgent(options: {
             status: execution.status,
             output: execution.output,
             truncated: execution.truncated,
-            cleanupPending: execution.cleanupPending,
           });
-          if (execution.cleanupPending) throw new AppError('CLEANUP_REQUIRED', execution.error!);
         } else {
           if (!project) throw new AppError('PROJECT_REQUIRED', '프로젝트가 필요합니다.');
           if (
@@ -536,16 +661,33 @@ export async function runAgent(options: {
         if (activityProposal(card) && options.waitForApproval) {
           card.text = result;
           card.status = 'completed';
+          const proposal = activityProposal(card)!;
+          const paths =
+            'files' in proposal ? proposal.files.map((file) => file.path) : [proposal.path];
+          const permission = permissionDecision(
+            session.permissionMode ?? defaultPermissionMode(),
+            { kind: 'file', paths },
+            session.run?.actor ?? 'desktop',
+          );
           const approval = options.waitForApproval(card.id, signal);
           try {
+            card.approval =
+              permission.action === 'allow'
+                ? approvedDecision(permission)
+                : pendingDecision(permission);
             await save();
-            await options.autoApprove?.(card.id);
+            if (permission.action === 'allow') {
+              if (!options.applyApprovedEdit)
+                throw new AppError('APPROVAL_UNAVAILABLE', '파일 변경을 적용할 수 없습니다.');
+              await options.applyApprovedEdit(card.id);
+            }
           } catch (error) {
             controller.abort(error);
             await approval.catch(() => undefined);
             throw error;
           }
           const decided = await approval;
+          if (decided.approval) card.approval = decided.approval;
           if (decided.edit) card.edit = decided.edit;
           if (decided.changes) card.changes = decided.changes;
           const decision = activityProposal(decided);

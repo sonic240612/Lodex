@@ -71,6 +71,32 @@ export function ActivityCards({
               {activity.mcpCall.error && <p role="alert">{activity.mcpCall.error}</p>}
             </div>
           )}
+          {activity.approval && (
+            <div className="activity-section approval-record">
+              <span>
+                권한 ·{' '}
+                {activity.approval.mode === 'ask'
+                  ? '승인 요청'
+                  : activity.approval.mode === 'auto'
+                    ? '대신 승인'
+                    : '전체 접근'}
+              </span>
+              <small>
+                {activity.approval.status === 'pending'
+                  ? '사용자 결정 대기 중'
+                  : activity.approval.status === 'approved'
+                    ? activity.approval.decidedBy === 'user'
+                      ? '사용자 승인'
+                      : '정책 자동 승인'
+                    : '사용자 거절'}{' '}
+                · {activity.approval.risk === 'high' ? '높은 위험' : '일반'}
+                {' · '}
+                {activity.approval.actor === 'telegram' ? 'Telegram' : 'Desktop'}
+              </small>
+              <p>{activity.approval.reason}</p>
+              <pre>{activity.approval.target}</pre>
+            </div>
+          )}
           {activity.execution ? (
             <div className="activity-section">
               <span>명령 · {activity.execution.cwd}</span>

@@ -63,6 +63,9 @@ export type Plan = z.infer<typeof planSchema>;
 export const defaultPlan = (): Plan => planSchema.parse({ goal: '', tasks: [] });
 export const modeSchema = z.enum(['plan', 'build']);
 export type AgentMode = z.infer<typeof modeSchema>;
+export const permissionModeSchema = z.enum(['ask', 'auto', 'full']);
+export type PermissionMode = z.infer<typeof permissionModeSchema>;
+export const defaultPermissionMode = (): PermissionMode => 'ask';
 export const executionConfigSchema = z
   .strictObject({
     backend: z.enum(['disabled', 'docker']).default('disabled'),
@@ -95,6 +98,7 @@ export const runCommandSchema = z.strictObject({
 export interface CommandExecution {
   id: string;
   containerName: string;
+  environment?: 'docker' | 'host';
   dockerHost?: string;
   containerId?: string;
   imageId?: string;
@@ -288,9 +292,9 @@ export const commandSchema = z.discriminatedUnion('type', [
   z.strictObject({ ...envelope, ...target, type: z.literal('stop_autopilot') }),
   z.strictObject({
     ...envelope,
-    type: z.literal('set_auto_approve'),
-    sessionId: idSchema,
-    enabled: z.boolean(),
+    ...target,
+    type: z.literal('set_permission_mode'),
+    mode: permissionModeSchema,
   }),
   z.strictObject({ ...envelope, ...target, type: z.literal('save_plan'), plan: planSchema }),
   z.strictObject({ ...envelope, ...target, type: z.literal('set_mode'), mode: modeSchema }),
@@ -438,6 +442,25 @@ export const editActionSchema = z.strictObject({
   action: z.enum(['apply', 'check', 'undo', 'reject']),
 });
 export type EditAction = z.infer<typeof editActionSchema>;
+export const approvalActionSchema = z.strictObject({
+  sessionId: idSchema,
+  expectedVersion: z.number().int().nonnegative(),
+  activityId: idSchema,
+  action: z.enum(['approve', 'reject']),
+});
+export type ApprovalAction = z.infer<typeof approvalActionSchema>;
+export interface PermissionDecision {
+  kind: 'file' | 'command' | 'mcp';
+  target: string;
+  actor: 'desktop' | 'telegram';
+  mode: PermissionMode;
+  risk: 'low' | 'high';
+  reason: string;
+  status: 'pending' | 'approved' | 'rejected';
+  decidedBy?: 'user' | 'policy' | 'full_access';
+  requestedAt: string;
+  decidedAt?: string;
+}
 export interface Activity {
   subagents?: SubagentRecord[];
   mcpCall?: {
@@ -461,6 +484,7 @@ export interface Activity {
     readAt: string;
   };
   execution?: CommandExecution;
+  approval?: PermissionDecision;
   planProposal?: PlanProposal;
   edit?: EditProposal;
   changes?: ChangeSet;
@@ -484,6 +508,7 @@ export interface Run {
   status: 'running' | 'completed' | 'cancelled' | 'failed' | 'interrupted';
   startedAt: string;
   finishedAt: string | null;
+  actor?: 'desktop' | 'telegram';
   // Older runs and the browser demo have no compiled inference request.
   context?: ContextManifest;
 }
@@ -516,6 +541,8 @@ export interface Session {
   skills?: SkillSelection[];
   skillCloudConsent?: boolean;
   autopilot?: AutopilotState;
+  permissionMode?: PermissionMode;
+  /** Legacy persisted input. New writes use permissionMode. */
   autoApprove?: boolean;
   execution?: ExecutionConfig;
   mode?: AgentMode;
