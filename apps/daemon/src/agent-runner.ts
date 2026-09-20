@@ -57,6 +57,7 @@ export async function runAgent(options: {
   subagents?: { config: ModelConfig; provider: InferenceProvider };
   pricing?: (config: ModelConfig) => ModelPricing | undefined;
   waitForApproval?: (activityId: string, signal: AbortSignal) => Promise<Activity>;
+  autoApprove?: (activityId: string) => Promise<void>;
 }) {
   const { store, session, provider, context, controller, project } = options;
   const runId = session.run!.id;
@@ -538,6 +539,7 @@ export async function runAgent(options: {
           const approval = options.waitForApproval(card.id, signal);
           try {
             await save();
+            await options.autoApprove?.(card.id);
           } catch (error) {
             controller.abort(error);
             await approval.catch(() => undefined);

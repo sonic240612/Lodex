@@ -176,6 +176,7 @@ async function previewCommand(command: Command): Promise<CommandResult> {
   } else {
     if (!session) throw new Error('대화를 찾을 수 없습니다.');
     if (command.type === 'save_plan') session.plan = command.plan;
+    else if (command.type === 'set_auto_approve') session.autoApprove = command.enabled;
     else if (
       command.type === 'start_autopilot' ||
       command.type === 'start_goal' ||

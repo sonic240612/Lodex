@@ -615,6 +615,7 @@ export class StorageEngine {
           updatedAt: now,
           config: command.config,
           routing: agentRoutingConfigSchema.parse(command.routing ?? {}),
+          autoApprove: false,
           mode: command.mode,
           skills: [],
           skillCloudConsent: false,
@@ -663,6 +664,8 @@ export class StorageEngine {
               }
             }
           }
+        } else if (command.type === 'set_auto_approve') {
+          session.autoApprove = command.enabled;
         } else if (command.type === 'stop_autopilot') {
           if (session.run?.status === 'running')
             throw new AppError('BUSY', '실행 중인 응답은 먼저 중지하세요.', 409);

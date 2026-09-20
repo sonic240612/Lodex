@@ -911,6 +911,74 @@ describe('authenticated daemon integration', () => {
     expect((await app.request('/v1/edits', { method: 'POST', body: undoBody })).status).toBe(200);
     expect(await readFile(file, 'utf8')).toBe('new user edit after undo');
   });
+  it('automatically applies proposed file edits when Autopilot approval is enabled', async () => {
+    const before = 'const mode = "manual";\n';
+    let round = 0;
+    const provider: InferenceProvider = {
+      listModels: async () => [],
+      capabilities: async () => ({ tools: true, streaming: true }),
+      async *generate(request) {
+        if (round++ === 0) {
+          yield {
+            type: 'tool_call_delta',
+            index: 0,
+            id: 'auto-proposal',
+            name: 'propose_edit',
+            arguments: JSON.stringify({
+              path: 'auto.ts',
+              expectedHash: createHash('sha256').update(before).digest('hex'),
+              oldText: 'mode = "manual"',
+              newText: 'mode = "automatic"',
+            }),
+          };
+          yield { type: 'finished', reason: 'tool_calls' };
+        } else {
+          expect(request.messages.at(-1)).toMatchObject({
+            role: 'tool',
+            toolCallId: 'auto-proposal',
+          });
+          expect(request.messages.at(-1)?.content).toContain('"status":"applied"');
+          yield { type: 'text_delta', text: '수정 적용과 후속 확인을 완료했습니다.' };
+          yield { type: 'finished', reason: 'stop' };
+        }
+      },
+    };
+    const app = await setup(provider);
+    const file = join(app.dir, 'auto.ts');
+    await writeFile(file, before);
+    const { project } = await app
+      .request('/v1/projects', { method: 'POST', body: JSON.stringify({ path: app.dir }) })
+      .then((response) => response.json());
+    let session = await app.create({}, project.id);
+    session = (
+      await app
+        .command(
+          makeCommand({
+            type: 'set_auto_approve',
+            sessionId: session.id,
+            enabled: true,
+          }),
+        )
+        .then((response) => response.json())
+    ).session;
+    expect(session.autoApprove).toBe(true);
+    await app.command(
+      makeCommand({
+        type: 'send_message',
+        sessionId: session.id,
+        expectedVersion: session.version,
+        content: '자동으로 수정해 줘',
+      }),
+    );
+    await vi.waitFor(async () =>
+      expect((await app.store.session(session.id)).run?.status).toBe('completed'),
+    );
+    const completed = await app.store.session(session.id);
+    expect(await readFile(file, 'utf8')).toBe('const mode = "automatic";\n');
+    expect(
+      completed.messages.at(-1)?.activities?.find((activity) => activity.edit)?.edit?.status,
+    ).toBe('applied');
+  });
   it('rejects a pending model edit without changing the project file', async () => {
     const before = 'const keep = true;\n';
     let round = 0;

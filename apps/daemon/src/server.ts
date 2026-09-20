@@ -8,6 +8,7 @@ import {
   editActionSchema,
   type ChangeStatus,
   type ChangeSet,
+  type EditAction,
   type SecretSource,
   activityProposal,
   providerSchema,
@@ -256,6 +257,106 @@ export async function startServer(options: ServerOptions) {
     if (activity) pending.resolve(structuredClone(activity));
     else pending.reject(new AppError('EDIT_NOT_FOUND', '검토한 수정안을 찾을 수 없습니다.', 404));
   };
+  const reviewEdit = async (action: EditAction): Promise<Session> => {
+    const session = await store.session(action.sessionId);
+    const edit = activityProposal(
+      session.messages
+        .flatMap((message) => message.activities ?? [])
+        .find((a) => a.id === action.activityId),
+    );
+    if (!edit || !session.projectId)
+      throw new AppError('EDIT_NOT_FOUND', '수정안을 찾을 수 없습니다.', 404);
+    if (action.action === 'apply' && edit.status === 'applied') {
+      finishApproval(session, action.activityId);
+      return session;
+    }
+    if (action.action === 'undo' && edit.status === 'reverted') return session;
+    if (action.action === 'reject' && edit.status === 'rejected') {
+      finishApproval(session, action.activityId);
+      return session;
+    }
+    if (action.action === 'reject') {
+      const liveApproval =
+        !!session.run && active.get(session.run.id)?.approval?.activityId === action.activityId;
+      await store.beginEdit(action, liveApproval);
+      const rejected = await store.finishEdit(session.id, action.activityId, 'rejected');
+      finishApproval(rejected, action.activityId);
+      return rejected;
+    }
+    const liveApproval =
+      action.action === 'apply' &&
+      !!session.run &&
+      active.get(session.run.id)?.approval?.activityId === action.activityId;
+    for (const other of (await store.snapshot()).sessions) {
+      if (
+        other.projectId === session.projectId &&
+        ((other.run && active.has(other.run.id)) ||
+          other.messages.some((message) =>
+            message.activities?.some((activity) => activity.execution?.cleanupPending),
+          )) &&
+        !(liveApproval && other.id === session.id)
+      )
+        throw new AppError('BUSY', '이 프로젝트의 응답이 끝난 뒤 변경을 적용해 주세요.', 409);
+    }
+    const project = await store.project(session.projectId);
+    const pending = await store.beginEdit(action, liveApproval);
+    const pendingEdit = activityProposal(
+      pending.messages
+        .flatMap((message) => message.activities ?? [])
+        .find((activity) => activity.id === action.activityId),
+    )!;
+    let status: ChangeStatus = 'uncertain';
+    let observations: ChangeSet['observations'];
+    const check = async (checkSignal: AbortSignal) => {
+      if ('files' in pendingEdit) {
+        const result = await checkChanges(project, pendingEdit, checkSignal);
+        observations = result.observations;
+        return result.status;
+      }
+      return checkEdit(project, pendingEdit, checkSignal);
+    };
+    let error: string | undefined;
+    const signal = AbortSignal.timeout(15000);
+    try {
+      if ('files' in pendingEdit) {
+        if (action.action !== 'check')
+          await writeChanges(project, pendingEdit, action.action, signal, async (file) => {
+            await store.recordCreatedFile(
+              session.id,
+              action.activityId,
+              file.path,
+              file.stagingId,
+              file.identity!,
+            );
+          });
+      } else {
+        if (action.action === 'apply') await applyEdit(project, pendingEdit, signal);
+        if (action.action === 'undo') await undoEdit(project, pendingEdit, signal);
+      }
+      status = await check(signal);
+      if (status === 'conflict')
+        error = '파일이 수정안의 원본 및 결과와 다릅니다. 다시 읽고 새 수정안을 만들어 주세요.';
+    } catch (failure) {
+      error =
+        failure instanceof AppError
+          ? failure.message
+          : '파일 상태를 확인하지 못했습니다. 경로와 접근 권한을 확인해 주세요.';
+      try {
+        status = await check(AbortSignal.timeout(5000));
+      } catch {
+        /* Outcome remains uncertain. */
+      }
+    }
+    const finished = await store.finishEdit(
+      session.id,
+      action.activityId,
+      status,
+      error,
+      observations,
+    );
+    finishApproval(finished, action.activityId);
+    return finished;
+  };
   async function execute(
     session: Session,
     controller: AbortController,
@@ -323,6 +424,23 @@ export async function startServer(options: ServerOptions) {
         pricing: (config) => pricing.get(config.provider + '\0' + config.model),
         waitForApproval: (activityId, signal) =>
           waitForApproval(session.run!.id, session.id, activityId, signal),
+        autoApprove: async (activityId) => {
+          const current = await store.session(session.id);
+          if (!current.autoApprove) return;
+          try {
+            await serial(() =>
+              reviewEdit({
+                sessionId: current.id,
+                expectedVersion: current.version,
+                activityId,
+                action: 'apply',
+              }),
+            );
+          } catch (error) {
+            active.get(session.run!.id)?.approval?.reject(error);
+            throw error;
+          }
+        },
         mcp: new RunMcp({
           selections: mcpSelections,
           supervisorPath: mcpSupervisorPath,
@@ -995,114 +1113,7 @@ export async function startServer(options: ServerOptions) {
         if (!parsed.success)
           throw new AppError('INVALID_COMMAND', '파일 변경 요청이 올바르지 않습니다.');
         json(response, 200, {
-          session: await serial(async () => {
-            const action = parsed.data;
-            const session = await store.session(action.sessionId);
-            const edit = activityProposal(
-              session.messages
-                .flatMap((m) => m.activities ?? [])
-                .find((a) => a.id === action.activityId),
-            );
-            if (!edit || !session.projectId)
-              throw new AppError('EDIT_NOT_FOUND', '수정안을 찾을 수 없습니다.', 404);
-            if (action.action === 'apply' && edit.status === 'applied') {
-              finishApproval(session, action.activityId);
-              return session;
-            }
-            if (action.action === 'undo' && edit.status === 'reverted') return session;
-            if (action.action === 'reject' && edit.status === 'rejected') {
-              finishApproval(session, action.activityId);
-              return session;
-            }
-            if (action.action === 'reject') {
-              const liveApproval =
-                action.action === 'reject' &&
-                !!session.run &&
-                active.get(session.run.id)?.approval?.activityId === action.activityId;
-              await store.beginEdit(action, liveApproval);
-              const rejected = await store.finishEdit(session.id, action.activityId, 'rejected');
-              finishApproval(rejected, action.activityId);
-              return rejected;
-            }
-            const liveApproval =
-              action.action === 'apply' &&
-              !!session.run &&
-              active.get(session.run.id)?.approval?.activityId === action.activityId;
-            for (const other of (await store.snapshot()).sessions) {
-              if (
-                other.projectId === session.projectId &&
-                ((other.run && active.has(other.run.id)) ||
-                  other.messages.some((m) =>
-                    m.activities?.some((a) => a.execution?.cleanupPending),
-                  )) &&
-                !(liveApproval && other.id === session.id)
-              )
-                throw new AppError(
-                  'BUSY',
-                  '이 프로젝트의 응답이 끝난 뒤 변경을 적용해 주세요.',
-                  409,
-                );
-            }
-            const project = await store.project(session.projectId);
-            const pending = await store.beginEdit(action, liveApproval);
-            const pendingEdit = activityProposal(
-              pending.messages
-                .flatMap((m) => m.activities ?? [])
-                .find((a) => a.id === action.activityId),
-            )!;
-            let status: ChangeStatus = 'uncertain';
-            let observations: ChangeSet['observations'];
-            const check = async (checkSignal: AbortSignal) => {
-              if ('files' in pendingEdit) {
-                const result = await checkChanges(project, pendingEdit, checkSignal);
-                observations = result.observations;
-                return result.status;
-              }
-              return checkEdit(project, pendingEdit, checkSignal);
-            };
-            let error: string | undefined;
-            const signal = AbortSignal.timeout(15000);
-            try {
-              if ('files' in pendingEdit) {
-                if (action.action !== 'check')
-                  await writeChanges(project, pendingEdit, action.action, signal, async (file) => {
-                    await store.recordCreatedFile(
-                      session.id,
-                      action.activityId,
-                      file.path,
-                      file.stagingId,
-                      file.identity!,
-                    );
-                  });
-              } else {
-                if (action.action === 'apply') await applyEdit(project, pendingEdit, signal);
-                if (action.action === 'undo') await undoEdit(project, pendingEdit, signal);
-              }
-              status = await check(signal);
-              if (status === 'conflict')
-                error =
-                  '파일이 수정안의 원본 및 결과와 다릅니다. 다시 읽고 새 수정안을 만들어 주세요.';
-            } catch (failure) {
-              error =
-                failure instanceof AppError
-                  ? failure.message
-                  : '파일 상태를 확인하지 못했습니다. 경로와 접근 권한을 확인해 주세요.';
-              try {
-                status = await check(AbortSignal.timeout(5000));
-              } catch {
-                /* Outcome remains uncertain. */
-              }
-            }
-            const finished = await store.finishEdit(
-              session.id,
-              action.activityId,
-              status,
-              error,
-              observations,
-            );
-            finishApproval(finished, action.activityId);
-            return finished;
-          }),
+          session: await serial(() => reviewEdit(parsed.data)),
         });
       } else if (request.method === 'POST' && url.pathname === '/v1/sessions/delete') {
         const parsed = deleteSessionsSchema.safeParse(await readJson(request));

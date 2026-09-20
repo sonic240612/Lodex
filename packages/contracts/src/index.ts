@@ -286,6 +286,12 @@ export const commandSchema = z.discriminatedUnion('type', [
   }),
   z.strictObject({ ...envelope, ...target, type: z.literal('resume_goal') }),
   z.strictObject({ ...envelope, ...target, type: z.literal('stop_autopilot') }),
+  z.strictObject({
+    ...envelope,
+    type: z.literal('set_auto_approve'),
+    sessionId: idSchema,
+    enabled: z.boolean(),
+  }),
   z.strictObject({ ...envelope, ...target, type: z.literal('save_plan'), plan: planSchema }),
   z.strictObject({ ...envelope, ...target, type: z.literal('set_mode'), mode: modeSchema }),
   z.strictObject({
@@ -510,6 +516,7 @@ export interface Session {
   skills?: SkillSelection[];
   skillCloudConsent?: boolean;
   autopilot?: AutopilotState;
+  autoApprove?: boolean;
   execution?: ExecutionConfig;
   mode?: AgentMode;
   id: string;

@@ -101,7 +101,7 @@ export function App() {
       ? 'openrouter'
       : config.provider;
   const running = session?.run?.status === 'running';
-  const autopilotOn = session?.autopilot?.status === 'running';
+  const autopilotOn = session?.autoApprove === true;
   const pendingApproval = session?.messages
     .flatMap((message) => message.activities ?? [])
     .map((activity) => ({ activity, edit: activityProposal(activity) }))
@@ -263,40 +263,20 @@ export function App() {
   }
   async function toggleAutopilot() {
     if (!session || busy || !workspace.connected) {
-      setError('먼저 대화를 만들고 목표 또는 작업 계획을 준비하세요.');
+      setError('먼저 대화를 만드세요.');
       return;
     }
     setBusy(true);
     setError('');
     try {
-      if (running && autopilotOn) {
-        const result = await sendCommand({
-          type: 'cancel_run',
-          sessionId: session.id,
-          runId: session.run!.id,
-        });
-        workspace.upsert(result.session);
-        return;
-      }
-      const result = await sendCommand(
-        session.autopilot?.goalDriven && session.autopilot.status === 'paused'
-          ? {
-              type: 'resume_goal',
-              sessionId: session.id,
-              expectedVersion: session.version,
-            }
-          : {
-              type: 'start_autopilot',
-              sessionId: session.id,
-              expectedVersion: session.version,
-              taskIds: [],
-              limits: autopilotLimitsSchema.parse({}),
-            },
-      );
+      const result = await sendCommand({
+        type: 'set_auto_approve',
+        sessionId: session.id,
+        enabled: !autopilotOn,
+      });
       workspace.upsert(result.session);
     } catch (failure) {
       setError(messageError(failure));
-      setPlanOpen(true);
     } finally {
       setBusy(false);
     }
@@ -843,8 +823,8 @@ export function App() {
                 className={`autopilot-toggle ${autopilotOn ? 'is-on' : ''}`}
                 aria-label={`Autopilot ${autopilotOn ? '끄기' : '켜기'}`}
                 aria-pressed={autopilotOn}
-                disabled={!session || busy || !workspace.connected || (running && !autopilotOn)}
-                title="Autopilot 실행/중지"
+                disabled={!session || busy || running || !workspace.connected}
+                title="파일 수정안 자동 승인"
                 onClick={() => void toggleAutopilot()}
               >
                 <span className="status-dot" />

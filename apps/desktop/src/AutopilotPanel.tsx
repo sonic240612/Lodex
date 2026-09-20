@@ -50,7 +50,7 @@ export function AutopilotPanel({ session }: { session: Session }) {
   }
   return (
     <section className="autopilot-panel" aria-label="Autopilot">
-      <strong>{state?.goalDriven ? '/goal Autopilot' : 'Autopilot'}</strong>
+      <strong>{state?.goalDriven ? '/goal 자동 실행' : '계획 자동 실행'}</strong>
       {state && (
         <>
           <p role="status">
