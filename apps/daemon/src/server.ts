@@ -793,7 +793,9 @@ export async function startServer(options: ServerOptions) {
             activity.execution ||
             activity.edit ||
             activity.changes ||
-            ['read_file', 'list_files', 'search_text'].includes(activity.label),
+            ['read_file', 'list_files', 'find_files', 'search_text', 'inspect_path'].includes(
+              activity.label,
+            ),
         ),
       );
       if (
@@ -927,7 +929,7 @@ export async function startServer(options: ServerOptions) {
           ? projectTools.filter(
               (tool) =>
                 session.mode !== 'plan' ||
-                ['list_files', 'read_file', 'search_text', 'inspect_path'].includes(
+                ['list_files', 'find_files', 'read_file', 'search_text', 'inspect_path'].includes(
                   tool.function.name,
                 ),
             )

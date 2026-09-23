@@ -57,6 +57,11 @@ const schemas = {
     thenRun: runCommandSchema.optional(),
   }),
   list_files: z.strictObject({ path: pathSchema }),
+  find_files: z.strictObject({
+    path: pathSchema,
+    pattern: z.string().min(1).max(200),
+    maxResults: z.number().int().min(1).max(500).default(200),
+  }),
   read_file: z.strictObject({
     path: pathSchema,
     startLine: z.number().int().min(1).default(1),
@@ -66,6 +71,7 @@ const schemas = {
     path: pathSchema,
     query: z.string().min(1).max(200),
     maxResults: z.number().int().min(1).max(100).default(30),
+    caseSensitive: z.boolean().default(true),
   }),
 };
 const descriptions: Record<keyof typeof schemas, string> = {
@@ -83,10 +89,12 @@ const descriptions: Record<keyof typeof schemas, string> = {
     'Propose one exact text replacement in an existing UTF-8 project file. First read_file for its sha256 as expectedHash; oldText must match exactly once, without line numbers. Preserves CRLF. Optional thenRun fuses one Docker validation command with the approved edit. Produces a diff for review and NEVER writes before approval. No creation or deletion.',
   list_files:
     'List up to 200 files/directories directly inside a project-relative directory. Start with path ".". No file content is read.',
+  find_files:
+    'Find project files recursively with a bounded glob such as "**/*.ts", "src/**/test?.tsx", or "README*". Returns at most 500 project-relative paths. Generated, secret, and linked paths are excluded. No file content is read.',
   read_file:
     'Read UTF-8 text from a project-relative file, with line numbers. Use startLine and maxLines for a bounded range. No writes.',
   search_text:
-    'Search for a literal, case-sensitive string in project UTF-8 files. Returns bounded line matches. Not a regex. Generated directories and common secret files are excluded.',
+    'Search for a literal string in project UTF-8 files. caseSensitive defaults to true. Returns bounded line matches. Not a regex. Generated directories and common secret files are excluded.',
 };
 export const projectTools: ToolDefinition[] = Object.entries(schemas).map(([name, schema]) => ({
   type: 'function',
@@ -405,6 +413,33 @@ async function entries(project: Project, path: string, signal: AbortSignal) {
   return { found: found.sort((a, b) => a.name.localeCompare(b.name)), truncated: scanned > 2000 };
 }
 
+function globMatcher(pattern: string): (path: string) => boolean {
+  const normalized = pattern.replaceAll('\\', '/');
+  if (
+    normalized.startsWith('/') ||
+    normalized.includes(':') ||
+    /[\x00-\x1f\x7f]/.test(normalized) ||
+    normalized.split('/').some((part) => !part || part === '.' || part === '..')
+  )
+    throw new AppError('TOOL_ARGUMENTS', 'glob은 프로젝트 내부 파일 패턴이어야 합니다.');
+  let source = '^';
+  for (let index = 0; index < normalized.length; index++) {
+    const char = normalized[index]!;
+    if (char === '*' && normalized[index + 1] === '*') {
+      index++;
+      if (normalized[index + 1] === '/') {
+        index++;
+        source += '(?:.*/)?';
+      } else source += '.*';
+    } else if (char === '*') source += '[^/]*';
+    else if (char === '?') source += '[^/]';
+    else source += char.replace(/[|\\{}()[\]^$+?.-]/g, '\\$&');
+  }
+  const expression = new RegExp(source + '$');
+  const basenameOnly = !normalized.includes('/');
+  return (path) => expression.test(basenameOnly ? basename(path) : path);
+}
+
 export async function runProjectTool(
   project: Project,
   name: string,
@@ -466,6 +501,41 @@ export async function runProjectTool(
         truncated: result.truncated || result.found.length > 200,
       });
     }
+    if (name === 'find_files') {
+      const args = schemas.find_files.parse(value);
+      const matches = globMatcher(args.pattern);
+      const queue = [{ path: args.path, depth: 0 }];
+      const paths: string[] = [];
+      let visited = 0,
+        truncated = false;
+      outer: while (queue.length) {
+        signal.throwIfAborted();
+        const next = queue.shift()!;
+        const result = await entries(project, next.path, signal);
+        truncated ||= result.truncated;
+        for (const entry of result.found) {
+          if (++visited > 5000) {
+            truncated = true;
+            break outer;
+          }
+          const path = relative(project.path, resolve(project.path, next.path, entry.name))
+            .split(sep)
+            .join('/');
+          if (entry.directory) {
+            if (next.depth < 32) queue.push({ path, depth: next.depth + 1 });
+            else truncated = true;
+            continue;
+          }
+          if (!matches(path)) continue;
+          paths.push(path);
+          if (paths.length >= args.maxResults || Buffer.byteLength(JSON.stringify(paths)) > 16000) {
+            truncated = true;
+            break outer;
+          }
+        }
+      }
+      return JSON.stringify({ paths: paths.sort(), truncated, visited });
+    }
     if (name === 'read_file') {
       const args = schemas.read_file.parse(value);
       const text = await readText(project, args.path, signal);
@@ -491,6 +561,7 @@ export async function runProjectTool(
       });
     }
     const args = schemas.search_text.parse(value);
+    const query = args.caseSensitive ? args.query : args.query.toLocaleLowerCase('en-US');
     const queue = [{ path: args.path, depth: 0 }];
     const matches: { path: string; line: number; text: string }[] = [];
     let visited = 0,
@@ -525,7 +596,7 @@ export async function runProjectTool(
         }
         readBytes += Buffer.byteLength(text);
         for (const [index, line] of text.split(/\r?\n/).entries()) {
-          if (line.includes(args.query))
+          if ((args.caseSensitive ? line : line.toLocaleLowerCase('en-US')).includes(query))
             matches.push({ path, line: index + 1, text: line.slice(0, 500) });
           if (
             matches.length >= args.maxResults ||

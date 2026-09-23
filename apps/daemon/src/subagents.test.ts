@@ -208,6 +208,7 @@ describe('isolated read-only subagents', () => {
       expect(requests[0]?.tools?.map((tool) => tool.function.name)).toEqual([
         'inspect_path',
         'list_files',
+        'find_files',
         'read_file',
         'search_text',
       ]);

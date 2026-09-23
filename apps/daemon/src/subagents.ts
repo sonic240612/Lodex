@@ -111,7 +111,7 @@ export async function runSubagents(tasks: { task: string }[], options: Options):
       const projectReadTools =
         options.project && (config.provider !== 'openrouter' || config.projectCloudConsent)
           ? projectTools.filter((tool) =>
-              ['list_files', 'read_file', 'search_text', 'inspect_path'].includes(
+              ['list_files', 'find_files', 'read_file', 'search_text', 'inspect_path'].includes(
                 tool.function.name,
               ),
             )

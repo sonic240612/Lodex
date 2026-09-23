@@ -181,6 +181,9 @@ describe('project read tools', () => {
   });
   it('lists, reads and searches real UTF-8 files without changing them', async () => {
     const { path, run } = await setup();
+    await mkdir(join(path, 'src', 'nested'));
+    await writeFile(join(path, 'src', 'nested', 'hello.test.ts'), '// NEEDLE\n');
+    await writeFile(join(path, 'src', 'nested', 'ignore.md'), 'needle\n');
     expect((await run('list_files', { path: '.' })).entries).toEqual([
       { name: 'src', directory: true },
     ]);
@@ -189,6 +192,19 @@ describe('project read tools', () => {
     ).toEqual([{ line: 2, text: '// needle' }]);
     expect((await run('search_text', { query: 'needle' })).matches).toEqual([
       { path: 'src/hello.ts', line: 2, text: '// needle' },
+      { path: 'src/nested/ignore.md', line: 1, text: 'needle' },
+    ]);
+    expect((await run('find_files', { pattern: '**/*.ts' })).paths).toEqual([
+      'src/hello.ts',
+      'src/nested/hello.test.ts',
+    ]);
+    expect((await run('find_files', { path: 'src', pattern: '*.md' })).paths).toEqual([
+      'src/nested/ignore.md',
+    ]);
+    expect((await run('search_text', { query: 'needle', caseSensitive: false })).matches).toEqual([
+      { path: 'src/hello.ts', line: 2, text: '// needle' },
+      { path: 'src/nested/hello.test.ts', line: 1, text: '// NEEDLE' },
+      { path: 'src/nested/ignore.md', line: 1, text: 'needle' },
     ]);
     expect(await readFile(join(path, 'src/hello.ts'), 'utf8')).toBe(
       'export const hello = "안녕";\n// needle\n',

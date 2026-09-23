@@ -1660,6 +1660,7 @@ describe('authenticated daemon integration', () => {
       'propose_changes',
       'propose_edit',
       'list_files',
+      'find_files',
       'read_file',
       'search_text',
       'propose_plan',
