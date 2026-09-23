@@ -28,6 +28,7 @@ import {
   type LocalProfile,
   type RuntimeSettings,
   type ModelDownloadInput,
+  type ModelInspection,
   type BackupSettings,
   type BackupSnapshot,
   type McpContentInput,
@@ -451,6 +452,15 @@ export async function saveLocalProfile(profile: LocalProfileInput): Promise<Loca
     body: profile,
   });
   return result.profile;
+}
+export async function inspectLocalModel(modelPath: string): Promise<ModelInspection> {
+  if (!nativeDesktop) throw new Error('데스크톱 앱에서 GGUF 모델을 분석하세요.');
+  const result = await invoke<{ inspection: ModelInspection }>('daemon_request', {
+    method: 'POST',
+    path: '/v1/runtime/inspect',
+    body: { modelPath },
+  });
+  return result.inspection;
 }
 export async function runtimeAction(
   profileId: string,

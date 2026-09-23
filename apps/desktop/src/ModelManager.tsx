@@ -6,6 +6,7 @@ import {
   type LocalProfileInput,
   type RuntimeSnapshot,
   type EngineSettings,
+  type ModelInspection,
 } from '@lodex/contracts';
 import {
   configureRuntime,
@@ -16,6 +17,7 @@ import {
   saveLocalProfile,
   startModelDownload,
   modelDownloadAction,
+  inspectLocalModel,
 } from './bridge';
 import { Icon } from './icons';
 
@@ -59,7 +61,13 @@ export function ModelManager({
     [error, setError] = useState(''),
     [extra, setExtra] = useState('[]');
   const [gpuText, setGpuText] = useState('auto');
-  const [download, setDownload] = useState({ repository: '', file: '', revision: 'main', sha256: '' });
+  const [inspection, setInspection] = useState<ModelInspection | null>(null);
+  const [download, setDownload] = useState({
+    repository: '',
+    file: '',
+    revision: 'main',
+    sha256: '',
+  });
   const [loaded, setLoaded] = useState(!nativeDesktop);
   const [connectionError, setConnectionError] = useState('');
   const budgetConflict = loaded && budget.version !== state.settings.version;
@@ -132,6 +140,7 @@ export function ModelManager({
     setDraft(blank());
     setGpuText('auto');
     setExtra('[]');
+    setInspection(null);
     setTrusted(false);
   }
   function editProfile(profile: LocalProfile) {
@@ -146,11 +155,25 @@ export function ModelManager({
     });
     setGpuText(String(profile.settings.gpuLayers));
     setExtra(JSON.stringify(profile.settings.extraArgs, null, 2));
+    setInspection(null);
     setTrusted(false);
     setError('');
   }
   function settings<K extends keyof EngineSettings>(key: K, value: EngineSettings[K]) {
     setDraft({ ...draft, settings: { ...draft.settings, [key]: value } });
+  }
+  function applyInspection(value: ModelInspection) {
+    setInspection(value);
+    setDraft((current) => ({
+      ...current,
+      name: current.name || value.modelName || '',
+      modelPath: value.modelPath,
+      settings: value.recommendedSettings,
+      vramReservationMb: value.recommendedVramReservationMb,
+    }));
+    setGpuText(String(value.recommendedSettings.gpuLayers));
+    setExtra(JSON.stringify(value.recommendedSettings.extraArgs, null, 2));
+    setTrusted(false);
   }
   return (
     <dialog
@@ -343,9 +366,7 @@ export function ModelManager({
           <button
             type="button"
             className="secondary-button"
-            disabled={
-              unavailable || busy || !download.repository.trim() || !download.file.trim()
-            }
+            disabled={unavailable || busy || !download.repository.trim() || !download.file.trim()}
             onClick={() =>
               void operation(async () => {
                 const next = await startModelDownload({
@@ -371,12 +392,14 @@ export function ModelManager({
               <article className="local-model" key={item.id}>
                 <strong>{item.repository + ' / ' + item.file}</strong>
                 <span>
-                  {{
-                    downloading: '다운로드 중',
-                    completed: '완료',
-                    failed: '실패',
-                    cancelled: '중지됨',
-                  }[item.status]}{' '}
+                  {
+                    {
+                      downloading: '다운로드 중',
+                      completed: '완료',
+                      failed: '실패',
+                      cancelled: '중지됨',
+                    }[item.status]
+                  }{' '}
                   · {(item.downloadedBytes / 1024 ** 3).toFixed(2)} GiB
                   {percent === null ? '' : ` · ${percent}%`}
                 </span>
@@ -391,16 +414,21 @@ export function ModelManager({
                   {item.status === 'completed' && item.modelPath && (
                     <button
                       type="button"
-                      onClick={() => {
-                        setDraft((current) => ({
-                          ...current,
-                          name: current.name || item.file.replace(/\.gguf$/i, ''),
-                          modelPath: item.modelPath!,
-                        }));
-                        setTrusted(false);
-                      }}
+                      disabled={busy}
+                      onClick={() =>
+                        void operation(async () => {
+                          const value = await inspectLocalModel(item.modelPath!);
+                          if (mounted.current) {
+                            applyInspection(value);
+                            setDraft((current) => ({
+                              ...current,
+                              name: current.name || item.file.replace(/\.gguf$/i, ''),
+                            }));
+                          }
+                        }, false)
+                      }
                     >
-                      등록 양식에 사용
+                      분석 후 등록 양식에 사용
                     </button>
                   )}
                   <button
@@ -525,9 +553,8 @@ export function ModelManager({
                     </p>
                   )}
                   <p>
-                    모델 컨텍스트{' '}
-                    {profile.nativeContextSize?.toLocaleString() ?? '메타데이터 없음'} · Chat
-                    template{' '}
+                    모델 컨텍스트 {profile.nativeContextSize?.toLocaleString() ?? '메타데이터 없음'}{' '}
+                    · Chat template{' '}
                     {profile.settings.chatTemplate
                       ? '사용자 지정'
                       : profile.embeddedChatTemplate
@@ -606,6 +633,7 @@ export function ModelManager({
                     value={draft[key]}
                     onChange={(e) => {
                       setDraft({ ...draft, [key]: e.target.value });
+                      if (key === 'modelPath') setInspection(null);
                       setTrusted(false);
                     }}
                   />
@@ -618,8 +646,11 @@ export function ModelManager({
                           key === 'enginePath' ? 'engine' : 'model',
                         );
                         if (path && mounted.current) {
-                          setDraft((current) => ({ ...current, [key]: path }));
-                          setTrusted(false);
+                          if (key === 'modelPath') applyInspection(await inspectLocalModel(path));
+                          else {
+                            setDraft((current) => ({ ...current, [key]: path }));
+                            setTrusted(false);
+                          }
                         }
                       }, false)
                     }
@@ -629,6 +660,33 @@ export function ModelManager({
                 </div>
               </label>
             ))}
+            <div className="edit-actions">
+              <button
+                type="button"
+                disabled={unavailable || busy || !draft.modelPath.trim()}
+                onClick={() =>
+                  void operation(async () => {
+                    const value = await inspectLocalModel(draft.modelPath.trim());
+                    if (mounted.current) applyInspection(value);
+                  }, false)
+                }
+              >
+                GGUF 분석·권장값 적용
+              </button>
+            </div>
+            {inspection && (
+              <p role="status">
+                {inspection.modelName || '이름 정보 없음'}
+                {inspection.modelArchitecture ? ` · ${inspection.modelArchitecture}` : ''}
+                {inspection.layerCount ? ` · ${inspection.layerCount} layers` : ''} · 권장 컨텍스트{' '}
+                {inspection.recommendedSettings.contextSize.toLocaleString()} · 예상 KV cache{' '}
+                {inspection.estimatedKvCacheMb === null
+                  ? '메타데이터 부족'
+                  : `${inspection.estimatedKvCacheMb.toLocaleString()} MiB`}
+                <br />
+                <small>{inspection.recommendation}</small>
+              </p>
+            )}
             <div className="settings-grid">
               {(
                 [

@@ -15,6 +15,7 @@ import {
   engineArguments,
   inspectProfile,
   inspectGguf,
+  inspectLocalModel,
   parseNvidiaSmi,
   type RuntimeRepository,
 } from './index';
@@ -146,6 +147,12 @@ describe('managed local engines', () => {
       stringEntry('general.name', 'Qwen fixture'),
       stringEntry('tokenizer.ggml.model', 'gpt2'),
       u32Entry('qwen3.context_length', 131072),
+      u32Entry('qwen3.block_count', 28),
+      u32Entry('qwen3.embedding_length', 3584),
+      u32Entry('qwen3.attention.head_count', 28),
+      u32Entry('qwen3.attention.head_count_kv', 4),
+      u32Entry('qwen3.attention.key_length', 128),
+      u32Entry('qwen3.attention.value_length', 128),
       stringEntry('tokenizer.chat_template', '{% for message in messages %}'),
     ];
     const header = Buffer.alloc(24);
@@ -166,12 +173,32 @@ describe('managed local engines', () => {
           'general.name': 'Qwen fixture',
           'tokenizer.ggml.model': 'gpt2',
           'qwen3.context_length': 131072,
+          'qwen3.block_count': 28,
+          'qwen3.embedding_length': 3584,
+          'qwen3.attention.head_count': 28,
+          'qwen3.attention.head_count_kv': 4,
+          'qwen3.attention.key_length': 128,
+          'qwen3.attention.value_length': 128,
           'tokenizer.chat_template': '{% for message in messages %}',
         },
       });
     } finally {
       await handle.close();
     }
+    await expect(inspectLocalModel(path, 22528, true)).resolves.toMatchObject({
+      modelName: 'Qwen fixture',
+      modelArchitecture: 'qwen3',
+      nativeContextSize: 131072,
+      layerCount: 28,
+      embeddedChatTemplate: true,
+      estimatedKvCacheMb: 7168,
+      recommendedVramReservationMb: 7937,
+      recommendedSettings: { contextSize: 131072, gpuLayers: 'all', kvOffload: true },
+    });
+    await expect(inspectLocalModel(path, 0, false)).resolves.toMatchObject({
+      recommendedVramReservationMb: 0,
+      recommendedSettings: { contextSize: 32768, gpuLayers: 0, kvOffload: false },
+    });
   });
   it('downloads, verifies and removes a public Hugging Face GGUF file', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'lodex-download-'));
@@ -215,8 +242,22 @@ describe('managed local engines', () => {
     const completed = (await manager.snapshot()).downloads[0]!;
     expect(completed).toMatchObject({ id: started.id, downloadedBytes: 24, totalBytes: 24 });
     expect(await readFile(completed.modelPath!)).toEqual(header);
-    await manager.downloadAction(completed.id, 'remove');
-    expect((await manager.snapshot()).downloads).toEqual([]);
+    await manager.close();
+    const restored = new RuntimeManager(repo, resolve('apps/daemon/dist/supervisor.cjs'), {
+      modelRoot: join(dir, 'models'),
+      fetch: (() => {
+        throw new Error('completed downloads must not be fetched again');
+      }) as typeof fetch,
+    });
+    managers.push(restored);
+    expect((await restored.snapshot()).downloads[0]).toMatchObject({
+      id: completed.id,
+      status: 'completed',
+      modelPath: completed.modelPath,
+      sha256: completed.sha256,
+    });
+    await restored.downloadAction(completed.id, 'remove');
+    expect((await restored.snapshot()).downloads).toEqual([]);
     await expect(readFile(completed.modelPath!)).rejects.toMatchObject({ code: 'ENOENT' });
   });
   it('parses bounded NVIDIA resource measurements and ignores malformed rows', () => {

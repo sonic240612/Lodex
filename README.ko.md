@@ -9,7 +9,7 @@
 ## 기능
 
 - localhost·사설망·Tailscale을 통한 외부 llama-server 연결
-- 공개 Hugging Face GGUF 다운로드·해시/메타데이터 검증과 컨텍스트·GPU·KV cache·템플릿·VRAM 예약을 설정하는 모델 프로필
+- 재시작 후에도 유지되는 공개 Hugging Face GGUF 다운로드·해시/메타데이터 검증과 VRAM에 맞춘 컨텍스트·GPU·KV cache·스레드·예약량 권장값
 - 모델 기본 설정·자동 컨텍스트/출력 한도·비용 표시·일시적 오류 재시도를 지원하는 OpenRouter 연결
 - Plan·Build·서브에이전트별 모델 지정, 최대 3개 독립 읽기 작업 동시 실행
 - 로컬 프로젝트 폴더 연결, 프로젝트별 대화, Git worktree 생성
@@ -43,7 +43,7 @@ Windows에서는 `run-lodex.bat`를 더블클릭하면 빠진 npm 패키지를 �
 
 ### 관리형 로컬 모델
 
-모델 관리에서 공개 Hugging Face GGUF를 받거나 디스크의 파일을 선택하세요. llama-server 실행 파일과 엔진 설정을 저장하기 전에 모델 아키텍처·원래 컨텍스트·tokenizer·내장 chat template 메타데이터를 확인합니다. VRAM 값은 스케줄러 예약량이며 실제 GPU 메모리의 강제 제한이 아닙니다.
+모델 관리에서 공개 Hugging Face GGUF를 받거나 디스크의 파일을 선택하세요. 모델 아키텍처·레이어와 attention 크기·원래 컨텍스트·tokenizer·내장 chat template을 읽고, 설정한 VRAM 예산에 맞는 실행 설정을 등록 전에 채울 수 있습니다. 다운로드 이력은 앱을 다시 시작해도 유지됩니다. VRAM 값은 스케줄러 예약량이며 실제 GPU 메모리의 강제 제한이 아닙니다.
 
 ### 외부 llama-server
 

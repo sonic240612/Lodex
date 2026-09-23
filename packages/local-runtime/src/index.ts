@@ -1,17 +1,29 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { lstat, open, realpath, mkdir, rename, unlink, type FileHandle } from 'node:fs/promises';
+import {
+  lstat,
+  open,
+  realpath,
+  mkdir,
+  readFile,
+  rename,
+  unlink,
+  writeFile,
+  type FileHandle,
+} from 'node:fs/promises';
 import { isAbsolute, dirname, join, resolve, sep } from 'node:path';
 import { createServer } from 'node:net';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { freemem, platform, totalmem } from 'node:os';
+import { availableParallelism, freemem, platform, totalmem } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
 import { StringDecoder } from 'node:string_decoder';
 import {
   AppError,
+  engineSettingsSchema,
   localProfileInputSchema,
   runtimeSettingsSchema,
   modelDownloadInputSchema,
+  modelDownloadSchema,
   type EngineSettings,
   type LocalProfile,
   type LocalProfileInput,
@@ -22,6 +34,7 @@ import {
   type RuntimeResources,
   type ModelDownload,
   type ModelDownloadInput,
+  type ModelInspection,
 } from '@lodex/contracts';
 import { privateServerFetch } from '@lodex/providers';
 
@@ -180,7 +193,10 @@ class GgufReader {
     if (type === 4) return (await this.take(4)).readUInt32LE(0);
     if (type === 5) return (await this.take(4)).readInt32LE(0);
     if (type === 10 || type === 11) {
-      const value = type === 10 ? (await this.take(8)).readBigUInt64LE(0) : (await this.take(8)).readBigInt64LE(0);
+      const value =
+        type === 10
+          ? (await this.take(8)).readBigUInt64LE(0)
+          : (await this.take(8)).readBigInt64LE(0);
       return value <= BigInt(Number.MAX_SAFE_INTEGER) && value >= BigInt(Number.MIN_SAFE_INTEGER)
         ? Number(value)
         : undefined;
@@ -236,10 +252,7 @@ export async function inspectGguf(handle: FileHandle, size: number): Promise<Ggu
   const metadataCountValue = header.readBigUInt64LE(16);
   if (tensorCountValue === 0n)
     throw new AppError('GGUF_FORMAT', '모델 tensor 정보가 비어 있습니다.');
-  if (
-    tensorCountValue > BigInt(Number.MAX_SAFE_INTEGER) ||
-    metadataCountValue > 100_000n
-  )
+  if (tensorCountValue > BigInt(Number.MAX_SAFE_INTEGER) || metadataCountValue > 100_000n)
     throw new AppError('GGUF_FORMAT', 'GGUF 항목 수가 허용 범위를 초과합니다.');
   const reader = new GgufReader(handle, size);
   const values: Record<string, string | number | boolean> = {};
@@ -248,12 +261,21 @@ export async function inspectGguf(handle: FileHandle, size: number): Promise<Ggu
     if (!key || Object.hasOwn(values, key))
       throw new AppError('GGUF_FORMAT', 'GGUF 메타데이터 키가 비어 있거나 중복되었습니다.');
     const type = await reader.u32();
+    const wantedSuffixes = [
+      '.block_count',
+      '.embedding_length',
+      '.attention.head_count',
+      '.attention.head_count_kv',
+      '.attention.key_length',
+      '.attention.value_length',
+    ];
     const wanted =
       key === 'general.name' ||
       key === 'general.architecture' ||
       key === 'tokenizer.ggml.model' ||
       key === 'tokenizer.chat_template' ||
-      key.endsWith('.context_length');
+      key.endsWith('.context_length') ||
+      wantedSuffixes.some((suffix) => key.endsWith(suffix));
     if (!wanted || type === 9) {
       await reader.skipValue(type);
       continue;
@@ -262,6 +284,142 @@ export async function inspectGguf(handle: FileHandle, size: number): Promise<Ggu
     if (value !== undefined) values[key] = value;
   }
   return { version, tensorCount: Number(tensorCountValue), values };
+}
+
+function positiveInteger(value: unknown) {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : undefined;
+}
+function normalizedMetadata(metadata: GgufMetadata) {
+  const architecture =
+    typeof metadata.values['general.architecture'] === 'string'
+      ? metadata.values['general.architecture']
+      : undefined;
+  const value = (suffix: string) =>
+    architecture ? positiveInteger(metadata.values[architecture + suffix]) : undefined;
+  return {
+    architecture,
+    modelName:
+      typeof metadata.values['general.name'] === 'string'
+        ? metadata.values['general.name']
+        : undefined,
+    tokenizerModel:
+      typeof metadata.values['tokenizer.ggml.model'] === 'string'
+        ? metadata.values['tokenizer.ggml.model']
+        : undefined,
+    embeddedChatTemplate: typeof metadata.values['tokenizer.chat_template'] === 'string',
+    nativeContextSize: value('.context_length'),
+    layerCount: value('.block_count'),
+    embeddingLength: value('.embedding_length'),
+    headCount: value('.attention.head_count'),
+    kvHeadCount: value('.attention.head_count_kv'),
+    keyLength: value('.attention.key_length'),
+    valueLength: value('.attention.value_length'),
+  };
+}
+
+function estimateKvBytes(
+  metadata: ReturnType<typeof normalizedMetadata>,
+  contextSize: number,
+): number | null {
+  const layers = metadata.layerCount;
+  const heads = metadata.headCount;
+  const kvHeads = metadata.kvHeadCount ?? heads;
+  const fallbackHeadLength =
+    metadata.embeddingLength && heads ? Math.ceil(metadata.embeddingLength / heads) : undefined;
+  const keyLength = metadata.keyLength ?? fallbackHeadLength;
+  const valueLength = metadata.valueLength ?? fallbackHeadLength;
+  if (!layers || !kvHeads || !keyLength || !valueLength) return null;
+  return layers * kvHeads * (keyLength + valueLength) * contextSize * 2;
+}
+
+export async function inspectLocalModel(
+  path: string,
+  vramBudgetMb: number,
+  gpuAvailable: boolean,
+): Promise<ModelInspection> {
+  const model = await inspectFile(path);
+  const handle = await open(model.path, 'r');
+  let metadata: GgufMetadata;
+  try {
+    metadata = await inspectGguf(handle, model.size);
+  } finally {
+    await handle.close();
+  }
+  const normalized = normalizedMetadata(metadata);
+  const nativeContext = Math.min(normalized.nativeContextSize ?? 32768, 2_097_152);
+  const recommendationCeiling = estimateKvBytes(normalized, nativeContext)
+    ? nativeContext
+    : Math.min(nativeContext, 32768);
+  const budgetBytes = Math.max(0, vramBudgetMb) * mib;
+  const weightBytes = Math.ceil(model.size * 1.08);
+  const overheadBytes = 768 * mib;
+  const candidates = [
+    recommendationCeiling,
+    262144,
+    131072,
+    65536,
+    32768,
+    16384,
+    8192,
+    4096,
+    2048,
+    1024,
+  ]
+    .filter(
+      (value, index, values) => value <= recommendationCeiling && values.indexOf(value) === index,
+    )
+    .sort((left, right) => right - left);
+  let contextSize = Math.min(nativeContext, 32768);
+  let estimatedKv = estimateKvBytes(normalized, contextSize);
+  let fullOffload = false;
+  if (gpuAvailable && budgetBytes > 0) {
+    const fitting = candidates.find((candidate) => {
+      const kv = estimateKvBytes(normalized, candidate);
+      return weightBytes + (kv ?? 512 * mib) + overheadBytes <= budgetBytes;
+    });
+    if (fitting) {
+      contextSize = fitting;
+      estimatedKv = estimateKvBytes(normalized, fitting);
+      fullOffload = true;
+    }
+  }
+  const threads = Math.max(1, Math.min(16, availableParallelism() - 1 || 1));
+  const estimatedTotalMb = Math.ceil(
+    (weightBytes + (estimatedKv ?? 512 * mib) + overheadBytes) / mib,
+  );
+  const recommendedSettings = engineSettingsSchema.parse({
+    contextSize,
+    gpuLayers: gpuAvailable ? (fullOffload ? 'all' : 'auto') : 0,
+    threads,
+    batchThreads: threads,
+    batchSize: contextSize >= 8192 ? 512 : 256,
+    microBatchSize: contextSize >= 8192 ? 128 : 64,
+    flashAttention: 'auto',
+    cacheTypeK: 'f16',
+    cacheTypeV: 'f16',
+    kvOffload: gpuAvailable,
+  });
+  return {
+    modelPath: model.path,
+    modelBytes: model.size,
+    ggufVersion: metadata.version,
+    ...(normalized.modelName ? { modelName: normalized.modelName } : {}),
+    ...(normalized.architecture ? { modelArchitecture: normalized.architecture } : {}),
+    ...(normalized.tokenizerModel ? { tokenizerModel: normalized.tokenizerModel } : {}),
+    ...(normalized.nativeContextSize ? { nativeContextSize: normalized.nativeContextSize } : {}),
+    ...(normalized.layerCount ? { layerCount: normalized.layerCount } : {}),
+    embeddedChatTemplate: normalized.embeddedChatTemplate,
+    recommendedSettings,
+    recommendedVramReservationMb: gpuAvailable
+      ? Math.min(Math.max(0, vramBudgetMb), Math.max(1024, estimatedTotalMb))
+      : 0,
+    estimatedKvCacheMb: estimatedKv === null ? null : Math.ceil(estimatedKv / mib),
+    recommendation: gpuAvailable
+      ? fullOffload
+        ? '현재 VRAM 예산 안에서 전체 GPU offload와 가장 큰 적합 컨텍스트를 선택했습니다.'
+        : '모델 전체가 VRAM 예산을 넘으므로 llama.cpp 자동 GPU layer 배치를 선택했습니다.'
+      : '사용 가능한 GPU 예산이 없어 CPU 실행 설정을 선택했습니다.',
+  };
 }
 
 export async function inspectProfile(input: LocalProfileInput): Promise<LocalProfile> {
@@ -279,6 +437,7 @@ export async function inspectProfile(input: LocalProfileInput): Promise<LocalPro
   const help = await probe(engine.path, '--help');
   const engineVersion = (await probe(engine.path, '--version')).trim().slice(0, 2000);
   const supportedFlags = [...new Set(help.match(/--[a-z][a-z0-9-]+/g) ?? [])];
+  const normalized = normalizedMetadata(metadata);
   const profile: LocalProfile = {
     id: parsed.id ?? randomUUID(),
     version: 1,
@@ -293,28 +452,11 @@ export async function inspectProfile(input: LocalProfileInput): Promise<LocalPro
     engineVersion,
     supportedFlags,
     ggufVersion: metadata.version,
-    ...(typeof metadata.values['general.name'] === 'string'
-      ? { modelName: metadata.values['general.name'] }
-      : {}),
-    ...(typeof metadata.values['general.architecture'] === 'string'
-      ? { modelArchitecture: metadata.values['general.architecture'] }
-      : {}),
-    ...(typeof metadata.values['tokenizer.ggml.model'] === 'string'
-      ? { tokenizerModel: metadata.values['tokenizer.ggml.model'] }
-      : {}),
-    ...(typeof metadata.values['tokenizer.chat_template'] === 'string'
-      ? { embeddedChatTemplate: true }
-      : {}),
-    ...(() => {
-      const architecture = metadata.values['general.architecture'];
-      const value =
-        typeof architecture === 'string'
-          ? metadata.values[architecture + '.context_length']
-          : undefined;
-      return typeof value === 'number' && Number.isInteger(value) && value > 0
-        ? { nativeContextSize: value }
-        : {};
-    })(),
+    ...(normalized.modelName ? { modelName: normalized.modelName } : {}),
+    ...(normalized.architecture ? { modelArchitecture: normalized.architecture } : {}),
+    ...(normalized.tokenizerModel ? { tokenizerModel: normalized.tokenizerModel } : {}),
+    ...(normalized.embeddedChatTemplate ? { embeddedChatTemplate: true } : {}),
+    ...(normalized.nativeContextSize ? { nativeContextSize: normalized.nativeContextSize } : {}),
   };
   engineArguments(profile, 1, 'probe'); // Reject unsupported/reserved options before persisting.
   return profile;
@@ -548,14 +690,93 @@ type DownloadJob = { controller: AbortController; promise: Promise<void>; tempor
 class ModelDownloads {
   private records = new Map<string, ModelDownload>();
   private jobs = new Map<string, DownloadJob>();
+  private ready: Promise<void>;
+  private manifestQueue: Promise<unknown> = Promise.resolve();
   constructor(
     private root: string | undefined,
     private fetcher: typeof fetch,
-  ) {}
-  snapshot() {
+  ) {
+    this.ready = this.restore();
+  }
+  async snapshot() {
+    await this.ready;
     return [...this.records.values()]
       .map((record) => structuredClone(record))
       .sort((left, right) => right.startedAt.localeCompare(left.startedAt));
+  }
+  private manifestPath() {
+    return this.root ? join(this.root, '.downloads.json') : undefined;
+  }
+  private persist() {
+    const path = this.manifestPath();
+    if (!path) return Promise.resolve();
+    const document = JSON.stringify({ version: 1, downloads: [...this.records.values()] });
+    const task = this.manifestQueue.then(async () => {
+      const temporary = path + '.tmp';
+      await writeFile(temporary, document, { encoding: 'utf8', mode: 0o600 });
+      await rename(temporary, path);
+    });
+    this.manifestQueue = task.catch(() => undefined);
+    return task;
+  }
+  private async restore() {
+    const path = this.manifestPath();
+    if (!path || !this.root) return;
+    await mkdir(this.root, { recursive: true, mode: 0o700 });
+    let source: unknown;
+    try {
+      const text = await readFile(path, 'utf8');
+      if (Buffer.byteLength(text) > 4_194_304) return;
+      source = JSON.parse(text);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return;
+      return;
+    }
+    if (!source || typeof source !== 'object' || (source as { version?: unknown }).version !== 1)
+      return;
+    const downloads = (source as { downloads?: unknown }).downloads;
+    if (!Array.isArray(downloads) || downloads.length > 10_000) return;
+    let changed = false;
+    for (const value of downloads) {
+      const parsed = modelDownloadSchema.safeParse(value);
+      if (!parsed.success || this.records.has(parsed.data.id)) {
+        changed = true;
+        continue;
+      }
+      let destination: string;
+      try {
+        destination = this.destination(parsed.data);
+      } catch {
+        changed = true;
+        continue;
+      }
+      const record = { ...parsed.data, modelPath: destination };
+      if (record.status === 'downloading') {
+        record.status = 'failed';
+        record.finishedAt = new Date().toISOString();
+        record.error = '앱이 종료되어 다운로드가 중단되었습니다. 다시 다운로드하세요.';
+        await unlink(destination + '.' + record.id + '.part').catch(() => undefined);
+        changed = true;
+      }
+      if (record.status === 'completed') {
+        try {
+          const info = await lstat(destination);
+          if (!info.isFile()) throw new Error('not a file');
+          if (record.downloadedBytes !== info.size) {
+            record.downloadedBytes = info.size;
+            record.totalBytes = info.size;
+            changed = true;
+          }
+        } catch {
+          record.status = 'failed';
+          record.finishedAt = new Date().toISOString();
+          record.error = '다운로드한 모델 파일을 찾을 수 없습니다.';
+          changed = true;
+        }
+      }
+      this.records.set(record.id, record);
+    }
+    if (changed) await this.persist();
   }
   private destination(input: ModelDownloadInput) {
     if (!this.root)
@@ -575,10 +796,15 @@ class ModelDownloads {
     return destination;
   }
   async start(value: ModelDownloadInput) {
+    await this.ready;
     const input = modelDownloadInputSchema.parse(value);
     const destination = this.destination(input);
     if ([...this.records.values()].some((record) => record.modelPath === destination))
-      throw new AppError('MODEL_DOWNLOAD_EXISTS', '같은 모델 파일이 이미 다운로드 목록에 있습니다.', 409);
+      throw new AppError(
+        'MODEL_DOWNLOAD_EXISTS',
+        '같은 모델 파일이 이미 다운로드 목록에 있습니다.',
+        409,
+      );
     try {
       await lstat(destination);
       throw new AppError('MODEL_DOWNLOAD_EXISTS', '같은 모델 파일이 이미 저장되어 있습니다.', 409);
@@ -599,6 +825,7 @@ class ModelDownloads {
       modelPath: destination,
     };
     this.records.set(id, record);
+    await this.persist();
     const controller = new AbortController();
     const temporaryPath = destination + '.' + id + '.part';
     const promise = this.download(input, record, destination, temporaryPath, controller.signal)
@@ -614,6 +841,7 @@ class ModelDownloads {
       .finally(async () => {
         await unlink(temporaryPath).catch(() => undefined);
         this.jobs.delete(id);
+        await this.persist();
       });
     this.jobs.set(id, { controller, promise, temporaryPath });
     return structuredClone(record);
@@ -646,7 +874,11 @@ class ModelDownloads {
     }
     const finalUrl = new URL(response.url || source);
     if (finalUrl.protocol !== 'https:' || finalUrl.username || finalUrl.password)
-      throw new AppError('MODEL_DOWNLOAD_REDIRECT', '안전하지 않은 다운로드 주소로 이동했습니다.', 502);
+      throw new AppError(
+        'MODEL_DOWNLOAD_REDIRECT',
+        '안전하지 않은 다운로드 주소로 이동했습니다.',
+        502,
+      );
     if (!response.ok) {
       await response.body?.cancel().catch(() => undefined);
       throw new AppError(
@@ -672,7 +904,10 @@ class ModelDownloads {
         if (part.done) break;
         position += part.value.length;
         if (position > 1_099_511_627_776)
-          throw new AppError('MODEL_DOWNLOAD_SIZE', '1 TiB를 넘는 모델 파일은 다운로드할 수 없습니다.');
+          throw new AppError(
+            'MODEL_DOWNLOAD_SIZE',
+            '1 TiB를 넘는 모델 파일은 다운로드할 수 없습니다.',
+          );
         hash.update(part.value);
         await output.write(part.value);
         record.downloadedBytes = position;
@@ -683,10 +918,17 @@ class ModelDownloads {
       await output.close();
     }
     if (record.totalBytes !== null && position !== record.totalBytes)
-      throw new AppError('MODEL_DOWNLOAD_TRUNCATED', '다운로드한 파일 크기가 서버 응답과 다릅니다.', 502);
+      throw new AppError(
+        'MODEL_DOWNLOAD_TRUNCATED',
+        '다운로드한 파일 크기가 서버 응답과 다릅니다.',
+        502,
+      );
     const sha256 = hash.digest('hex');
     if (input.expectedSha256 && sha256 !== input.expectedSha256)
-      throw new AppError('MODEL_DOWNLOAD_HASH', '다운로드한 모델의 SHA-256이 입력한 값과 다릅니다.');
+      throw new AppError(
+        'MODEL_DOWNLOAD_HASH',
+        '다운로드한 모델의 SHA-256이 입력한 값과 다릅니다.',
+      );
     const handle = await open(temporaryPath, 'r');
     try {
       await inspectGguf(handle, position);
@@ -700,8 +942,10 @@ class ModelDownloads {
     record.finishedAt = new Date().toISOString();
   }
   async action(id: string, action: 'cancel' | 'remove', protectedPaths: string[] = []) {
+    await this.ready;
     const record = this.records.get(id);
-    if (!record) throw new AppError('MODEL_DOWNLOAD_NOT_FOUND', '다운로드 작업을 찾을 수 없습니다.', 404);
+    if (!record)
+      throw new AppError('MODEL_DOWNLOAD_NOT_FOUND', '다운로드 작업을 찾을 수 없습니다.', 404);
     const job = this.jobs.get(id);
     if (action === 'cancel') {
       if (!job) throw new AppError('MODEL_DOWNLOAD_FINISHED', '이미 끝난 다운로드입니다.', 409);
@@ -716,12 +960,18 @@ class ModelDownloads {
         '등록된 모델 프로필에서 사용하는 파일입니다. 프로필을 먼저 제거하세요.',
         409,
       );
-    if (record.status === 'completed' && record.modelPath) await unlink(record.modelPath);
+    if (record.modelPath)
+      await unlink(record.modelPath).catch((error) => {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      });
     this.records.delete(id);
+    await this.persist();
   }
   async close() {
+    await this.ready;
     for (const job of this.jobs.values()) job.controller.abort();
     await Promise.allSettled([...this.jobs.values()].map((job) => job.promise));
+    await this.manifestQueue;
   }
 }
 
@@ -752,10 +1002,11 @@ export class RuntimeManager {
     const now = Date.now();
     if (!this.resourceCache || now - this.resourceCache.measuredAt >= 2000)
       this.resourceCache = { measuredAt: now, value: measureResources() };
-    const [profiles, settings, resources] = await Promise.all([
+    const [profiles, settings, resources, downloads] = await Promise.all([
       this.repository.localProfiles(),
       this.repository.runtimeSettings(),
       this.resourceCache.value,
+      this.downloads.snapshot(),
     ]);
     return {
       profiles,
@@ -774,7 +1025,7 @@ export class RuntimeManager {
         }),
       ),
       resources,
-      downloads: this.downloads.snapshot(),
+      downloads,
     };
   }
   startDownload(input: ModelDownloadInput) {
@@ -782,8 +1033,18 @@ export class RuntimeManager {
   }
   async downloadAction(id: string, action: 'cancel' | 'remove') {
     const protectedPaths =
-      action === 'remove' ? (await this.repository.localProfiles()).map((profile) => profile.modelPath) : [];
+      action === 'remove'
+        ? (await this.repository.localProfiles()).map((profile) => profile.modelPath)
+        : [];
     return this.downloads.action(id, action, protectedPaths);
+  }
+  async inspectModel(path: string) {
+    const [settings, resources] = await Promise.all([
+      this.repository.runtimeSettings(),
+      measureResources(),
+    ]);
+    const budget = Math.max(0, settings.vramBudgetMb - settings.headroomMb);
+    return inspectLocalModel(path, budget, resources.gpus.length > 0 && budget > 0);
   }
   register(input: LocalProfileInput) {
     return this.serial(async () => {

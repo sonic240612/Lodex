@@ -179,4 +179,23 @@ describe('managed model daemon integration', () => {
     expect((await stale.json()).error.code).toBe('VERSION_CONFLICT');
     expect((await app.request('/v1/runtime/action', null)).status).toBe(400);
   });
+
+  it('inspects a GGUF file and returns settings that can be saved directly', async () => {
+    const app = await fixture();
+    const response = await app.request('/v1/runtime/inspect', {
+      modelPath: app.profile.modelPath,
+    });
+    expect(response.status).toBe(200);
+    expect((await response.json()).inspection).toMatchObject({
+      modelPath: app.profile.modelPath,
+      ggufVersion: 3,
+      embeddedChatTemplate: false,
+      recommendedSettings: {
+        contextSize: 32768,
+        flashAttention: 'auto',
+        cacheTypeK: 'f16',
+        cacheTypeV: 'f16',
+      },
+    });
+  });
 });

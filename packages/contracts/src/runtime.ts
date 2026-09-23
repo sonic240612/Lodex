@@ -85,33 +85,54 @@ export const modelDownloadInputSchema = z.strictObject({
     .min(1)
     .max(512)
     .refine((value) => safePathParts(value) && value.toLowerCase().endsWith('.gguf')),
-  revision: z
+  revision: z.string().trim().min(1).max(200).default('main').refine(safePathParts),
+  expectedSha256: z
     .string()
     .trim()
-    .min(1)
-    .max(200)
-    .default('main')
-    .refine(safePathParts),
-  expectedSha256: z.string().trim().toLowerCase().regex(/^[a-f0-9]{64}$/).optional(),
+    .toLowerCase()
+    .regex(/^[a-f0-9]{64}$/)
+    .optional(),
 });
 export type ModelDownloadInput = z.infer<typeof modelDownloadInputSchema>;
 export const modelDownloadActionSchema = z.strictObject({
   downloadId: z.uuid(),
   action: z.enum(['cancel', 'remove']),
 });
-export interface ModelDownload {
-  id: string;
-  repository: string;
-  file: string;
-  revision: string;
-  status: 'downloading' | 'completed' | 'failed' | 'cancelled';
-  downloadedBytes: number;
-  totalBytes: number | null;
-  startedAt: string;
-  finishedAt?: string;
-  modelPath?: string;
-  sha256?: string;
-  error?: string;
+export const modelDownloadSchema = z.strictObject({
+  id: z.uuid(),
+  repository: modelDownloadInputSchema.shape.repository,
+  file: modelDownloadInputSchema.shape.file,
+  revision: modelDownloadInputSchema.shape.revision,
+  status: z.enum(['downloading', 'completed', 'failed', 'cancelled']),
+  downloadedBytes: z.number().int().nonnegative().max(1_099_511_627_776),
+  totalBytes: z.number().int().nonnegative().max(1_099_511_627_776).nullable(),
+  startedAt: z.iso.datetime(),
+  finishedAt: z.iso.datetime().optional(),
+  modelPath: z.string().max(4096).optional(),
+  sha256: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/)
+    .optional(),
+  error: z.string().max(2000).optional(),
+});
+export type ModelDownload = z.infer<typeof modelDownloadSchema>;
+export const modelInspectionInputSchema = z.strictObject({
+  modelPath: z.string().min(1).max(4096),
+});
+export interface ModelInspection {
+  modelPath: string;
+  modelBytes: number;
+  ggufVersion: number;
+  modelName?: string;
+  modelArchitecture?: string;
+  tokenizerModel?: string;
+  nativeContextSize?: number;
+  layerCount?: number;
+  embeddedChatTemplate: boolean;
+  recommendedSettings: EngineSettings;
+  recommendedVramReservationMb: number;
+  estimatedKvCacheMb: number | null;
+  recommendation: string;
 }
 export interface RuntimeInstance {
   profileId: string;

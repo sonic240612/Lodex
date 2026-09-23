@@ -201,6 +201,7 @@ fn route_allowed(method: &str, path: &str) -> bool {
         | ("POST", "/v1/sessions/delete")
         | ("POST", "/v1/execution/cleanup")
         | ("POST", "/v1/runtime/profiles")
+        | ("POST", "/v1/runtime/inspect")
         | ("POST", "/v1/runtime/settings")
         | ("POST", "/v1/runtime/action")
         | ("POST", "/v1/runtime/downloads")
@@ -704,6 +705,7 @@ mod tests {
     fn renderer_cannot_access_secret_or_arbitrary_url() {
         assert!(route_allowed("GET", "/v1/state"));
         assert!(route_allowed("POST", "/v1/commands"));
+        assert!(route_allowed("POST", "/v1/runtime/inspect"));
         assert!(route_allowed("GET", "/v1/backups"));
         assert!(route_allowed("POST", "/v1/backups/export"));
         assert!(!route_allowed("PUT", "/v1/secret"));

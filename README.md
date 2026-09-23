@@ -9,7 +9,7 @@ Desktop agent harness for local LLMs and OpenRouter.
 ## Features
 
 - Connect to an external llama-server through localhost, a private LAN, or Tailscale.
-- Download public Hugging Face GGUF files, verify their hash and metadata, and run managed profiles with configurable context, GPU, KV cache, templates, and VRAM reservations.
+- Download public Hugging Face GGUF files with restart-persistent history, verify their hash and metadata, and apply VRAM-aware context, GPU, KV cache, thread, and reservation recommendations.
 - Use OpenRouter models with catalog defaults, automatic context/output limits, reported cost, and transient request retries.
 - Route Plan, Build, and subagent work to different models. Up to three isolated read-only subagents can run concurrently.
 - Open local project folders, create Git worktrees, and keep conversations scoped to a project.
@@ -43,7 +43,7 @@ On Windows, double-click `run-lodex.bat`. It installs missing npm packages and s
 
 ### Managed local model
 
-Open the model manager to download a public Hugging Face GGUF file or select one already on disk. Choose a llama-server binary, configure the engine, and save the profile. Lodex reads the model architecture, native context, tokenizer, and embedded chat-template metadata before registration. VRAM values are scheduler reservations, not hard GPU memory limits.
+Open the model manager to download a public Hugging Face GGUF file or select one already on disk. Lodex reads model architecture, layer and attention dimensions, native context, tokenizer, and embedded chat-template metadata. It can fill settings from that metadata and the configured VRAM budget before registration. Download history survives app restarts. VRAM values are scheduler reservations, not hard GPU memory limits.
 
 ### External llama-server
 
