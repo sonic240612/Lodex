@@ -494,7 +494,7 @@ export function App() {
       Date.parse(session.contextCompaction.createdAt) > Date.parse(session.run.startedAt));
   const contextBase = compactionIsNewer
     ? session!.contextCompaction!.compactedEstimateTokens
-    : (session?.run?.context?.inputEstimateTokens ?? 0);
+    : (session?.run?.context?.inputTokens ?? session?.run?.context?.inputEstimateTokens ?? 0);
   const contextUsed = Math.max(0, contextBase);
   const contextPercent = Math.min(
     100,
@@ -1151,9 +1151,16 @@ export function App() {
           {session?.run?.context && (
             <details className="context-report">
               <summary>
-                입력 구성 · 추정 {session.run.context.inputEstimateTokens.toLocaleString()} 토큰
+                입력 구성 · {session.run.context.inputTokens === undefined ? '추정' : '실측'}{' '}
+                {(session.run.context.inputTokens ?? session.run.context.inputEstimateTokens).toLocaleString()} 토큰
               </summary>
               <dl className="metrics-list">
+                {session.run.context.inputTokens !== undefined && (
+                  <div>
+                    <dt>보수적 추정</dt>
+                    <dd>{session.run.context.inputEstimateTokens.toLocaleString()}</dd>
+                  </div>
+                )}
                 <div>
                   <dt>앱 예산</dt>
                   <dd>{session.run.context.contextBudgetTokens.toLocaleString()}</dd>

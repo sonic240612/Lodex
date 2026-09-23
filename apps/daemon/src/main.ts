@@ -71,6 +71,7 @@ async function main() {
     supervisorPath: join(__dirname, 'supervisor.cjs'),
     worktreeRoot: join(config.dataDir, 'worktrees'),
     observationRoot: join(config.dataDir, 'observations'),
+    modelRoot: join(config.dataDir, 'models'),
     ...(config.telegramToken ? { telegramToken: config.telegramToken } : {}),
     ...secrets,
   });

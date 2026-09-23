@@ -22,6 +22,9 @@ const dialectNames: Record<SkillDialect, string> = {
   codex: 'Codex',
   claude: 'Claude Code',
   pi: 'pi',
+  opencode: 'OpenCode',
+  openclaw: 'OpenClaw',
+  hermes: 'Hermes Agent',
 };
 const blank = (): Registration => ({ path: '', dialect: 'standard' });
 const failureMessage = (error: unknown) => (error instanceof Error ? error.message : String(error));

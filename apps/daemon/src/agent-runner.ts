@@ -3,6 +3,7 @@ import {
   AppError,
   autopilotLimitsSchema,
   type Activity,
+  type ContextManifest,
   type InferenceMessage,
   type InferenceProvider,
   type Project,
@@ -253,12 +254,29 @@ export async function runAgent(options: {
             ])
           : [...context.request.messages, ...continuation],
       };
-      const manifest = {
+      const manifest: ContextManifest = {
         ...context.manifest,
         ...measureRequest(request),
         messageCount: request.messages.length,
       };
-      const costReservation = await reserveModelCall(session.config, manifest.inputEstimateTokens);
+      const exactInputTokens = await provider.countInputTokens?.(request, signal);
+      if (typeof exactInputTokens === 'number') {
+        manifest.inputTokens = exactInputTokens;
+        manifest.tokenCountSource = 'llama_cpp_chat_template';
+        const available =
+          manifest.contextBudgetTokens -
+          manifest.outputReserveTokens -
+          manifest.safetyReserveTokens;
+        if (exactInputTokens > available)
+          throw new AppError(
+            'CONTEXT_BUDGET',
+            `실제 입력 ${exactInputTokens.toLocaleString('en-US')} + 출력 예약 ${manifest.outputReserveTokens.toLocaleString('en-US')} + 여유 ${manifest.safetyReserveTokens.toLocaleString('en-US')}가 앱 컨텍스트 예산 ${manifest.contextBudgetTokens.toLocaleString('en-US')}을 초과합니다. 컨텍스트 압축 후 다시 시도하세요.`,
+          );
+      }
+      const costReservation = await reserveModelCall(
+        session.config,
+        exactInputTokens ?? manifest.inputEstimateTokens,
+      );
       await store.updateRun({
         sessionId: session.id,
         runId,
@@ -270,6 +288,7 @@ export async function runAgent(options: {
       const cards = new Map<number, Activity>();
       const details: Record<string, unknown>[] = [];
       const roundUsage: Partial<Usage> = {};
+      if (typeof exactInputTokens === 'number') roundUsage.inputTokens = exactInputTokens;
       rounds.push(roundUsage);
       let roundText = '',
         reasoning = '',

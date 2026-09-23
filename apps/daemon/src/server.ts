@@ -23,6 +23,8 @@ import {
   localProfileInputSchema,
   runtimeSettingsSchema,
   runtimeActionSchema,
+  modelDownloadInputSchema,
+  modelDownloadActionSchema,
   type Command,
   type InferenceProvider,
   type Session,
@@ -84,7 +86,9 @@ declare const __dirname: string;
 const skillRegistrationInput = z
   .strictObject({
     path: z.string().min(1).max(4096),
-    dialect: z.enum(['standard', 'codex', 'claude', 'pi']).default('standard'),
+    dialect: z
+      .enum(['standard', 'codex', 'claude', 'pi', 'opencode', 'openclaw', 'hermes'])
+      .default('standard'),
     id: z.uuid().optional(),
     expectedRevision: z
       .string()
@@ -111,6 +115,8 @@ interface ServerOptions {
   commandExecutor?: typeof executeCommand;
   supervisorPath?: string;
   mcpSupervisorPath?: string;
+  modelRoot?: string;
+  modelFetch?: typeof fetch;
 }
 async function readJson(request: IncomingMessage): Promise<unknown> {
   if (!request.headers['content-type']?.startsWith('application/json'))
@@ -186,6 +192,10 @@ export async function startServer(options: ServerOptions) {
       (typeof __dirname === 'string'
         ? join(__dirname, 'supervisor.cjs')
         : resolve('apps/daemon/dist/supervisor.cjs')),
+    {
+      ...(options.modelRoot ? { modelRoot: options.modelRoot } : {}),
+      ...(options.modelFetch ? { fetch: options.modelFetch } : {}),
+    },
   );
   let openrouterKey = options.openrouterKey ?? null;
   function validateInferenceConfig(config: ModelConfig) {
@@ -1209,6 +1219,21 @@ export async function startServer(options: ServerOptions) {
           await lease.release();
         } else if (value.action === 'unload') await runtime.unload(value.profileId);
         else await runtime.remove(value.profileId);
+        json(response, 200, await runtime.snapshot());
+      } else if (request.method === 'POST' && url.pathname === '/v1/runtime/downloads') {
+        const parsed = modelDownloadInputSchema.safeParse(await readJson(request));
+        if (!parsed.success)
+          throw new AppError('MODEL_DOWNLOAD_INPUT', 'Hugging Face 모델 정보가 올바르지 않습니다.');
+        await runtime.startDownload(parsed.data);
+        json(response, 202, await runtime.snapshot());
+      } else if (
+        request.method === 'POST' &&
+        url.pathname === '/v1/runtime/downloads/action'
+      ) {
+        const parsed = modelDownloadActionSchema.safeParse(await readJson(request));
+        if (!parsed.success)
+          throw new AppError('MODEL_DOWNLOAD_ACTION', '다운로드 작업이 올바르지 않습니다.');
+        await runtime.downloadAction(parsed.data.downloadId, parsed.data.action);
         json(response, 200, await runtime.snapshot());
       } else if (request.method === 'GET' && url.pathname === '/v1/execution/check') {
         const { executionConfigSchema } = await import('@lodex/contracts');

@@ -9,7 +9,7 @@ Desktop agent harness for local LLMs and OpenRouter.
 ## Features
 
 - Connect to an external llama-server through localhost, a private LAN, or Tailscale.
-- Run managed GGUF profiles with configurable context size, GPU layers, KV cache, threads, chat template, engine arguments, and VRAM reservations.
+- Download public Hugging Face GGUF files, verify their hash and metadata, and run managed profiles with configurable context, GPU, KV cache, templates, and VRAM reservations.
 - Use OpenRouter models with catalog defaults, automatic context/output limits, reported cost, and transient request retries.
 - Route Plan, Build, and subagent work to different models. Up to three isolated read-only subagents can run concurrently.
 - Open local project folders, create Git worktrees, and keep conversations scoped to a project.
@@ -17,7 +17,7 @@ Desktop agent harness for local LLMs and OpenRouter.
 - Run Docker commands with saved limits. Full Access enables host files, shell commands, environment variables, network access, and selected MCP calls.
 - Choose **Ask**, **Approve for me**, or **Full Access** per conversation. Plan mode remains read-only.
 - Use `/goal` for goal-driven runs, or run saved plan tasks with dependencies, completion criteria, verification commands, and budgets.
-- Import local `SKILL.md` folders using standard, Codex, Claude, or pi metadata.
+- Import local `SKILL.md` folders using Agent Skills, Codex, Claude Code, pi, OpenCode, OpenClaw, or Hermes metadata.
 - Connect stdio and Streamable HTTP MCP servers, select tools, preview resources and prompts, attach reviewed content, and sign in with OAuth PKCE.
 - Pair a Telegram bot for remote messages, status, plan inspection, cancellation, and approved Build access.
 - Use Eco mode, automatic fast compaction, local ObservationPack archives, and on-demand recall for large tool results.
@@ -41,7 +41,7 @@ On Windows, double-click `run-lodex.bat`. It installs missing npm packages and s
 
 ### Managed local model
 
-Open the model manager, select a llama-server binary and GGUF file, configure the engine, and save the profile. Lodex starts the server on a private loopback port and releases model leases between calls. VRAM values are scheduler reservations, not hard GPU memory limits.
+Open the model manager to download a public Hugging Face GGUF file or select one already on disk. Choose a llama-server binary, configure the engine, and save the profile. Lodex reads the model architecture, native context, tokenizer, and embedded chat-template metadata before registration. VRAM values are scheduler reservations, not hard GPU memory limits.
 
 ### External llama-server
 
@@ -78,7 +78,7 @@ Full Access is stored per conversation. File hashes, path checks, symlink checks
 - The latest four complete messages normally remain verbatim. Original messages are not deleted.
 - Eco mode compacts earlier and asks the model for shorter answers.
 - In Eco mode, ObservationPack stores large tool results locally after two full sends and exposes exact paged recall when needed.
-- The context meter shows the latest active input estimate rather than cumulative billing tokens.
+- With current llama.cpp servers, the context meter uses the model's applied chat template and tokenizer. Older or remote providers show the conservative estimate or provider-reported usage.
 
 ## Projects and execution
 

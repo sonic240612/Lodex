@@ -27,6 +27,7 @@ import {
   type LocalProfileInput,
   type LocalProfile,
   type RuntimeSettings,
+  type ModelDownloadInput,
   type McpContentInput,
   type McpContentPreview,
 } from '@lodex/contracts';
@@ -463,6 +464,25 @@ export async function runtimeAction(
 export async function configureRuntime(settings: RuntimeSettings): Promise<RuntimeSnapshot> {
   if (!nativeDesktop) throw new Error('데스크톱 앱에서 설정하세요.');
   return invoke('daemon_request', { method: 'POST', path: '/v1/runtime/settings', body: settings });
+}
+export async function startModelDownload(input: ModelDownloadInput): Promise<RuntimeSnapshot> {
+  if (!nativeDesktop) throw new Error('모델 다운로드는 데스크톱 앱에서 사용할 수 있습니다.');
+  return invoke('daemon_request', {
+    method: 'POST',
+    path: '/v1/runtime/downloads',
+    body: input,
+  });
+}
+export async function modelDownloadAction(
+  downloadId: string,
+  action: 'cancel' | 'remove',
+): Promise<RuntimeSnapshot> {
+  if (!nativeDesktop) throw new Error('모델 다운로드는 데스크톱 앱에서 관리하세요.');
+  return invoke('daemon_request', {
+    method: 'POST',
+    path: '/v1/runtime/downloads/action',
+    body: { downloadId, action },
+  });
 }
 export async function pickRuntimeFile(kind: 'engine' | 'model'): Promise<string | null> {
   if (!nativeDesktop) throw new Error('데스크톱 앱에서 파일을 선택하세요.');

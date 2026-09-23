@@ -36,7 +36,7 @@ export async function inspectSkillDirectory(
   const signal = signalOrDefault(options.signal);
   signal.throwIfAborted();
   const dialect = options.dialect ?? 'standard';
-  if (!['standard', 'codex', 'claude', 'pi'].includes(dialect))
+  if (!['standard', 'codex', 'claude', 'pi', 'opencode', 'openclaw', 'hermes'].includes(dialect))
     throw new AppError('SKILL_DIALECT', '지원하지 않는 스킬 형식입니다.');
   const source = await inspectRoot(path);
   const diagnostics: SkillDiagnostic[] = [];

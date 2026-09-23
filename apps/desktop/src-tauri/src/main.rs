@@ -198,6 +198,8 @@ fn route_allowed(method: &str, path: &str) -> bool {
         | ("POST", "/v1/runtime/profiles")
         | ("POST", "/v1/runtime/settings")
         | ("POST", "/v1/runtime/action")
+        | ("POST", "/v1/runtime/downloads")
+        | ("POST", "/v1/runtime/downloads/action")
         | ("POST", "/v1/skills/register")
         | ("POST", "/v1/skills/remove")
         | ("POST", "/v1/mcp/import")

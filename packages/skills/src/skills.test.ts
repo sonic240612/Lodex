@@ -120,6 +120,39 @@ describe('passive skill registration', () => {
     );
   });
 
+  it.each(['opencode', 'openclaw', 'hermes'] as const)(
+    'imports %s SKILL.md without granting its runtime policies',
+    async (dialect) => {
+      const extra =
+        dialect === 'openclaw'
+          ? 'command-dispatch: tool\ncommand-tool: exec\nmetadata:\n  openclaw:\n    requires:\n      bins: [dangerous-tool]\n'
+          : dialect === 'hermes'
+            ? 'version: 1.0.0\nplatforms: [linux]\nmetadata:\n  hermes:\n    requires_toolsets: [terminal]\n'
+            : 'metadata:\n  source: opencode\n';
+      const { root } = await setup(
+        `---\nname: example\ndescription: Portable workflow.\n${extra}---\nRead {baseDir}/references/guide.md.\n`,
+      );
+      const skill = await inspectSkillDirectory(root, { dialect });
+      expect(skill.dialect).toBe(dialect);
+      expect(skill.invocation).toEqual({ model: true, user: true });
+      expect(skill.diagnostics.map((entry) => entry.code)).toContain(
+        'BASEDIR_SUBSTITUTION_UNSUPPORTED',
+      );
+      if (dialect === 'openclaw') {
+        expect(skill.metadata.openclaw).toContain('dangerous-tool');
+        expect(skill.diagnostics.map((entry) => entry.code)).toContain(
+          'TOOL_POLICY_UNSUPPORTED',
+        );
+      }
+      if (dialect === 'hermes') {
+        expect(skill.metadata.hermes).toContain('terminal');
+        expect(skill.diagnostics.map((entry) => entry.code)).toContain(
+          'PLATFORM_POLICY_UNVERIFIED',
+        );
+      }
+    },
+  );
+
   it('supports explicit Claude fallback metadata and enforces its manual-only/user-only policy values', async () => {
     const { root } = await setup(
       '---\ndisable-model-invocation: YES\n---\nFirst instruction line.\n',

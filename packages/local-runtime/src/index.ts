@@ -1,9 +1,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { lstat, open, realpath } from 'node:fs/promises';
-import { isAbsolute, dirname, join } from 'node:path';
+import { lstat, open, realpath, mkdir, rename, unlink, type FileHandle } from 'node:fs/promises';
+import { isAbsolute, dirname, join, resolve, sep } from 'node:path';
 import { createServer } from 'node:net';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { freemem, platform, totalmem } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
 import { StringDecoder } from 'node:string_decoder';
@@ -11,6 +11,7 @@ import {
   AppError,
   localProfileInputSchema,
   runtimeSettingsSchema,
+  modelDownloadInputSchema,
   type EngineSettings,
   type LocalProfile,
   type LocalProfileInput,
@@ -19,6 +20,8 @@ import {
   type RuntimeSnapshot,
   type GpuResourceSnapshot,
   type RuntimeResources,
+  type ModelDownload,
+  type ModelDownloadInput,
 } from '@lodex/contracts';
 import { privateServerFetch } from '@lodex/providers';
 
@@ -102,22 +105,173 @@ async function probe(path: string, arg: '--help' | '--version'): Promise<string>
   });
 }
 
+const ggufScalarBytes = new Map([
+  [0, 1],
+  [1, 1],
+  [2, 2],
+  [3, 2],
+  [4, 4],
+  [5, 4],
+  [6, 4],
+  [7, 1],
+  [10, 8],
+  [11, 8],
+  [12, 8],
+]);
+
+class GgufReader {
+  private position = 24;
+  private buffer = Buffer.alloc(0);
+  private bufferStart = 0;
+  constructor(
+    private handle: FileHandle,
+    private size: number,
+  ) {}
+  private async ensure(length: number) {
+    if (length < 0 || this.position + length > this.size)
+      throw new AppError('GGUF_FORMAT', 'GGUF 메타데이터가 파일 범위를 벗어났습니다.');
+    if (
+      this.position >= this.bufferStart &&
+      this.position + length <= this.bufferStart + this.buffer.length
+    )
+      return;
+    const capacity = Math.max(65536, length);
+    this.buffer = Buffer.alloc(Math.min(capacity, this.size - this.position));
+    this.bufferStart = this.position;
+    const result = await this.handle.read(this.buffer, 0, this.buffer.length, this.position);
+    this.buffer = this.buffer.subarray(0, result.bytesRead);
+    if (result.bytesRead < length)
+      throw new AppError('GGUF_FORMAT', 'GGUF 메타데이터가 잘렸습니다.');
+  }
+  private async take(length: number) {
+    await this.ensure(length);
+    const offset = this.position - this.bufferStart;
+    const value = this.buffer.subarray(offset, offset + length);
+    this.position += length;
+    return value;
+  }
+  async u32() {
+    return (await this.take(4)).readUInt32LE(0);
+  }
+  async u64() {
+    const value = (await this.take(8)).readBigUInt64LE(0);
+    if (value > BigInt(Number.MAX_SAFE_INTEGER))
+      throw new AppError('GGUF_FORMAT', 'GGUF 메타데이터 길이가 너무 큽니다.');
+    return Number(value);
+  }
+  async string(maximum: number, collect = true): Promise<string | undefined> {
+    const length = await this.u64();
+    if (length > maximum && collect)
+      throw new AppError('GGUF_FORMAT', 'GGUF 문자열 메타데이터가 허용 범위를 초과합니다.');
+    if (!collect) {
+      await this.skip(length);
+      return undefined;
+    }
+    return (await this.take(length)).toString('utf8');
+  }
+  async skip(length: number) {
+    if (!Number.isSafeInteger(length) || length < 0 || this.position + length > this.size)
+      throw new AppError('GGUF_FORMAT', 'GGUF 메타데이터가 파일 범위를 벗어났습니다.');
+    this.position += length;
+  }
+  async scalar(type: number): Promise<string | number | boolean | undefined> {
+    if (type === 8) return this.string(1_048_576);
+    if (type === 7) return (await this.take(1))[0] !== 0;
+    if (type === 4) return (await this.take(4)).readUInt32LE(0);
+    if (type === 5) return (await this.take(4)).readInt32LE(0);
+    if (type === 10 || type === 11) {
+      const value = type === 10 ? (await this.take(8)).readBigUInt64LE(0) : (await this.take(8)).readBigInt64LE(0);
+      return value <= BigInt(Number.MAX_SAFE_INTEGER) && value >= BigInt(Number.MIN_SAFE_INTEGER)
+        ? Number(value)
+        : undefined;
+    }
+    const bytes = ggufScalarBytes.get(type);
+    if (!bytes) throw new AppError('GGUF_FORMAT', `지원하지 않는 GGUF 값 형식(${type})입니다.`);
+    await this.skip(bytes);
+    return undefined;
+  }
+  async skipValue(type: number): Promise<void> {
+    if (type === 8) {
+      await this.string(0, false);
+      return;
+    }
+    if (type === 9) {
+      const elementType = await this.u32();
+      if (elementType === 9)
+        throw new AppError('GGUF_FORMAT', '중첩 GGUF 배열은 지원하지 않습니다.');
+      const count = await this.u64();
+      if (count > 100_000_000)
+        throw new AppError('GGUF_FORMAT', 'GGUF 배열이 허용 범위를 초과합니다.');
+      if (elementType === 8) {
+        for (let index = 0; index < count; index++) await this.string(0, false);
+        return;
+      }
+      const bytes = ggufScalarBytes.get(elementType);
+      if (!bytes)
+        throw new AppError('GGUF_FORMAT', `지원하지 않는 GGUF 배열 형식(${elementType})입니다.`);
+      await this.skip(count * bytes);
+      return;
+    }
+    const bytes = ggufScalarBytes.get(type);
+    if (!bytes) throw new AppError('GGUF_FORMAT', `지원하지 않는 GGUF 값 형식(${type})입니다.`);
+    await this.skip(bytes);
+  }
+}
+
+export interface GgufMetadata {
+  version: number;
+  tensorCount: number;
+  values: Record<string, string | number | boolean>;
+}
+
+export async function inspectGguf(handle: FileHandle, size: number): Promise<GgufMetadata> {
+  const header = Buffer.alloc(24);
+  const result = await handle.read(header, 0, header.length, 0);
+  if (result.bytesRead !== 24 || header.toString('ascii', 0, 4) !== 'GGUF')
+    throw new AppError('GGUF_FORMAT', 'GGUF 모델 파일이 아닙니다.');
+  const version = header.readUInt32LE(4);
+  if (![2, 3].includes(version))
+    throw new AppError('GGUF_VERSION', 'GGUF v2/v3 모델을 지원합니다.');
+  const tensorCountValue = header.readBigUInt64LE(8);
+  const metadataCountValue = header.readBigUInt64LE(16);
+  if (tensorCountValue === 0n)
+    throw new AppError('GGUF_FORMAT', '모델 tensor 정보가 비어 있습니다.');
+  if (
+    tensorCountValue > BigInt(Number.MAX_SAFE_INTEGER) ||
+    metadataCountValue > 100_000n
+  )
+    throw new AppError('GGUF_FORMAT', 'GGUF 항목 수가 허용 범위를 초과합니다.');
+  const reader = new GgufReader(handle, size);
+  const values: Record<string, string | number | boolean> = {};
+  for (let index = 0; index < Number(metadataCountValue); index++) {
+    const key = await reader.string(4096);
+    if (!key || Object.hasOwn(values, key))
+      throw new AppError('GGUF_FORMAT', 'GGUF 메타데이터 키가 비어 있거나 중복되었습니다.');
+    const type = await reader.u32();
+    const wanted =
+      key === 'general.name' ||
+      key === 'general.architecture' ||
+      key === 'tokenizer.ggml.model' ||
+      key === 'tokenizer.chat_template' ||
+      key.endsWith('.context_length');
+    if (!wanted || type === 9) {
+      await reader.skipValue(type);
+      continue;
+    }
+    const value = await reader.scalar(type);
+    if (value !== undefined) values[key] = value;
+  }
+  return { version, tensorCount: Number(tensorCountValue), values };
+}
+
 export async function inspectProfile(input: LocalProfileInput): Promise<LocalProfile> {
   const parsed = localProfileInputSchema.parse(input);
   const engine = await inspectFile(parsed.enginePath),
     model = await inspectFile(parsed.modelPath);
   const handle = await open(model.path, 'r');
-  let version: number;
+  let metadata: GgufMetadata;
   try {
-    const header = Buffer.alloc(24),
-      result = await handle.read(header, 0, header.length, 0);
-    if (result.bytesRead !== 24 || header.toString('ascii', 0, 4) !== 'GGUF')
-      throw new AppError('GGUF_FORMAT', 'GGUF 모델 파일이 아닙니다.');
-    version = header.readUInt32LE(4);
-    if (![2, 3].includes(version))
-      throw new AppError('GGUF_VERSION', 'GGUF v2/v3 모델을 지원합니다.');
-    if (header.readBigUInt64LE(8) === 0n)
-      throw new AppError('GGUF_FORMAT', '모델 tensor 정보가 비어 있습니다.');
+    metadata = await inspectGguf(handle, model.size);
   } finally {
     await handle.close();
   }
@@ -138,7 +292,29 @@ export async function inspectProfile(input: LocalProfileInput): Promise<LocalPro
     engineIdentity: engine.identity,
     engineVersion,
     supportedFlags,
-    ggufVersion: version,
+    ggufVersion: metadata.version,
+    ...(typeof metadata.values['general.name'] === 'string'
+      ? { modelName: metadata.values['general.name'] }
+      : {}),
+    ...(typeof metadata.values['general.architecture'] === 'string'
+      ? { modelArchitecture: metadata.values['general.architecture'] }
+      : {}),
+    ...(typeof metadata.values['tokenizer.ggml.model'] === 'string'
+      ? { tokenizerModel: metadata.values['tokenizer.ggml.model'] }
+      : {}),
+    ...(typeof metadata.values['tokenizer.chat_template'] === 'string'
+      ? { embeddedChatTemplate: true }
+      : {}),
+    ...(() => {
+      const architecture = metadata.values['general.architecture'];
+      const value =
+        typeof architecture === 'string'
+          ? metadata.values[architecture + '.context_length']
+          : undefined;
+      return typeof value === 'number' && Number.isInteger(value) && value > 0
+        ? { nativeContextSize: value }
+        : {};
+    })(),
   };
   engineArguments(profile, 1, 'probe'); // Reject unsupported/reserved options before persisting.
   return profile;
@@ -367,6 +543,188 @@ async function measureResources(): Promise<RuntimeResources> {
   };
 }
 
+type DownloadJob = { controller: AbortController; promise: Promise<void>; temporaryPath: string };
+
+class ModelDownloads {
+  private records = new Map<string, ModelDownload>();
+  private jobs = new Map<string, DownloadJob>();
+  constructor(
+    private root: string | undefined,
+    private fetcher: typeof fetch,
+  ) {}
+  snapshot() {
+    return [...this.records.values()]
+      .map((record) => structuredClone(record))
+      .sort((left, right) => right.startedAt.localeCompare(left.startedAt));
+  }
+  private destination(input: ModelDownloadInput) {
+    if (!this.root)
+      throw new AppError(
+        'MODEL_DOWNLOAD_DISABLED',
+        '이 실행 환경에는 모델 다운로드 폴더가 설정되지 않았습니다.',
+        503,
+      );
+    const base = resolve(this.root);
+    const destination = resolve(
+      base,
+      input.repository.replace('/', '--'),
+      ...input.file.split(/[\\/]/),
+    );
+    if (!destination.startsWith(base + sep))
+      throw new AppError('MODEL_DOWNLOAD_PATH', '모델 저장 경로가 올바르지 않습니다.');
+    return destination;
+  }
+  async start(value: ModelDownloadInput) {
+    const input = modelDownloadInputSchema.parse(value);
+    const destination = this.destination(input);
+    if ([...this.records.values()].some((record) => record.modelPath === destination))
+      throw new AppError('MODEL_DOWNLOAD_EXISTS', '같은 모델 파일이 이미 다운로드 목록에 있습니다.', 409);
+    try {
+      await lstat(destination);
+      throw new AppError('MODEL_DOWNLOAD_EXISTS', '같은 모델 파일이 이미 저장되어 있습니다.', 409);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
+    const id = randomUUID();
+    const record: ModelDownload = {
+      id,
+      repository: input.repository,
+      file: input.file,
+      revision: input.revision,
+      status: 'downloading',
+      downloadedBytes: 0,
+      totalBytes: null,
+      startedAt: new Date().toISOString(),
+      modelPath: destination,
+    };
+    this.records.set(id, record);
+    const controller = new AbortController();
+    const temporaryPath = destination + '.' + id + '.part';
+    const promise = this.download(input, record, destination, temporaryPath, controller.signal)
+      .catch((error) => {
+        record.status = controller.signal.aborted ? 'cancelled' : 'failed';
+        record.error = controller.signal.aborted
+          ? '다운로드를 중지했습니다.'
+          : error instanceof AppError
+            ? error.message
+            : '모델 다운로드에 실패했습니다.';
+        record.finishedAt = new Date().toISOString();
+      })
+      .finally(async () => {
+        await unlink(temporaryPath).catch(() => undefined);
+        this.jobs.delete(id);
+      });
+    this.jobs.set(id, { controller, promise, temporaryPath });
+    return structuredClone(record);
+  }
+  private async download(
+    input: ModelDownloadInput,
+    record: ModelDownload,
+    destination: string,
+    temporaryPath: string,
+    signal: AbortSignal,
+  ) {
+    const source =
+      'https://huggingface.co/' +
+      input.repository.split('/').map(encodeURIComponent).join('/') +
+      '/resolve/' +
+      input.revision.split('/').map(encodeURIComponent).join('/') +
+      '/' +
+      input.file.split(/[\\/]/).map(encodeURIComponent).join('/') +
+      '?download=true';
+    let response: Response;
+    try {
+      response = await this.fetcher(source, {
+        headers: { Accept: 'application/octet-stream', 'User-Agent': 'Lodex/0.1' },
+        redirect: 'follow',
+        signal,
+      });
+    } catch (error) {
+      signal.throwIfAborted();
+      throw new AppError('MODEL_DOWNLOAD_NETWORK', 'Hugging Face에 연결하지 못했습니다.', 502);
+    }
+    const finalUrl = new URL(response.url || source);
+    if (finalUrl.protocol !== 'https:' || finalUrl.username || finalUrl.password)
+      throw new AppError('MODEL_DOWNLOAD_REDIRECT', '안전하지 않은 다운로드 주소로 이동했습니다.', 502);
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new AppError(
+        'MODEL_DOWNLOAD_HTTP',
+        `모델 다운로드 실패 (HTTP ${response.status}). 저장소·revision·파일 이름을 확인하세요.`,
+        502,
+      );
+    }
+    if (!response.body)
+      throw new AppError('MODEL_DOWNLOAD_BODY', '모델 다운로드 응답에 파일 내용이 없습니다.', 502);
+    const length = Number(response.headers.get('content-length'));
+    if (Number.isSafeInteger(length) && length >= 0) record.totalBytes = length;
+    if (record.totalBytes !== null && record.totalBytes > 1_099_511_627_776)
+      throw new AppError('MODEL_DOWNLOAD_SIZE', '1 TiB를 넘는 모델 파일은 다운로드할 수 없습니다.');
+    const output = await open(temporaryPath, 'wx', 0o600);
+    const hash = createHash('sha256');
+    let position = 0;
+    const reader = response.body.getReader();
+    try {
+      while (true) {
+        signal.throwIfAborted();
+        const part = await reader.read();
+        if (part.done) break;
+        position += part.value.length;
+        if (position > 1_099_511_627_776)
+          throw new AppError('MODEL_DOWNLOAD_SIZE', '1 TiB를 넘는 모델 파일은 다운로드할 수 없습니다.');
+        hash.update(part.value);
+        await output.write(part.value);
+        record.downloadedBytes = position;
+      }
+      await output.sync();
+    } finally {
+      await reader.cancel().catch(() => undefined);
+      await output.close();
+    }
+    if (record.totalBytes !== null && position !== record.totalBytes)
+      throw new AppError('MODEL_DOWNLOAD_TRUNCATED', '다운로드한 파일 크기가 서버 응답과 다릅니다.', 502);
+    const sha256 = hash.digest('hex');
+    if (input.expectedSha256 && sha256 !== input.expectedSha256)
+      throw new AppError('MODEL_DOWNLOAD_HASH', '다운로드한 모델의 SHA-256이 입력한 값과 다릅니다.');
+    const handle = await open(temporaryPath, 'r');
+    try {
+      await inspectGguf(handle, position);
+    } finally {
+      await handle.close();
+    }
+    signal.throwIfAborted();
+    await rename(temporaryPath, destination);
+    record.status = 'completed';
+    record.sha256 = sha256;
+    record.finishedAt = new Date().toISOString();
+  }
+  async action(id: string, action: 'cancel' | 'remove', protectedPaths: string[] = []) {
+    const record = this.records.get(id);
+    if (!record) throw new AppError('MODEL_DOWNLOAD_NOT_FOUND', '다운로드 작업을 찾을 수 없습니다.', 404);
+    const job = this.jobs.get(id);
+    if (action === 'cancel') {
+      if (!job) throw new AppError('MODEL_DOWNLOAD_FINISHED', '이미 끝난 다운로드입니다.', 409);
+      job.controller.abort(new AppError('MODEL_DOWNLOAD_CANCELLED', '다운로드를 중지했습니다.'));
+      await job.promise;
+      return;
+    }
+    if (job) throw new AppError('MODEL_DOWNLOAD_ACTIVE', '다운로드를 먼저 중지하세요.', 409);
+    if (record.modelPath && protectedPaths.includes(record.modelPath))
+      throw new AppError(
+        'MODEL_DOWNLOAD_REGISTERED',
+        '등록된 모델 프로필에서 사용하는 파일입니다. 프로필을 먼저 제거하세요.',
+        409,
+      );
+    if (record.status === 'completed' && record.modelPath) await unlink(record.modelPath);
+    this.records.delete(id);
+  }
+  async close() {
+    for (const job of this.jobs.values()) job.controller.abort();
+    await Promise.allSettled([...this.jobs.values()].map((job) => job.promise));
+  }
+}
+
 /** Manages only its own child handles; external llama-server processes are never stopped. */
 export class RuntimeManager {
   private instances = new Map<string, Instance>();
@@ -375,10 +733,13 @@ export class RuntimeManager {
   private closePromise?: Promise<void>;
   private resourceCache?: { measuredAt: number; value: Promise<RuntimeResources> };
   private idleTimer: NodeJS.Timeout;
+  private downloads: ModelDownloads;
   constructor(
     private repository: RuntimeRepository,
     private supervisorPath: string,
+    options: { modelRoot?: string; fetch?: typeof fetch } = {},
   ) {
+    this.downloads = new ModelDownloads(options.modelRoot, options.fetch ?? fetch);
     this.idleTimer = setInterval(() => void this.sweepIdle().catch(() => undefined), 30000);
     this.idleTimer.unref();
   }
@@ -413,7 +774,16 @@ export class RuntimeManager {
         }),
       ),
       resources,
+      downloads: this.downloads.snapshot(),
     };
+  }
+  startDownload(input: ModelDownloadInput) {
+    return this.downloads.start(input);
+  }
+  async downloadAction(id: string, action: 'cancel' | 'remove') {
+    const protectedPaths =
+      action === 'remove' ? (await this.repository.localProfiles()).map((profile) => profile.modelPath) : [];
+    return this.downloads.action(id, action, protectedPaths);
   }
   register(input: LocalProfileInput) {
     return this.serial(async () => {
@@ -687,6 +1057,7 @@ export class RuntimeManager {
       this.closing.abort();
       clearInterval(this.idleTimer);
       this.closePromise = this.serial(async () => {
+        await this.downloads.close();
         const results = await Promise.allSettled(
           [...this.instances.values()].map(async (instance) => {
             instance.leases = 0;

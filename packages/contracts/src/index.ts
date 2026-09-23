@@ -543,6 +543,9 @@ export interface ContextManifest {
   requestSha256: string;
   estimateSource: 'utf8_bytes_v1';
   inputEstimateTokens: number;
+  /** Exact template-aware count returned by the active model server when supported. */
+  inputTokens?: number;
+  tokenCountSource?: 'llama_cpp_chat_template';
   outputReserveTokens: number;
   safetyReserveTokens: number;
   contextBudgetTokens: number;
@@ -674,6 +677,8 @@ export type InferenceEvent =
 export interface InferenceProvider {
   listModels(signal?: AbortSignal): Promise<ModelDescriptor[]>;
   capabilities(model: string): Promise<ModelCapabilities>;
+  /** Returns null when the provider cannot count the fully formatted request without generating. */
+  countInputTokens?(request: InferenceRequest, signal: AbortSignal): Promise<number | null>;
   generate(request: InferenceRequest, signal: AbortSignal): AsyncIterable<InferenceEvent>;
 }
 // Cloud providers deliberately do not implement process loading or VRAM control.

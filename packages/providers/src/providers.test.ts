@@ -49,6 +49,38 @@ describe('SSE protocol', () => {
   });
 });
 describe('provider adapters', () => {
+  it('counts the fully templated llama.cpp chat request and falls back for old servers', async () => {
+    const input: InferenceRequest = {
+      ...request(),
+      tools: [
+        {
+          type: 'function',
+          function: { name: 'read_file', description: 'read', parameters: { type: 'object' } },
+        },
+      ],
+    };
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ object: 'response.input_tokens', input_tokens: 37 }), {
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      )
+      .mockResolvedValueOnce(new Response('', { status: 404 }));
+    const provider = new ChatCompletionProvider(
+      'llama-server',
+      'http://127.0.0.1:8080/v1',
+      'fixture',
+      fetcher,
+    );
+    expect(await provider.countInputTokens(input, signal())).toBe(37);
+    expect(fetcher.mock.calls[0]?.[0]).toBe(
+      'http://127.0.0.1:8080/v1/chat/completions/input_tokens',
+    );
+    const body = JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body));
+    expect(body).toMatchObject({ model: 'fixture', stream: false, tools: input.tools });
+    expect(await provider.countInputTokens(input, signal())).toBeNull();
+  });
   it('separates structured thinking and preserves tool/reasoning wire fields', async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
       response(

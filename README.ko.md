@@ -9,7 +9,7 @@
 ## 기능
 
 - localhost·사설망·Tailscale을 통한 외부 llama-server 연결
-- 컨텍스트 크기·GPU 레이어·KV cache·스레드·대화 템플릿·추가 인자·VRAM 예약을 설정하는 GGUF 모델 프로필
+- 공개 Hugging Face GGUF 다운로드·해시/메타데이터 검증과 컨텍스트·GPU·KV cache·템플릿·VRAM 예약을 설정하는 모델 프로필
 - 모델 기본 설정·자동 컨텍스트/출력 한도·비용 표시·일시적 오류 재시도를 지원하는 OpenRouter 연결
 - Plan·Build·서브에이전트별 모델 지정, 최대 3개 독립 읽기 작업 동시 실행
 - 로컬 프로젝트 폴더 연결, 프로젝트별 대화, Git worktree 생성
@@ -17,7 +17,7 @@
 - 제한을 설정한 Docker 명령 실행, 전체 접근의 호스트 파일·셸·환경 변수·네트워크·MCP 사용
 - 대화별 **승인 요청**·**대신 승인**·**전체 접근** 권한. Plan 모드는 항상 읽기 전용
 - `/goal` 목표 실행과 선행 작업·완료 기준·검증 명령·예산을 사용하는 저장 계획 실행
-- 표준·Codex·Claude·pi 메타데이터를 지원하는 로컬 `SKILL.md` 가져오기
+- Agent Skills·Codex·Claude Code·pi·OpenCode·OpenClaw·Hermes 형식의 로컬 `SKILL.md` 가져오기
 - stdio·Streamable HTTP MCP, 도구 선택, 리소스·프롬프트 미리보기와 첨부, OAuth PKCE 로그인
 - 원격 메시지·상태·계획 조회·중지·허용된 Build 작업을 위한 Telegram 봇
 - Eco 모드, 자동 빠른 압축, 대형 도구 결과의 로컬 ObservationPack 보관과 선택적 재호출
@@ -41,7 +41,7 @@ Windows에서는 `run-lodex.bat`를 더블클릭하면 빠진 npm 패키지를 �
 
 ### 관리형 로컬 모델
 
-모델 관리에서 llama-server 실행 파일과 GGUF 파일을 선택하고 엔진 설정을 저장하세요. Lodex는 전용 loopback 포트에서 서버를 시작하고 호출 사이에 모델 사용권을 반환합니다. VRAM 값은 스케줄러 예약량이며 실제 GPU 메모리의 강제 제한이 아닙니다.
+모델 관리에서 공개 Hugging Face GGUF를 받거나 디스크의 파일을 선택하세요. llama-server 실행 파일과 엔진 설정을 저장하기 전에 모델 아키텍처·원래 컨텍스트·tokenizer·내장 chat template 메타데이터를 확인합니다. VRAM 값은 스케줄러 예약량이며 실제 GPU 메모리의 강제 제한이 아닙니다.
 
 ### 외부 llama-server
 
@@ -78,7 +78,7 @@ OPENROUTER_API_KEY=your-key
 - 일반적으로 최근 완료 메시지 4개는 원문으로 유지합니다. 원본 메시지는 삭제하지 않습니다.
 - Eco 모드는 더 일찍 압축하고 짧은 답변을 요청합니다.
 - Eco 모드의 ObservationPack은 큰 도구 결과를 두 번 원문 전송한 뒤 로컬에 보관하고 필요한 범위만 다시 읽습니다.
-- 컨텍스트 표시는 누적 과금 토큰이 아니라 최근 활성 입력의 추정값을 사용합니다.
+- 최신 llama.cpp에서는 실제 chat template과 tokenizer를 적용한 입력 토큰을 표시합니다. 구형 서버나 다른 제공자는 보수적 추정 또는 제공자 사용량을 표시합니다.
 
 ## 프로젝트와 실행
 

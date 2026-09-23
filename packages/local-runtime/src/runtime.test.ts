@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtemp, writeFile, lstat, realpath, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, lstat, realpath, rm, open } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
@@ -14,6 +14,7 @@ import {
   RuntimeManager,
   engineArguments,
   inspectProfile,
+  inspectGguf,
   parseNvidiaSmi,
   type RuntimeRepository,
 } from './index';
@@ -119,6 +120,105 @@ server.listen(Number(arg('--port')),arg('--host'));`,
   return { profile, repo, manager, dir, script };
 }
 describe('managed local engines', () => {
+  it('reads bounded model identity, tokenizer, context and chat-template GGUF metadata', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'lodex-gguf-'));
+    dirs.push(dir);
+    const encodeString = (value: string) => {
+      const bytes = Buffer.from(value);
+      const length = Buffer.alloc(8);
+      length.writeBigUInt64LE(BigInt(bytes.length));
+      return Buffer.concat([length, bytes]);
+    };
+    const stringEntry = (key: string, value: string) => {
+      const type = Buffer.alloc(4);
+      type.writeUInt32LE(8);
+      return Buffer.concat([encodeString(key), type, encodeString(value)]);
+    };
+    const u32Entry = (key: string, value: number) => {
+      const type = Buffer.alloc(4),
+        number = Buffer.alloc(4);
+      type.writeUInt32LE(4);
+      number.writeUInt32LE(value);
+      return Buffer.concat([encodeString(key), type, number]);
+    };
+    const entries = [
+      stringEntry('general.architecture', 'qwen3'),
+      stringEntry('general.name', 'Qwen fixture'),
+      stringEntry('tokenizer.ggml.model', 'gpt2'),
+      u32Entry('qwen3.context_length', 131072),
+      stringEntry('tokenizer.chat_template', '{% for message in messages %}'),
+    ];
+    const header = Buffer.alloc(24);
+    header.write('GGUF');
+    header.writeUInt32LE(3, 4);
+    header.writeBigUInt64LE(1n, 8);
+    header.writeBigUInt64LE(BigInt(entries.length), 16);
+    const path = join(dir, 'metadata.gguf');
+    await writeFile(path, Buffer.concat([header, ...entries]));
+    const handle = await open(path, 'r');
+    try {
+      const info = await lstat(path);
+      await expect(inspectGguf(handle, info.size)).resolves.toEqual({
+        version: 3,
+        tensorCount: 1,
+        values: {
+          'general.architecture': 'qwen3',
+          'general.name': 'Qwen fixture',
+          'tokenizer.ggml.model': 'gpt2',
+          'qwen3.context_length': 131072,
+          'tokenizer.chat_template': '{% for message in messages %}',
+        },
+      });
+    } finally {
+      await handle.close();
+    }
+  });
+  it('downloads, verifies and removes a public Hugging Face GGUF file', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'lodex-download-'));
+    dirs.push(dir);
+    const header = Buffer.alloc(24);
+    header.write('GGUF');
+    header.writeUInt32LE(3, 4);
+    header.writeBigUInt64LE(1n, 8);
+    const fetcher = async (input: string | URL | Request) => {
+      expect(String(input)).toBe(
+        'https://huggingface.co/owner/repository/resolve/main/model-Q4_K_M.gguf?download=true',
+      );
+      const response = new Response(header, {
+        headers: { 'Content-Length': String(header.length) },
+      });
+      Object.defineProperty(response, 'url', {
+        value: 'https://cdn-lfs.hf.co/model.gguf',
+      });
+      return response;
+    };
+    const repo: RuntimeRepository = {
+      localProfiles: async () => [],
+      saveLocalProfile: async (profile) => profile,
+      removeLocalProfile: async () => {},
+      runtimeSettings: async () => runtimeSettingsSchema.parse({}),
+      saveRuntimeSettings: async () => {},
+    };
+    const manager = new RuntimeManager(repo, resolve('apps/daemon/dist/supervisor.cjs'), {
+      modelRoot: join(dir, 'models'),
+      fetch: fetcher as typeof fetch,
+    });
+    managers.push(manager);
+    const started = await manager.startDownload({
+      repository: 'owner/repository',
+      file: 'model-Q4_K_M.gguf',
+      revision: 'main',
+    });
+    await expect
+      .poll(() => manager.snapshot().then((state) => state.downloads[0]?.status))
+      .toBe('completed');
+    const completed = (await manager.snapshot()).downloads[0]!;
+    expect(completed).toMatchObject({ id: started.id, downloadedBytes: 24, totalBytes: 24 });
+    expect(await readFile(completed.modelPath!)).toEqual(header);
+    await manager.downloadAction(completed.id, 'remove');
+    expect((await manager.snapshot()).downloads).toEqual([]);
+    await expect(readFile(completed.modelPath!)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
   it('parses bounded NVIDIA resource measurements and ignores malformed rows', () => {
     expect(
       parseNvidiaSmi(

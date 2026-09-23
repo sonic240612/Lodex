@@ -14,6 +14,8 @@ import {
   runtimeAction,
   runtimeSnapshot,
   saveLocalProfile,
+  startModelDownload,
+  modelDownloadAction,
 } from './bridge';
 import { Icon } from './icons';
 
@@ -39,6 +41,7 @@ export function ModelManager({
   const [state, setState] = useState<RuntimeSnapshot>({
     profiles: [],
     instances: [],
+    downloads: [],
     settings: runtimeSettingsSchema.parse({}),
     resources: {
       measuredAt: new Date(0).toISOString(),
@@ -56,6 +59,7 @@ export function ModelManager({
     [error, setError] = useState(''),
     [extra, setExtra] = useState('[]');
   const [gpuText, setGpuText] = useState('auto');
+  const [download, setDownload] = useState({ repository: '', file: '', revision: 'main', sha256: '' });
   const [loaded, setLoaded] = useState(!nativeDesktop);
   const [connectionError, setConnectionError] = useState('');
   const budgetConflict = loaded && budget.version !== state.settings.version;
@@ -303,6 +307,124 @@ export function ModelManager({
           )}
         </section>
         <section className="local-model-list" aria-label="등록한 모델">
+          <h3>Hugging Face에서 GGUF 받기</h3>
+          <div className="settings-grid">
+            <label className="field">
+              저장소
+              <input
+                placeholder="bartowski/model-GGUF"
+                value={download.repository}
+                onChange={(event) => setDownload({ ...download, repository: event.target.value })}
+              />
+            </label>
+            <label className="field">
+              GGUF 파일
+              <input
+                placeholder="model-Q4_K_M.gguf"
+                value={download.file}
+                onChange={(event) => setDownload({ ...download, file: event.target.value })}
+              />
+            </label>
+            <label className="field">
+              Revision
+              <input
+                value={download.revision}
+                onChange={(event) => setDownload({ ...download, revision: event.target.value })}
+              />
+            </label>
+            <label className="field">
+              SHA-256 (선택)
+              <input
+                value={download.sha256}
+                onChange={(event) => setDownload({ ...download, sha256: event.target.value })}
+              />
+            </label>
+          </div>
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={
+              unavailable || busy || !download.repository.trim() || !download.file.trim()
+            }
+            onClick={() =>
+              void operation(async () => {
+                const next = await startModelDownload({
+                  repository: download.repository.trim(),
+                  file: download.file.trim(),
+                  revision: download.revision.trim() || 'main',
+                  ...(download.sha256.trim()
+                    ? { expectedSha256: download.sha256.trim().toLowerCase() }
+                    : {}),
+                });
+                if (mounted.current) setState(next);
+              })
+            }
+          >
+            다운로드 시작
+          </button>
+          {state.downloads.map((item) => {
+            const percent =
+              item.totalBytes && item.totalBytes > 0
+                ? Math.min(100, Math.round((item.downloadedBytes / item.totalBytes) * 100))
+                : null;
+            return (
+              <article className="local-model" key={item.id}>
+                <strong>{item.repository + ' / ' + item.file}</strong>
+                <span>
+                  {{
+                    downloading: '다운로드 중',
+                    completed: '완료',
+                    failed: '실패',
+                    cancelled: '중지됨',
+                  }[item.status]}{' '}
+                  · {(item.downloadedBytes / 1024 ** 3).toFixed(2)} GiB
+                  {percent === null ? '' : ` · ${percent}%`}
+                </span>
+                {item.status === 'downloading' && (
+                  <progress
+                    max={item.totalBytes ?? Math.max(1, item.downloadedBytes)}
+                    value={item.downloadedBytes}
+                  />
+                )}
+                {item.error && <p className="danger-text">{item.error}</p>}
+                <div className="edit-actions">
+                  {item.status === 'completed' && item.modelPath && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDraft((current) => ({
+                          ...current,
+                          name: current.name || item.file.replace(/\.gguf$/i, ''),
+                          modelPath: item.modelPath!,
+                        }));
+                        setTrusted(false);
+                      }}
+                    >
+                      등록 양식에 사용
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() =>
+                      void operation(async () => {
+                        const next = await modelDownloadAction(
+                          item.id,
+                          item.status === 'downloading' ? 'cancel' : 'remove',
+                        );
+                        if (mounted.current) setState(next);
+                      })
+                    }
+                  >
+                    {item.status === 'downloading' ? '중지' : '목록·파일 제거'}
+                  </button>
+                </div>
+              </article>
+            );
+          })}
+        </section>
+        <section className="local-model-list" aria-label="등록한 모델">
+          <h3>등록한 모델</h3>
           {loaded && !state.profiles.length && (
             <p>등록한 모델이 없습니다. 아래에서 엔진과 GGUF 파일을 선택하세요.</p>
           )}
@@ -395,6 +517,23 @@ export function ModelManager({
                   <summary>엔진 정보·로그</summary>
                   <p>{profile.engineVersion}</p>
                   <p>{profile.modelPath}</p>
+                  {(profile.modelName || profile.modelArchitecture || profile.tokenizerModel) && (
+                    <p>
+                      {profile.modelName || '이름 정보 없음'}
+                      {profile.modelArchitecture ? ` · ${profile.modelArchitecture}` : ''}
+                      {profile.tokenizerModel ? ` · tokenizer ${profile.tokenizerModel}` : ''}
+                    </p>
+                  )}
+                  <p>
+                    모델 컨텍스트{' '}
+                    {profile.nativeContextSize?.toLocaleString() ?? '메타데이터 없음'} · Chat
+                    template{' '}
+                    {profile.settings.chatTemplate
+                      ? '사용자 지정'
+                      : profile.embeddedChatTemplate
+                        ? 'GGUF 내장'
+                        : 'llama.cpp 자동 판정'}
+                  </p>
                   <p>
                     GGUF v{profile.ggufVersion} 헤더 확인 · 전체 파일 무결성 검사는 아직 수행하지
                     않음

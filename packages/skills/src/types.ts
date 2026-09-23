@@ -1,4 +1,11 @@
-export type SkillDialect = 'standard' | 'codex' | 'claude' | 'pi';
+export type SkillDialect =
+  | 'standard'
+  | 'codex'
+  | 'claude'
+  | 'pi'
+  | 'opencode'
+  | 'openclaw'
+  | 'hermes';
 export type SkillInvocation = 'model' | 'user';
 
 export interface SkillDiagnostic {

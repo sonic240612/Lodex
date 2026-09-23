@@ -93,7 +93,7 @@ export function normalizeSkill(
   const { fields, body } = splitSkill(text, dialect);
   let rawName = fields.name,
     rawDescription = fields.description;
-  if (dialect === 'claude') {
+  if (dialect === 'claude' || dialect === 'openclaw') {
     if (rawName === undefined) {
       rawName = rootName;
       diagnostics.push({
@@ -125,12 +125,20 @@ export function normalizeSkill(
     });
   const metadata: Record<string, string> = {};
   if (fields.metadata !== undefined) {
-    if (
-      !object(fields.metadata) ||
-      Object.values(fields.metadata).some((v) => typeof v !== 'string')
-    )
+    if (!object(fields.metadata))
       throw new AppError('SKILL_METADATA', 'metadata에는 문자열 키와 문자열 값이 필요합니다.');
-    Object.assign(metadata, fields.metadata);
+    for (const [key, value] of Object.entries(fields.metadata)) {
+      if (typeof value === 'string') metadata[key] = value;
+      else if (dialect === 'openclaw' || dialect === 'hermes') {
+        metadata[key] = JSON.stringify(value);
+        diagnostics.push({
+          code: 'RUNTIME_METADATA_UNVERIFIED',
+          message: '외부 하네스의 환경·도구 요구 조건을 기록했지만 자동으로 권한을 부여하거나 설치하지 않습니다.',
+          field: `metadata.${key}`,
+        });
+      } else
+        throw new AppError('SKILL_METADATA', 'metadata에는 문자열 키와 문자열 값이 필요합니다.');
+    }
   }
   const invocation = {
     model:
@@ -148,14 +156,18 @@ export function normalizeSkill(
     'metadata',
     'disable-model-invocation',
     'user-invocable',
+    ...(dialect === 'hermes' ? ['version', 'author', 'platforms', 'aliases', 'category'] : []),
+    ...(dialect === 'openclaw'
+      ? ['homepage', 'command-arg-mode']
+      : []),
   ]);
   for (const field of Object.keys(fields)) {
     if (known.has(field)) continue;
     diagnostics.push({
-      code: ['allowed-tools', 'disallowed-tools'].includes(field)
+      code: ['allowed-tools', 'disallowed-tools', 'command-dispatch', 'command-tool'].includes(field)
         ? 'TOOL_POLICY_UNSUPPORTED'
         : 'UNSUPPORTED_METADATA',
-      message: ['allowed-tools', 'disallowed-tools'].includes(field)
+      message: ['allowed-tools', 'disallowed-tools', 'command-dispatch', 'command-tool'].includes(field)
         ? '선언된 도구 정책을 실행 권한으로 적용하지 않습니다. Lodex의 세션 권한을 사용합니다.'
         : '이 메타데이터 기능은 적용하지 않습니다.',
       field,
@@ -170,6 +182,17 @@ export function normalizeSkill(
     diagnostics.push({
       code: 'SUBSTITUTION_UNSUPPORTED',
       message: '하네스 전용 인자·경로 치환을 적용하지 않습니다.',
+    });
+  if (/\{baseDir\}/.test(body))
+    diagnostics.push({
+      code: 'BASEDIR_SUBSTITUTION_UNSUPPORTED',
+      message: '{baseDir}는 절대 경로로 치환하지 않습니다. 등록된 리소스는 전용 읽기 도구로만 엽니다.',
+    });
+  if (dialect === 'hermes' && fields.platforms !== undefined)
+    diagnostics.push({
+      code: 'PLATFORM_POLICY_UNVERIFIED',
+      message: 'Hermes 플랫폼 제한을 기록했지만 현재 운영체제 자동 필터에는 적용하지 않습니다.',
+      field: 'platforms',
     });
   return {
     name,

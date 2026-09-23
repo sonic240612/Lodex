@@ -180,6 +180,89 @@ export class ChatCompletionProvider implements InferenceProvider {
     const descriptor = (await this.listModels()).find((m) => m.id === model);
     return { tools: descriptor?.tools ?? null, streaming: true };
   }
+  private requestBody(request: InferenceRequest, stream: boolean) {
+    const config = request.config;
+    return {
+      model: config.model,
+      messages: request.messages.map((m) => ({
+        role: m.role,
+        content: m.content,
+        ...(m.toolCalls
+          ? {
+              tool_calls: m.toolCalls.map((call) => ({
+                id: call.id,
+                type: 'function',
+                function: { name: call.name, arguments: call.arguments },
+              })),
+            }
+          : {}),
+        ...(m.toolCallId ? { tool_call_id: m.toolCallId } : {}),
+        ...(m.reasoningDetails?.length ? { reasoning_details: m.reasoningDetails } : {}),
+        ...(m.reasoningContent
+          ? {
+              [this.kind === 'llama-server' ? 'reasoning_content' : 'reasoning']:
+                m.reasoningContent,
+            }
+          : {}),
+      })),
+      ...(request.tools?.length
+        ? {
+            tools: request.tools,
+            tool_choice: 'auto',
+            ...(this.kind === 'llama-server' ? { parallel_tool_calls: false } : {}),
+          }
+        : {}),
+      stream,
+      ...(config.useDefaultTemperature ? {} : { temperature: config.temperature }),
+      ...(config.useDefaultTopP ? {} : { top_p: config.topP }),
+      max_tokens: config.maxTokens,
+      ...(this.kind === 'openrouter'
+        ? {
+            usage: { include: true },
+            provider: {
+              require_parameters: true,
+              data_collection: 'deny',
+              allow_fallbacks: false,
+            },
+          }
+        : {}),
+    };
+  }
+  async countInputTokens(
+    request: InferenceRequest,
+    signal: AbortSignal,
+  ): Promise<number | null> {
+    if (this.kind !== 'llama-server') return null;
+    const response = await this.fetchResponse('/chat/completions/input_tokens', {
+      method: 'POST',
+      headers: this.headers(),
+      signal,
+      redirect: 'error',
+      body: JSON.stringify(this.requestBody(request, false)),
+    });
+    if ([404, 405, 501].includes(response.status)) {
+      await response.body?.cancel().catch(() => undefined);
+      return null;
+    }
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new AppError(
+        'TOKEN_COUNT_HTTP',
+        `llama-server 입력 토큰 계산 실패 (HTTP ${response.status}).`,
+        502,
+      );
+    }
+    let value: unknown;
+    try {
+      value = await response.json();
+    } catch {
+      throw new AppError('TOKEN_COUNT_FORMAT', 'llama-server 토큰 계산 응답이 올바르지 않습니다.', 502);
+    }
+    const inputTokens = number(object(value).input_tokens);
+    if (inputTokens === null || !Number.isInteger(inputTokens))
+      throw new AppError('TOKEN_COUNT_FORMAT', 'llama-server 토큰 계산 응답이 올바르지 않습니다.', 502);
+    return inputTokens;
+  }
   async *generate(request: InferenceRequest, signal: AbortSignal): AsyncGenerator<InferenceEvent> {
     yield { type: 'started' };
     const started = performance.now();
@@ -196,51 +279,7 @@ export class ChatCompletionProvider implements InferenceProvider {
       headers: this.headers(),
       signal,
       redirect: 'error',
-      body: JSON.stringify({
-        model: config.model,
-        messages: request.messages.map((m) => ({
-          role: m.role,
-          content: m.content,
-          ...(m.toolCalls
-            ? {
-                tool_calls: m.toolCalls.map((call) => ({
-                  id: call.id,
-                  type: 'function',
-                  function: { name: call.name, arguments: call.arguments },
-                })),
-              }
-            : {}),
-          ...(m.toolCallId ? { tool_call_id: m.toolCallId } : {}),
-          ...(m.reasoningDetails?.length ? { reasoning_details: m.reasoningDetails } : {}),
-          ...(m.reasoningContent
-            ? {
-                [this.kind === 'llama-server' ? 'reasoning_content' : 'reasoning']:
-                  m.reasoningContent,
-              }
-            : {}),
-        })),
-        ...(request.tools?.length
-          ? {
-              tools: request.tools,
-              tool_choice: 'auto',
-              ...(this.kind === 'llama-server' ? { parallel_tool_calls: false } : {}),
-            }
-          : {}),
-        stream: true,
-        ...(config.useDefaultTemperature ? {} : { temperature: config.temperature }),
-        ...(config.useDefaultTopP ? {} : { top_p: config.topP }),
-        max_tokens: config.maxTokens,
-        ...(this.kind === 'openrouter'
-          ? {
-              usage: { include: true },
-              provider: {
-                require_parameters: true,
-                data_collection: 'deny',
-                allow_fallbacks: false,
-              },
-            }
-          : {}),
-      }),
+      body: JSON.stringify(this.requestBody(request, true)),
     }, signal);
     if (!response.ok)
       throw new AppError(

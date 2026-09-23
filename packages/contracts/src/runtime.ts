@@ -50,6 +50,11 @@ export interface LocalProfile extends Omit<LocalProfileInput, 'id' | 'expectedVe
   engineVersion: string;
   supportedFlags: string[];
   ggufVersion: number;
+  modelName?: string;
+  modelArchitecture?: string;
+  tokenizerModel?: string;
+  nativeContextSize?: number;
+  embeddedChatTemplate?: boolean;
 }
 export const runtimeSettingsSchema = z
   .strictObject({
@@ -65,6 +70,49 @@ export const runtimeActionSchema = z.strictObject({
   profileId: z.uuid(),
   action: z.enum(['load', 'unload', 'remove']),
 });
+const safePathParts = (value: string) =>
+  !value.startsWith('/') &&
+  !value.startsWith('\\') &&
+  !value.split(/[\\/]/).some((part) => !part || part === '.' || part === '..');
+export const modelDownloadInputSchema = z.strictObject({
+  repository: z
+    .string()
+    .trim()
+    .regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/),
+  file: z
+    .string()
+    .trim()
+    .min(1)
+    .max(512)
+    .refine((value) => safePathParts(value) && value.toLowerCase().endsWith('.gguf')),
+  revision: z
+    .string()
+    .trim()
+    .min(1)
+    .max(200)
+    .default('main')
+    .refine(safePathParts),
+  expectedSha256: z.string().trim().toLowerCase().regex(/^[a-f0-9]{64}$/).optional(),
+});
+export type ModelDownloadInput = z.infer<typeof modelDownloadInputSchema>;
+export const modelDownloadActionSchema = z.strictObject({
+  downloadId: z.uuid(),
+  action: z.enum(['cancel', 'remove']),
+});
+export interface ModelDownload {
+  id: string;
+  repository: string;
+  file: string;
+  revision: string;
+  status: 'downloading' | 'completed' | 'failed' | 'cancelled';
+  downloadedBytes: number;
+  totalBytes: number | null;
+  startedAt: string;
+  finishedAt?: string;
+  modelPath?: string;
+  sha256?: string;
+  error?: string;
+}
 export interface RuntimeInstance {
   profileId: string;
   status: 'loading' | 'ready' | 'stopped' | 'failed';
@@ -96,4 +144,5 @@ export interface RuntimeSnapshot {
   settings: RuntimeSettings;
   instances: RuntimeInstance[];
   resources: RuntimeResources;
+  downloads: ModelDownload[];
 }
