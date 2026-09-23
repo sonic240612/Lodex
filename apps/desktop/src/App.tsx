@@ -149,6 +149,21 @@ export function App() {
   );
 
   useEffect(() => {
+    let widePlan = window.innerWidth >= 1180,
+      wideSidebar = window.innerWidth > 760;
+    const resize = () => {
+      const nextPlan = window.innerWidth >= 1180,
+        nextSidebar = window.innerWidth > 760;
+      if (widePlan && !nextPlan) setPlanOpen(false);
+      if (wideSidebar && !nextSidebar) setSidebarOpen(false);
+      widePlan = nextPlan;
+      wideSidebar = nextSidebar;
+    };
+    window.addEventListener('resize', resize);
+    return () => window.removeEventListener('resize', resize);
+  }, []);
+
+  useEffect(() => {
     const shortcut = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'n') {
         event.preventDefault();
@@ -583,92 +598,100 @@ export function App() {
         >
           <Icon name="plus" size={18} />새 대화<span>⌘ / Ctrl N</span>
         </button>
-        <div className="nav-caption">워크스페이스</div>
-        <button
-          className={`nav-item ${!project ? 'active' : ''}`}
-          onClick={() => {
-            workspace.selectProject(null);
-            setText('');
-            composer.current?.focus();
-          }}
-        >
-          <Icon name="chat" size={18} />
-          일반 대화
-        </button>
-        <button className="nav-item" onClick={() => setPlanOpen((value) => !value)}>
-          <Icon name="goal" size={18} />
-          작업 계획
-        </button>
-        <button className="nav-item" onClick={() => setModelManager(true)}>
-          <Icon name="chip" size={18} />
-          로컬 모델 관리
-        </button>
-        <button className="nav-item" onClick={() => setRoutingSettings(true)}>
-          <Icon name="bolt" size={18} />
-          역할별 모델{session?.routing?.subagentsEnabled ? ' · 서브에이전트' : ''}
-        </button>
-        <button className="nav-item" onClick={() => setSkillManager(true)}>
-          <Icon name="bolt" size={18} />
-          스킬{session?.skills?.length ? ` · ${session.skills.length}` : ''}
-        </button>
-        <button className="nav-item" onClick={() => setMcpManager(true)}>
-          <Icon name="bolt" />
-          MCP{session?.mcp?.length ? ` · ${session.mcp.length}` : ''}
-        </button>
-        <button className="nav-item" onClick={() => setTelegramSettings(true)}>
-          <Icon name="chat" size={18} />
-          Telegram
-        </button>
-        <button className="nav-item" onClick={() => setWorktreeManager(true)}>
-          <Icon name="folder" size={18} />
-          Worktree
-        </button>
-        <button className="nav-item" onClick={() => setDataManager(true)}>
-          <Icon name="settings" size={18} />
-          데이터와 백업
-        </button>
-        <div className="history-caption">
-          <span>프로젝트</span>
+        <div className="sidebar-scroll">
+          <div className="nav-caption">워크스페이스</div>
           <button
-            className="icon-button"
-            aria-label="프로젝트 추가"
-            onClick={() => setProjectDialog(true)}
+            className={`nav-item ${!project ? 'active' : ''}`}
+            onClick={() => {
+              workspace.selectProject(null);
+              setText('');
+              composer.current?.focus();
+            }}
           >
-            <Icon name="plus" size={16} />
+            <Icon name="chat" size={18} />
+            일반 대화
           </button>
-        </div>
-        <div className="project-list">
-          {workspace.projects.map((item) => (
+          <button
+            className="nav-item"
+            onClick={() => {
+              setPlanOpen((value) => !value);
+              if (window.innerWidth <= 760) setSidebarOpen(false);
+            }}
+          >
+            <Icon name="goal" size={18} />
+            작업 계획
+          </button>
+          <button className="nav-item" onClick={() => setModelManager(true)}>
+            <Icon name="chip" size={18} />
+            로컬 모델 관리
+          </button>
+          <button className="nav-item" onClick={() => setRoutingSettings(true)}>
+            <Icon name="bolt" size={18} />
+            역할별 모델{session?.routing?.subagentsEnabled ? ' · 서브에이전트' : ''}
+          </button>
+          <button className="nav-item" onClick={() => setSkillManager(true)}>
+            <Icon name="bolt" size={18} />
+            스킬{session?.skills?.length ? ` · ${session.skills.length}` : ''}
+          </button>
+          <button className="nav-item" onClick={() => setMcpManager(true)}>
+            <Icon name="bolt" />
+            MCP{session?.mcp?.length ? ` · ${session.mcp.length}` : ''}
+          </button>
+          <button className="nav-item" onClick={() => setTelegramSettings(true)}>
+            <Icon name="chat" size={18} />
+            Telegram
+          </button>
+          <button className="nav-item" onClick={() => setWorktreeManager(true)}>
+            <Icon name="folder" size={18} />
+            Worktree
+          </button>
+          <button className="nav-item" onClick={() => setDataManager(true)}>
+            <Icon name="settings" size={18} />
+            데이터와 백업
+          </button>
+          <div className="history-caption">
+            <span>프로젝트</span>
             <button
-              key={item.id}
-              title={item.path}
-              className={`nav-item ${project?.id === item.id ? 'active' : ''}`}
-              onClick={() => {
-                workspace.selectProject(item.id);
-                setText('');
-              }}
+              className="icon-button"
+              aria-label="프로젝트 추가"
+              onClick={() => setProjectDialog(true)}
             >
-              <Icon name="folder" size={17} />
-              <span>{item.name}</span>
+              <Icon name="plus" size={16} />
             </button>
-          ))}
-          {!workspace.projects.length && (
-            <button className="project-empty" onClick={() => setProjectDialog(true)}>
-              로컬 폴더 연결
-            </button>
-          )}
+          </div>
+          <div className="project-list">
+            {workspace.projects.map((item) => (
+              <button
+                key={item.id}
+                title={item.path}
+                className={`nav-item ${project?.id === item.id ? 'active' : ''}`}
+                onClick={() => {
+                  workspace.selectProject(item.id);
+                  setText('');
+                }}
+              >
+                <Icon name="folder" size={17} />
+                <span>{item.name}</span>
+              </button>
+            ))}
+            {!workspace.projects.length && (
+              <button className="project-empty" onClick={() => setProjectDialog(true)}>
+                로컬 폴더 연결
+              </button>
+            )}
+          </div>
+          <ConversationHistory
+            key={workspace.selectedProjectId ?? 'general'}
+            sessions={visibleSessions}
+            title={project ? project.name + ' 대화' : '최근 대화'}
+            onSelect={(id) => {
+              workspace.select(id);
+              setText('');
+            }}
+            onDeleted={() => setText('')}
+            onError={setError}
+          />
         </div>
-        <ConversationHistory
-          key={workspace.selectedProjectId ?? 'general'}
-          sessions={visibleSessions}
-          title={project ? project.name + ' 대화' : '최근 대화'}
-          onSelect={(id) => {
-            workspace.select(id);
-            setText('');
-          }}
-          onDeleted={() => setText('')}
-          onError={setError}
-        />
         <div className="sidebar-bottom">
           <div className="local-card">
             <span className={`status-dot ${workspace.connected ? 'online' : ''}`} />
@@ -691,6 +714,14 @@ export function App() {
           </button>
         </div>
       </aside>
+      {sidebarOpen && (
+        <button
+          type="button"
+          className="panel-scrim sidebar-scrim"
+          aria-label="사이드바 닫기"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
 
       <main className="main">
         <header className="topbar">
@@ -699,7 +730,10 @@ export function App() {
               <button
                 className={`icon-button ${sidebarOpen ? 'mobile-sidebar-toggle' : ''}`}
                 aria-label={sidebarOpen ? '사이드바 닫기' : '사이드바 열기'}
-                onClick={() => setSidebarOpen(!sidebarOpen)}
+                onClick={() => {
+                  setSidebarOpen(!sidebarOpen);
+                  if (!sidebarOpen && window.innerWidth <= 760) setPlanOpen(false);
+                }}
               >
                 <Icon name="panel" />
               </button>
@@ -733,7 +767,10 @@ export function App() {
               className={`icon-button ${planOpen ? 'is-active' : ''}`}
               aria-label="작업 계획 패널 열기/닫기"
               aria-expanded={planOpen}
-              onClick={() => setPlanOpen(!planOpen)}
+              onClick={() => {
+                setPlanOpen(!planOpen);
+                if (!planOpen && window.innerWidth <= 760) setSidebarOpen(false);
+              }}
             >
               <Icon name="panel" size={19} />
             </button>
@@ -1154,6 +1191,14 @@ export function App() {
         </div>
       </main>
 
+      {planOpen && (
+        <button
+          type="button"
+          className="panel-scrim plan-scrim"
+          aria-label="작업 계획 패널 닫기"
+          onClick={() => setPlanOpen(false)}
+        />
+      )}
       {planOpen && (
         <aside className="plan-panel" aria-label="작업 계획과 할 일">
           <div className="plan-header">

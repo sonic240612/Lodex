@@ -133,8 +133,14 @@ button {
   flex-direction: column;
   padding: 23px 14px 12px;
   min-height: 0;
+  overflow: hidden;
+}
+.sidebar-scroll {
+  min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
+  margin: 0 -4px;
+  padding: 0 4px;
 }
 .brand {
   display: flex;
@@ -452,8 +458,12 @@ button {
   color: var(--text);
 }
 .sidebar-bottom {
-  margin-top: 20px;
+  padding-top: 12px;
   flex-shrink: 0;
+  background: var(--sidebar);
+}
+.panel-scrim {
+  display: none;
 }
 .local-card {
   display: flex;
@@ -1925,6 +1935,14 @@ input[type='checkbox'] {
     width: 295px;
     box-shadow: -20px 0 55px var(--shadow);
   }
+  .plan-scrim {
+    display: block;
+    position: fixed;
+    z-index: 2;
+    inset: 73px 0 0;
+    width: 100%;
+    background: #0005;
+  }
   .topbar {
     padding: 0 20px;
   }
@@ -1957,6 +1975,21 @@ input[type='checkbox'] {
     width: 260px;
     z-index: 5;
     box-shadow: 20px 0 55px var(--shadow);
+  }
+  .sidebar-scrim {
+    display: block;
+    position: fixed;
+    z-index: 4;
+    inset: 63px 0 0;
+    width: 100%;
+    background: #0005;
+  }
+  .plan-panel {
+    top: 63px;
+    width: min(340px, calc(100vw - 28px));
+  }
+  .plan-scrim {
+    inset: 63px 0 0;
   }
   .mobile-sidebar-toggle {
     display: inline-flex;
