@@ -420,22 +420,17 @@ describe('provider adapters', () => {
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
   it('retries transient model HTTP failures after 2, 5, and 7 seconds', async () => {
-    const fetcher = vi
-      .fn<typeof fetch>()
-      .mockResolvedValue(new Response(null, { status: 429 }));
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 429 }));
     const waits: number[] = [];
     const retryWait = vi.fn(async (milliseconds: number) => {
       waits.push(milliseconds);
     });
     await expect(
       collect(
-        new ChatCompletionProvider(
-          'openrouter',
-          '',
-          'fixture-secret',
-          fetcher,
-          retryWait,
-        ).generate(request(), signal()),
+        new ChatCompletionProvider('openrouter', '', 'fixture-secret', fetcher, retryWait).generate(
+          request(),
+          signal(),
+        ),
       ),
     ).rejects.toThrow('HTTP 429');
     expect(fetcher).toHaveBeenCalledTimes(4);
@@ -443,22 +438,17 @@ describe('provider adapters', () => {
     expect(waits).toEqual([2000, 5000, 7000]);
   });
   it('retries an OpenRouter HTTP 400 response with the same bounded schedule', async () => {
-    const fetcher = vi
-      .fn<typeof fetch>()
-      .mockResolvedValue(new Response(null, { status: 400 }));
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 400 }));
     const waits: number[] = [];
     const retryWait = vi.fn(async (milliseconds: number) => {
       waits.push(milliseconds);
     });
     await expect(
       collect(
-        new ChatCompletionProvider(
-          'openrouter',
-          '',
-          'fixture-secret',
-          fetcher,
-          retryWait,
-        ).generate(request(), signal()),
+        new ChatCompletionProvider('openrouter', '', 'fixture-secret', fetcher, retryWait).generate(
+          request(),
+          signal(),
+        ),
       ),
     ).rejects.toThrow('HTTP 400');
     expect(fetcher).toHaveBeenCalledTimes(4);
@@ -476,13 +466,10 @@ describe('provider adapters', () => {
       );
     const retryWait = vi.fn(async () => undefined);
     const events = await collect(
-      new ChatCompletionProvider(
-        'openrouter',
-        '',
-        'fixture-secret',
-        fetcher,
-        retryWait,
-      ).generate(request(), signal()),
+      new ChatCompletionProvider('openrouter', '', 'fixture-secret', fetcher, retryWait).generate(
+        request(),
+        signal(),
+      ),
     );
     expect(fetcher).toHaveBeenCalledTimes(2);
     expect(retryWait).toHaveBeenCalledWith(2000, expect.any(AbortSignal));
@@ -545,6 +532,111 @@ describe('provider adapters', () => {
       fetcher,
     ).listModels();
     expect(descriptors[0]).toMatchObject({ contextLength: null, tools: null });
+  });
+  it('reads authoritative llama.cpp chat-template capabilities from /props', async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ data: [{ id: 'local.gguf', context_length: 32768 }] })),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            chat_template_caps: {
+              supports_tools: true,
+              supports_tool_calls: true,
+              supports_system_role: false,
+              supports_parallel_tool_calls: false,
+              supports_preserve_reasoning: true,
+              supports_reasoning_effort: false,
+              supports_string_content: true,
+              supports_typed_content: false,
+              supports_object_arguments: true,
+            },
+          }),
+        ),
+      );
+    const provider = new ChatCompletionProvider(
+      'llama-server',
+      'http://localhost:8080/v1',
+      'local-key',
+      fetcher,
+    );
+    const descriptors = await provider.listModels();
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual([
+      'http://localhost:8080/v1/models',
+      'http://localhost:8080/props',
+    ]);
+    expect(fetcher.mock.calls[1]?.[1]?.headers).toMatchObject({
+      Authorization: 'Bearer local-key',
+    });
+    expect(descriptors[0]).toMatchObject({
+      tools: true,
+      templateCapabilities: {
+        source: 'llama_cpp_props',
+        supportsTools: true,
+        supportsToolCalls: true,
+        supportsSystemRole: false,
+        supportsParallelToolCalls: false,
+        supportsPreserveReasoning: true,
+        supportsReasoningEffort: false,
+        supportsStringContent: true,
+        supportsTypedContent: false,
+        supportsObjectArguments: true,
+      },
+    });
+  });
+  it('does not claim tool support when llama.cpp reports a non-tool template', async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: [{ id: 'base.gguf' }] })))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            chat_template_caps: {
+              supports_tools: false,
+              supports_tool_calls: false,
+              supports_system_role: true,
+              supports_parallel_tool_calls: false,
+              supports_preserve_reasoning: false,
+              supports_reasoning_effort: false,
+              supports_string_content: true,
+              supports_typed_content: false,
+              supports_object_arguments: false,
+            },
+          }),
+        ),
+      );
+    const provider = new ChatCompletionProvider(
+      'llama-server',
+      'http://localhost:8080/v1',
+      null,
+      fetcher,
+    );
+    expect((await provider.listModels())[0]?.tools).toBe(false);
+    fetcher
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: [{ id: 'base.gguf' }] })))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            chat_template_caps: {
+              supports_tools: false,
+              supports_tool_calls: false,
+              supports_system_role: true,
+              supports_parallel_tool_calls: false,
+              supports_preserve_reasoning: false,
+              supports_reasoning_effort: false,
+              supports_string_content: true,
+              supports_typed_content: false,
+              supports_object_arguments: false,
+            },
+          }),
+        ),
+      );
+    await expect(provider.capabilities('base.gguf')).resolves.toMatchObject({
+      tools: false,
+      template: { source: 'llama_cpp_props' },
+    });
   });
   it('reads OpenRouter context, output, and default generation settings from the catalog', async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(

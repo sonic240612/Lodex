@@ -705,7 +705,20 @@ export interface ModelDescriptor {
   defaultTemperature: number | null;
   defaultTopP: number | null;
   tools: boolean | null;
+  templateCapabilities?: ModelTemplateCapabilities;
   pricing: ModelPricing | null;
+}
+export interface ModelTemplateCapabilities {
+  source: 'llama_cpp_props';
+  supportsTools: boolean;
+  supportsToolCalls: boolean;
+  supportsSystemRole: boolean | null;
+  supportsParallelToolCalls: boolean | null;
+  supportsPreserveReasoning: boolean | null;
+  supportsReasoningEffort: boolean | null;
+  supportsStringContent: boolean | null;
+  supportsTypedContent: boolean | null;
+  supportsObjectArguments: boolean | null;
 }
 export interface ModelPricing {
   /** USD per input token. */
@@ -718,6 +731,7 @@ export interface ModelPricing {
 export interface ModelCapabilities {
   tools: boolean | null;
   streaming: boolean;
+  template?: ModelTemplateCapabilities;
 }
 export interface InferenceMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';

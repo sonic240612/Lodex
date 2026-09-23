@@ -6,6 +6,7 @@ import {
   type InferenceRequest,
   type ModelCapabilities,
   type ModelDescriptor,
+  type ModelTemplateCapabilities,
   type ProviderId,
   type Usage,
 } from '@lodex/contracts';
@@ -48,6 +49,33 @@ const price = (value: unknown): number | null => {
   const parsed = typeof value === 'string' && value.trim() ? Number(value) : number(value);
   return typeof parsed === 'number' && Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 };
+const boolean = (value: unknown): boolean | null => (typeof value === 'boolean' ? value : null);
+
+function llamaTemplateCapabilities(value: unknown): ModelTemplateCapabilities | null {
+  const caps = object(object(value).chat_template_caps);
+  const supportsTools = boolean(caps.supports_tools);
+  const supportsToolCalls = boolean(caps.supports_tool_calls);
+  const supportsSystemRole = boolean(caps.supports_system_role);
+  const supportsParallelToolCalls = boolean(caps.supports_parallel_tool_calls);
+  const supportsPreserveReasoning = boolean(caps.supports_preserve_reasoning);
+  const supportsReasoningEffort = boolean(caps.supports_reasoning_effort);
+  const supportsStringContent = boolean(caps.supports_string_content);
+  const supportsTypedContent = boolean(caps.supports_typed_content);
+  const supportsObjectArguments = boolean(caps.supports_object_arguments);
+  if (supportsTools === null || supportsToolCalls === null) return null;
+  return {
+    source: 'llama_cpp_props',
+    supportsTools,
+    supportsToolCalls,
+    supportsSystemRole,
+    supportsParallelToolCalls,
+    supportsPreserveReasoning,
+    supportsReasoningEffort,
+    supportsStringContent,
+    supportsTypedContent,
+    supportsObjectArguments,
+  };
+}
 async function openRouterHttpError(response: Response, toolsRequested: boolean): Promise<string> {
   if (response.status !== 404)
     return '모델 요청 실패 (HTTP ' + response.status + '). OpenRouter 계정·키·사용량을 확인하세요.';
@@ -120,6 +148,28 @@ export class ChatCompletionProvider implements InferenceProvider {
       ...(this.key ? { Authorization: 'Bearer ' + this.key } : {}),
     };
   }
+  private async templateCapabilities(
+    signal?: AbortSignal,
+  ): Promise<ModelTemplateCapabilities | null> {
+    if (this.kind !== 'llama-server') return null;
+    const propsUrl = this.baseUrl.replace(/\/v1$/, '') + '/props';
+    try {
+      const response = await this.fetcher(propsUrl, {
+        headers: this.headers(),
+        redirect: 'error',
+        signal: signal ?? AbortSignal.timeout(5000),
+      });
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => undefined);
+        return null;
+      }
+      return llamaTemplateCapabilities(await response.json());
+    } catch {
+      if (signal?.aborted) throw signal.reason;
+      // Older OpenAI-compatible servers may not expose llama.cpp /props.
+      return null;
+    }
+  }
   private async fetchModelResponse(init: RequestInit, signal: AbortSignal): Promise<Response> {
     for (let attempt = 0; ; attempt += 1) {
       const response = await this.fetchResponse('/chat/completions', init);
@@ -148,6 +198,7 @@ export class ChatCompletionProvider implements InferenceProvider {
     const body = object(await response.json());
     if (!Array.isArray(body.data))
       throw new AppError('CATALOG_FORMAT', '모델 목록 형식을 해석할 수 없습니다.', 502);
+    const templateCapabilities = await this.templateCapabilities(signal);
     return body.data.flatMap((item) => {
       const model = object(item);
       if (typeof model.id !== 'string') return [];
@@ -165,9 +216,13 @@ export class ChatCompletionProvider implements InferenceProvider {
           maxCompletionTokens: number(topProvider.max_completion_tokens),
           defaultTemperature: number(defaults.temperature),
           defaultTopP: number(defaults.top_p),
-          tools: Array.isArray(model.supported_parameters)
-            ? model.supported_parameters.includes('tools')
-            : null,
+          tools:
+            templateCapabilities !== null
+              ? templateCapabilities.supportsTools && templateCapabilities.supportsToolCalls
+              : Array.isArray(model.supported_parameters)
+                ? model.supported_parameters.includes('tools')
+                : null,
+          ...(templateCapabilities ? { templateCapabilities } : {}),
           pricing:
             this.kind === 'openrouter' && prompt !== null && completion !== null
               ? { prompt, completion, request }
@@ -178,7 +233,11 @@ export class ChatCompletionProvider implements InferenceProvider {
   }
   async capabilities(model: string): Promise<ModelCapabilities> {
     const descriptor = (await this.listModels()).find((m) => m.id === model);
-    return { tools: descriptor?.tools ?? null, streaming: true };
+    return {
+      tools: descriptor?.tools ?? null,
+      streaming: true,
+      ...(descriptor?.templateCapabilities ? { template: descriptor.templateCapabilities } : {}),
+    };
   }
   private requestBody(request: InferenceRequest, stream: boolean) {
     const config = request.config;
@@ -228,10 +287,7 @@ export class ChatCompletionProvider implements InferenceProvider {
         : {}),
     };
   }
-  async countInputTokens(
-    request: InferenceRequest,
-    signal: AbortSignal,
-  ): Promise<number | null> {
+  async countInputTokens(request: InferenceRequest, signal: AbortSignal): Promise<number | null> {
     if (this.kind !== 'llama-server') return null;
     const response = await this.fetchResponse('/chat/completions/input_tokens', {
       method: 'POST',
@@ -256,11 +312,19 @@ export class ChatCompletionProvider implements InferenceProvider {
     try {
       value = await response.json();
     } catch {
-      throw new AppError('TOKEN_COUNT_FORMAT', 'llama-server 토큰 계산 응답이 올바르지 않습니다.', 502);
+      throw new AppError(
+        'TOKEN_COUNT_FORMAT',
+        'llama-server 토큰 계산 응답이 올바르지 않습니다.',
+        502,
+      );
     }
     const inputTokens = number(object(value).input_tokens);
     if (inputTokens === null || !Number.isInteger(inputTokens))
-      throw new AppError('TOKEN_COUNT_FORMAT', 'llama-server 토큰 계산 응답이 올바르지 않습니다.', 502);
+      throw new AppError(
+        'TOKEN_COUNT_FORMAT',
+        'llama-server 토큰 계산 응답이 올바르지 않습니다.',
+        502,
+      );
     return inputTokens;
   }
   async *generate(request: InferenceRequest, signal: AbortSignal): AsyncGenerator<InferenceEvent> {
@@ -274,13 +338,16 @@ export class ChatCompletionProvider implements InferenceProvider {
     const toolIndexesById = new Map<string, number>();
     const implicitToolIndexes: number[] = [];
     let nextToolIndex = 0;
-    const response = await this.fetchModelResponse({
-      method: 'POST',
-      headers: this.headers(),
+    const response = await this.fetchModelResponse(
+      {
+        method: 'POST',
+        headers: this.headers(),
+        signal,
+        redirect: 'error',
+        body: JSON.stringify(this.requestBody(request, true)),
+      },
       signal,
-      redirect: 'error',
-      body: JSON.stringify(this.requestBody(request, true)),
-    }, signal);
+    );
     if (!response.ok)
       throw new AppError(
         'PROVIDER_HTTP',

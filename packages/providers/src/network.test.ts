@@ -43,6 +43,7 @@ describe('private model server networking', () => {
       }
       expect(fetcher.mock.calls.map((call) => call[0])).toEqual([
         base + '/v1/models',
+        base + '/props',
         base + '/v1/chat/completions',
       ]);
       expect(fetcher.mock.calls.every((call) => call[1]?.redirect === 'error')).toBe(true);
@@ -79,7 +80,10 @@ describe('private model server networking', () => {
     );
     expect(await provider.listModels()).toMatchObject([{ id: 'fixture' }]);
     expect(resolver.mock.calls[0]![0]).toBe('gpu.tailnet.ts.net');
-    expect(hits).toEqual([`gpu.tailnet.ts.net:${address.port}`]);
+    expect(hits).toEqual([
+      `gpu.tailnet.ts.net:${address.port}`,
+      `gpu.tailnet.ts.net:${address.port}`,
+    ]);
   });
   it('rejects mixed/public DNS answers before opening a connection', async () => {
     const dispatcher = createPrivateDispatcher((_host, _options, cb) =>

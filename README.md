@@ -49,6 +49,8 @@ Open the model manager to download a public Hugging Face GGUF file or select one
 
 Start an OpenAI-compatible llama-server and enter its API URL. The default is `http://127.0.0.1:8080/v1`. Private IPv4, localhost, and approved Tailscale addresses are supported.
 
+When llama.cpp exposes `/props`, the model picker reports the active Chat template's tool-calling, system-role, and reasoning-history capabilities. Older compatible servers remain usable with unknown capability labels.
+
 ### OpenRouter
 
 Copy [`.env.example`](.env.example) to `.env`, add the key, and restart Lodex:

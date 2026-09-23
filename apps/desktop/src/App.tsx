@@ -64,6 +64,22 @@ const WorktreeManager = lazy(() =>
 
 const providerName = (provider: string) =>
   provider === 'openrouter' ? 'OpenRouter' : provider === 'demo' ? '데모' : 'llama-server';
+const templateCapabilityLabel = (model: ModelDescriptor) => {
+  const caps = model.templateCapabilities;
+  if (!caps) return '';
+  return [
+    'llama.cpp 템플릿 확인됨',
+    `도구 호출 ${model.tools ? '지원' : '미지원'}`,
+    caps.supportsSystemRole === null
+      ? ''
+      : `system 역할 ${caps.supportsSystemRole ? '지원' : '변환 필요'}`,
+    caps.supportsPreserveReasoning === null
+      ? ''
+      : `reasoning 보존 ${caps.supportsPreserveReasoning ? '지원' : '미지원'}`,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+};
 const messageError = (error: unknown) => (error instanceof Error ? error.message : String(error));
 const permissionLabel: Record<PermissionMode, string> = {
   ask: '승인 요청',
@@ -1768,6 +1784,10 @@ function Settings({
   const keySource = useWorkspace((s) => s.openrouterKeySource);
   const envFilePath = useWorkspace((s) => s.envFilePath);
   const envManaged = keySource === 'env_file' || keySource === 'environment';
+  const selectedDescriptor =
+    catalogProvider === draft.provider
+      ? catalog.find((descriptor) => descriptor.id === draft.model)
+      : undefined;
   const dialog = useRef<HTMLDialogElement>(null);
   useEffect(() => {
     dialog.current?.showModal();
@@ -2065,13 +2085,17 @@ function Settings({
                     </option>
                   ))}
                 </datalist>
-                {draft.provider === 'openrouter' && catalog.length > 0 && draft.model && (
+                {catalog.length > 0 && draft.model && (
                   <small>
-                    {catalog.find((model) => model.id === draft.model)?.tools === false
-                      ? '이 모델은 도구 호출을 지원하지 않습니다. 프로젝트 도구를 쓰는 Build 작업에는 도구 지원 모델을 선택하세요.'
-                      : !catalog.some((model) => model.id === draft.model)
-                        ? '현재 목록에 없는 ID입니다. OpenRouter 모델 ID를 다시 확인하세요.'
-                        : '목록에 있는 모델 ID입니다. 도구 지원 여부는 모델별로 다릅니다.'}
+                    {selectedDescriptor?.tools === false
+                      ? draft.provider === 'llama-server'
+                        ? '현재 llama.cpp Chat template은 도구 호출을 지원하지 않습니다. 도구 사용 템플릿이 내장된 모델을 사용하거나 로컬 모델 설정에서 올바른 Chat template을 지정하세요.'
+                        : '이 모델은 도구 호출을 지원하지 않습니다. 프로젝트 도구를 쓰는 Build 작업에는 도구 지원 모델을 선택하세요.'
+                      : !selectedDescriptor
+                        ? `현재 목록에 없는 ID입니다. ${draft.provider === 'openrouter' ? 'OpenRouter' : 'llama-server'} 모델 ID를 다시 확인하세요.`
+                        : selectedDescriptor.templateCapabilities
+                          ? templateCapabilityLabel(selectedDescriptor)
+                          : '목록에 있는 모델 ID입니다. 도구 지원 여부는 모델별로 다릅니다.'}
                   </small>
                 )}
               </label>

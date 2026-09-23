@@ -49,6 +49,8 @@ Windows에서는 `run-lodex.bat`를 더블클릭하면 빠진 npm 패키지를 �
 
 OpenAI 호환 llama-server를 실행하고 API 주소를 입력하세요. 기본값은 `http://127.0.0.1:8080/v1`입니다. localhost·사설 IPv4·허용된 Tailscale 주소를 지원합니다.
 
+llama.cpp가 `/props`를 제공하면 모델 선택 화면에 현재 Chat template의 도구 호출·system 역할·reasoning 기록 지원 여부를 표시합니다. 구형 호환 서버는 능력 표시만 미확정 상태로 두고 계속 사용할 수 있습니다.
+
 ### OpenRouter
 
 [`.env.example`](.env.example)을 `.env`로 복사하고 키를 입력한 뒤 Lodex를 다시 시작하세요.
