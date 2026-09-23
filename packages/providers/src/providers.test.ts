@@ -15,6 +15,23 @@ function stream(text: string, chunkSize = 1): ReadableStream<Uint8Array> {
 const response = (text: string) =>
   new Response(stream(text), { headers: { 'Content-Type': 'text/event-stream' } });
 const data = (value: unknown) => 'data: ' + JSON.stringify(value) + '\n\n';
+const props = (overrides: Record<string, boolean> = {}) =>
+  new Response(
+    JSON.stringify({
+      chat_template_caps: {
+        supports_tools: true,
+        supports_tool_calls: true,
+        supports_system_role: true,
+        supports_parallel_tool_calls: false,
+        supports_preserve_reasoning: true,
+        supports_reasoning_effort: false,
+        supports_string_content: true,
+        supports_typed_content: false,
+        supports_object_arguments: true,
+        ...overrides,
+      },
+    }),
+  );
 async function collect<T>(generator: AsyncIterable<T>): Promise<T[]> {
   const values: T[] = [];
   for await (const value of generator) values.push(value);
@@ -61,6 +78,7 @@ describe('provider adapters', () => {
     };
     const fetcher = vi
       .fn<typeof fetch>()
+      .mockResolvedValueOnce(props())
       .mockResolvedValueOnce(
         new Response(JSON.stringify({ object: 'response.input_tokens', input_tokens: 37 }), {
           headers: { 'Content-Type': 'application/json' },
@@ -74,23 +92,27 @@ describe('provider adapters', () => {
       fetcher,
     );
     expect(await provider.countInputTokens(input, signal())).toBe(37);
-    expect(fetcher.mock.calls[0]?.[0]).toBe(
+    expect(fetcher.mock.calls[0]?.[0]).toBe('http://127.0.0.1:8080/props');
+    expect(fetcher.mock.calls[1]?.[0]).toBe(
       'http://127.0.0.1:8080/v1/chat/completions/input_tokens',
     );
-    const body = JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body));
+    const body = JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body));
     expect(body).toMatchObject({ model: 'fixture', stream: false, tools: input.tools });
     expect(await provider.countInputTokens(input, signal())).toBeNull();
   });
   it('separates structured thinking and preserves tool/reasoning wire fields', async () => {
-    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
-      response(
-        data({
-          choices: [{ delta: { reasoning_content: '생각', content: '<think>생각</think>답변' } }],
-        }) +
-          data({ choices: [{ delta: {}, finish_reason: 'stop' }] }) +
-          'data: [DONE]\n\n',
-      ),
-    );
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(props())
+      .mockResolvedValueOnce(
+        response(
+          data({
+            choices: [{ delta: { reasoning_content: '생각', content: '<think>생각</think>답변' } }],
+          }) +
+            data({ choices: [{ delta: {}, finish_reason: 'stop' }] }) +
+            'data: [DONE]\n\n',
+        ),
+      );
     const input: InferenceRequest = {
       config: { ...defaultModelConfig(), model: 'fixture' },
       messages: [
@@ -123,13 +145,105 @@ describe('provider adapters', () => {
     expect(events.filter((e) => e.type === 'text_delta')).toEqual([
       { type: 'text_delta', text: '답변' },
     ]);
-    const body = JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body));
+    const body = JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body));
     expect(body.messages[0]).toMatchObject({
       reasoning_content: 'prior',
       tool_calls: [{ id: 'c1', type: 'function', function: { name: 'read_file' } }],
     });
     expect(body.messages[1].tool_call_id).toBe('c1');
     expect(body.tools).toEqual(input.tools);
+  });
+  it('adapts messages and tool settings to authoritative llama.cpp template capabilities', async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        props({
+          supports_system_role: false,
+          supports_parallel_tool_calls: true,
+          supports_preserve_reasoning: false,
+          supports_string_content: false,
+          supports_typed_content: true,
+        }),
+      )
+      .mockResolvedValueOnce(
+        response(
+          data({ choices: [{ delta: { content: 'ok' }, finish_reason: 'stop' }] }) +
+            'data: [DONE]\n\n',
+        ),
+      );
+    const input: InferenceRequest = {
+      ...request(),
+      messages: [
+        { role: 'system', content: 'Follow project rules.' },
+        { role: 'user', content: 'Inspect the project.' },
+        { role: 'assistant', content: 'Earlier.', reasoningContent: 'private chain' },
+      ],
+      tools: [
+        {
+          type: 'function',
+          function: { name: 'read_file', description: 'read', parameters: { type: 'object' } },
+        },
+      ],
+    };
+    await collect(
+      new ChatCompletionProvider(
+        'llama-server',
+        'http://localhost:8080/v1',
+        null,
+        fetcher,
+      ).generate(input, signal()),
+    );
+    const body = JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body));
+    expect(body.parallel_tool_calls).toBe(true);
+    expect(body.messages).toEqual([
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'text',
+            text: '[System instructions]\nFollow project rules.\n\nInspect the project.',
+          },
+        ],
+      },
+      {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Earlier.' }],
+      },
+    ]);
+  });
+  it('stops before generation when the active llama.cpp template cannot call tools', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      props({
+        supports_tools: false,
+        supports_tool_calls: false,
+      }),
+    );
+    await expect(
+      collect(
+        new ChatCompletionProvider(
+          'llama-server',
+          'http://localhost:8080/v1',
+          null,
+          fetcher,
+        ).generate(
+          {
+            ...request(),
+            tools: [
+              {
+                type: 'function',
+                function: {
+                  name: 'read_file',
+                  description: 'read',
+                  parameters: { type: 'object' },
+                },
+              },
+            ],
+          },
+          signal(),
+        ),
+      ),
+    ).rejects.toThrow('tool_use template');
+    expect(fetcher).toHaveBeenCalledTimes(1);
   });
   it('sends compiled messages unchanged, with no extra unbudgeted Eco prompt', async () => {
     const input: InferenceRequest = {
@@ -141,7 +255,8 @@ describe('provider adapters', () => {
     };
     const fetcher = vi
       .fn<typeof fetch>()
-      .mockResolvedValue(
+      .mockResolvedValueOnce(props())
+      .mockResolvedValueOnce(
         response(data({ choices: [{ delta: {}, finish_reason: 'stop' }] }) + 'data: [DONE]\n\n'),
       );
     await collect(
@@ -152,7 +267,7 @@ describe('provider adapters', () => {
         fetcher,
       ).generate(input, signal()),
     );
-    const body = JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body));
+    const body = JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body));
     expect(body.messages).toEqual(input.messages);
     expect(body).not.toHaveProperty('temperature');
     expect(body).not.toHaveProperty('top_p');

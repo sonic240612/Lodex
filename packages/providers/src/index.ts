@@ -51,6 +51,63 @@ const price = (value: unknown): number | null => {
 };
 const boolean = (value: unknown): boolean | null => (typeof value === 'boolean' ? value : null);
 
+function messagesForTemplate(
+  messages: InferenceRequest['messages'],
+  capabilities: ModelTemplateCapabilities | null,
+) {
+  let adapted = messages;
+  if (capabilities?.supportsSystemRole === false) {
+    const system = messages
+      .filter((message) => message.role === 'system')
+      .map((message) => message.content)
+      .join('\n\n');
+    adapted = messages.filter((message) => message.role !== 'system');
+    if (system) {
+      const prefix = `[System instructions]\n${system}\n\n`;
+      adapted =
+        adapted[0]?.role === 'user'
+          ? [{ ...adapted[0], content: prefix + adapted[0].content }, ...adapted.slice(1)]
+          : [{ role: 'user', content: prefix.trimEnd() }, ...adapted];
+    }
+  }
+  const typedContent =
+    capabilities?.supportsStringContent === false && capabilities.supportsTypedContent === true;
+  const preserveReasoning = capabilities?.supportsPreserveReasoning !== false;
+  return adapted.map((message) => ({
+    role: message.role,
+    content: typedContent ? [{ type: 'text', text: message.content }] : message.content,
+    ...(message.toolCalls
+      ? {
+          tool_calls: message.toolCalls.map((call) => ({
+            id: call.id,
+            type: 'function',
+            function: { name: call.name, arguments: call.arguments },
+          })),
+        }
+      : {}),
+    ...(message.toolCallId ? { tool_call_id: message.toolCallId } : {}),
+    ...(preserveReasoning && message.reasoningDetails?.length
+      ? { reasoning_details: message.reasoningDetails }
+      : {}),
+    ...(preserveReasoning && message.reasoningContent
+      ? { reasoning_content: message.reasoningContent }
+      : {}),
+  }));
+}
+
+function needsTemplateCapabilities(request: InferenceRequest) {
+  return (
+    !!request.tools?.length ||
+    request.messages.some(
+      (message) =>
+        message.role === 'system' ||
+        !!message.toolCalls?.length ||
+        !!message.reasoningDetails?.length ||
+        !!message.reasoningContent,
+    )
+  );
+}
+
 function llamaTemplateCapabilities(value: unknown): ModelTemplateCapabilities | null {
   const caps = object(object(value).chat_template_caps);
   const supportsTools = boolean(caps.supports_tools);
@@ -114,6 +171,8 @@ async function openRouterHttpError(response: Response, toolsRequested: boolean):
 export class ChatCompletionProvider implements InferenceProvider {
   private baseUrl: string;
   private fetcher: Fetch;
+  private templateCapabilitiesLoaded = false;
+  private templateCapabilitiesValue: ModelTemplateCapabilities | null = null;
   constructor(
     private kind: Exclude<ProviderId, 'demo'>,
     baseUrl: string,
@@ -152,6 +211,7 @@ export class ChatCompletionProvider implements InferenceProvider {
     signal?: AbortSignal,
   ): Promise<ModelTemplateCapabilities | null> {
     if (this.kind !== 'llama-server') return null;
+    if (this.templateCapabilitiesLoaded) return this.templateCapabilitiesValue;
     const propsUrl = this.baseUrl.replace(/\/v1$/, '') + '/props';
     try {
       const response = await this.fetcher(propsUrl, {
@@ -161,12 +221,17 @@ export class ChatCompletionProvider implements InferenceProvider {
       });
       if (!response.ok) {
         await response.body?.cancel().catch(() => undefined);
+        this.templateCapabilitiesLoaded = true;
         return null;
       }
-      return llamaTemplateCapabilities(await response.json());
+      const capabilities = llamaTemplateCapabilities(await response.json());
+      this.templateCapabilitiesValue = capabilities;
+      this.templateCapabilitiesLoaded = true;
+      return capabilities;
     } catch {
       if (signal?.aborted) throw signal.reason;
       // Older OpenAI-compatible servers may not expose llama.cpp /props.
+      this.templateCapabilitiesLoaded = true;
       return null;
     }
   }
@@ -239,36 +304,51 @@ export class ChatCompletionProvider implements InferenceProvider {
       ...(descriptor?.templateCapabilities ? { template: descriptor.templateCapabilities } : {}),
     };
   }
-  private requestBody(request: InferenceRequest, stream: boolean) {
+  private requestBody(
+    request: InferenceRequest,
+    stream: boolean,
+    templateCapabilities: ModelTemplateCapabilities | null = null,
+  ) {
     const config = request.config;
+    if (
+      request.tools?.length &&
+      (templateCapabilities?.supportsTools === false ||
+        templateCapabilities?.supportsToolCalls === false)
+    )
+      throw new AppError(
+        'MODEL_TOOLS_UNSUPPORTED',
+        '활성 chat template이 도구 호출을 지원하지 않습니다. tool_use template이 포함된 GGUF를 선택하거나 로컬 모델 설정에서 호환 Chat template을 지정하세요.',
+      );
     return {
       model: config.model,
-      messages: request.messages.map((m) => ({
-        role: m.role,
-        content: m.content,
-        ...(m.toolCalls
-          ? {
-              tool_calls: m.toolCalls.map((call) => ({
-                id: call.id,
-                type: 'function',
-                function: { name: call.name, arguments: call.arguments },
-              })),
-            }
-          : {}),
-        ...(m.toolCallId ? { tool_call_id: m.toolCallId } : {}),
-        ...(m.reasoningDetails?.length ? { reasoning_details: m.reasoningDetails } : {}),
-        ...(m.reasoningContent
-          ? {
-              [this.kind === 'llama-server' ? 'reasoning_content' : 'reasoning']:
-                m.reasoningContent,
-            }
-          : {}),
-      })),
+      messages:
+        this.kind === 'llama-server'
+          ? messagesForTemplate(request.messages, templateCapabilities)
+          : request.messages.map((message) => ({
+              role: message.role,
+              content: message.content,
+              ...(message.toolCalls
+                ? {
+                    tool_calls: message.toolCalls.map((call) => ({
+                      id: call.id,
+                      type: 'function',
+                      function: { name: call.name, arguments: call.arguments },
+                    })),
+                  }
+                : {}),
+              ...(message.toolCallId ? { tool_call_id: message.toolCallId } : {}),
+              ...(message.reasoningDetails?.length
+                ? { reasoning_details: message.reasoningDetails }
+                : {}),
+              ...(message.reasoningContent ? { reasoning: message.reasoningContent } : {}),
+            })),
       ...(request.tools?.length
         ? {
             tools: request.tools,
             tool_choice: 'auto',
-            ...(this.kind === 'llama-server' ? { parallel_tool_calls: false } : {}),
+            ...(this.kind === 'llama-server'
+              ? { parallel_tool_calls: templateCapabilities?.supportsParallelToolCalls === true }
+              : {}),
           }
         : {}),
       stream,
@@ -289,12 +369,15 @@ export class ChatCompletionProvider implements InferenceProvider {
   }
   async countInputTokens(request: InferenceRequest, signal: AbortSignal): Promise<number | null> {
     if (this.kind !== 'llama-server') return null;
+    const templateCapabilities = needsTemplateCapabilities(request)
+      ? await this.templateCapabilities(signal)
+      : null;
     const response = await this.fetchResponse('/chat/completions/input_tokens', {
       method: 'POST',
       headers: this.headers(),
       signal,
       redirect: 'error',
-      body: JSON.stringify(this.requestBody(request, false)),
+      body: JSON.stringify(this.requestBody(request, false, templateCapabilities)),
     });
     if ([404, 405, 501].includes(response.status)) {
       await response.body?.cancel().catch(() => undefined);
@@ -338,13 +421,17 @@ export class ChatCompletionProvider implements InferenceProvider {
     const toolIndexesById = new Map<string, number>();
     const implicitToolIndexes: number[] = [];
     let nextToolIndex = 0;
+    const templateCapabilities =
+      this.kind === 'llama-server' && needsTemplateCapabilities(request)
+        ? await this.templateCapabilities(signal)
+        : null;
     const response = await this.fetchModelResponse(
       {
         method: 'POST',
         headers: this.headers(),
         signal,
         redirect: 'error',
-        body: JSON.stringify(this.requestBody(request, true)),
+        body: JSON.stringify(this.requestBody(request, true, templateCapabilities)),
       },
       signal,
     );
