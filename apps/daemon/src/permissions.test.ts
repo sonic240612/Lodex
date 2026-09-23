@@ -17,6 +17,13 @@ describe('permission policy', () => {
       action: 'prompt',
       risk: 'high',
     });
+    expect(
+      permissionDecision('auto', {
+        kind: 'file',
+        paths: ['src/obsolete.ts'],
+        destructive: true,
+      }),
+    ).toMatchObject({ action: 'prompt', risk: 'high' });
   });
 
   it.each([

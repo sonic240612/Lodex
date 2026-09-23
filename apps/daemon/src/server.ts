@@ -503,7 +503,10 @@ export async function startServer(options: ServerOptions) {
       .find((entry) => entry.id === action.activityId);
     if (!activity?.approval)
       throw new AppError('APPROVAL_NOT_FOUND', '권한 요청을 찾을 수 없습니다.', 404);
-    if (activity.approval.kind === 'file' || activity.approval.kind === 'fusion') {
+    if (
+      (activity.approval.kind === 'file' || activity.approval.kind === 'fusion') &&
+      activityProposal(activity)
+    ) {
       try {
         return await reviewEdit({
           sessionId: decided.id,
@@ -922,7 +925,11 @@ export async function startServer(options: ServerOptions) {
         session.projectId &&
         (session.config.provider !== 'openrouter' || session.config.projectCloudConsent)
           ? projectTools.filter(
-              (tool) => session.mode !== 'plan' || !tool.function.name.startsWith('propose_'),
+              (tool) =>
+                session.mode !== 'plan' ||
+                ['list_files', 'read_file', 'search_text', 'inspect_path'].includes(
+                  tool.function.name,
+                ),
             )
           : [];
       tools.push(planningTool);

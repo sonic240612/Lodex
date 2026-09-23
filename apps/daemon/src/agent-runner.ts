@@ -1025,7 +1025,7 @@ export async function runAgent(options: {
           if (!project) throw new AppError('PROJECT_REQUIRED', '프로젝트가 필요합니다.');
           if (
             session.mode === 'plan' &&
-            !['list_files', 'read_file', 'search_text'].includes(call.name)
+            !['list_files', 'read_file', 'search_text', 'inspect_path'].includes(call.name)
           )
             throw new AppError('PLAN_READ_ONLY', 'Plan 모드에서는 파일을 변경할 수 없습니다.', 403);
           result = await runProjectTool(
@@ -1039,6 +1039,7 @@ export async function runAgent(options: {
             (changes) => {
               card.changes = changes;
             },
+            (paths, destructive) => authorize(card, { kind: 'file', paths, destructive }),
           );
         }
         if (activityProposal(card) && options.waitForApproval) {

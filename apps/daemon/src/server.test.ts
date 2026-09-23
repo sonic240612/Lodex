@@ -1005,7 +1005,11 @@ describe('authenticated daemon integration', () => {
       capabilities: async () => ({ tools: true, streaming: true }),
       async *generate(request) {
         expect(request.tools?.some((t) => t.function.name === 'read_file')).toBe(true);
+        expect(request.tools?.some((t) => t.function.name === 'inspect_path')).toBe(true);
         expect(request.tools?.some((t) => t.function.name === 'propose_changes')).toBe(false);
+        expect(request.tools?.some((t) => t.function.name === 'make_directory')).toBe(false);
+        expect(request.tools?.some((t) => t.function.name === 'move_path')).toBe(false);
+        expect(request.tools?.some((t) => t.function.name === 'delete_path')).toBe(false);
         yield {
           type: 'tool_call_delta',
           index: 0,
@@ -1408,6 +1412,102 @@ describe('authenticated daemon integration', () => {
       completed.messages.at(-1)?.activities?.find((activity) => activity.edit)?.edit?.status,
     ).toBe('applied');
   });
+  it('pauses destructive path operations in auto mode and resumes after approval', async () => {
+    const content = 'remove me\n';
+    const expectedFingerprint = createHash('sha256')
+      .update(`f\0\0${Buffer.byteLength(content)}\0`)
+      .update(content)
+      .digest('hex');
+    let round = 0;
+    const provider: InferenceProvider = {
+      listModels: async () => [],
+      capabilities: async () => ({ tools: true, streaming: true }),
+      async *generate(request) {
+        expect(request.tools?.some((tool) => tool.function.name === 'delete_path')).toBe(true);
+        if (round++ === 0) {
+          yield {
+            type: 'tool_call_delta',
+            index: 0,
+            id: 'delete-reviewed-path',
+            name: 'delete_path',
+            arguments: JSON.stringify({
+              path: 'obsolete.txt',
+              expectedFingerprint,
+              recursive: false,
+            }),
+          };
+          yield { type: 'finished', reason: 'tool_calls' };
+        } else {
+          expect(request.messages.at(-1)).toMatchObject({
+            role: 'tool',
+            toolCallId: 'delete-reviewed-path',
+          });
+          expect(request.messages.at(-1)?.content).toContain('"status":"deleted"');
+          yield { type: 'text_delta', text: '검토한 파일을 삭제했습니다.' };
+          yield { type: 'finished', reason: 'stop' };
+        }
+      },
+    };
+    const app = await setup(provider);
+    const file = join(app.dir, 'obsolete.txt');
+    await writeFile(file, content);
+    const { project } = await app
+      .request('/v1/projects', { method: 'POST', body: JSON.stringify({ path: app.dir }) })
+      .then((response) => response.json());
+    let session = await app.create({}, project.id);
+    session = (
+      await app
+        .command(
+          makeCommand({
+            type: 'set_permission_mode',
+            sessionId: session.id,
+            expectedVersion: session.version,
+            mode: 'auto',
+          }),
+        )
+        .then((response) => response.json())
+    ).session;
+    await app.command(
+      makeCommand({
+        type: 'send_message',
+        sessionId: session.id,
+        expectedVersion: session.version,
+        content: '검토한 파일을 삭제해 줘',
+      }),
+    );
+    await vi.waitFor(async () => {
+      const current = await app.store.session(session.id);
+      expect(current.run?.status).toBe('running');
+      expect(
+        current.messages
+          .at(-1)
+          ?.activities?.some((activity) => activity.approval?.status === 'pending'),
+      ).toBe(true);
+    });
+    expect(await readFile(file, 'utf8')).toBe(content);
+    session = await app.store.session(session.id);
+    const activity = session.messages
+      .at(-1)!
+      .activities!.find((entry) => entry.approval?.status === 'pending')!;
+    expect(activity.approval).toMatchObject({ kind: 'file', risk: 'high' });
+    const approval = await app.request('/v1/approvals', {
+      method: 'POST',
+      body: JSON.stringify({
+        sessionId: session.id,
+        expectedVersion: session.version,
+        activityId: activity.id,
+        action: 'approve',
+      }),
+    });
+    expect(approval.status).toBe(200);
+    await vi.waitFor(async () =>
+      expect((await app.store.session(session.id)).run?.status).toBe('completed'),
+    );
+    await expect(readFile(file)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect((await app.store.session(session.id)).messages.at(-1)?.content).toContain(
+      '검토한 파일을 삭제했습니다.',
+    );
+  });
   it('rejects a pending model edit without changing the project file', async () => {
     const before = 'const keep = true;\n';
     let round = 0;
@@ -1553,6 +1653,10 @@ describe('authenticated daemon integration', () => {
       message = final.messages.at(-1)!;
     expect(requests).toHaveLength(2);
     expect(requests[0]!.tools?.map((tool) => tool.function.name)).toEqual([
+      'inspect_path',
+      'make_directory',
+      'move_path',
+      'delete_path',
       'propose_changes',
       'propose_edit',
       'list_files',

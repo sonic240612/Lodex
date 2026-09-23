@@ -1,7 +1,7 @@
 import type { PermissionDecision, PermissionMode } from '@lodex/contracts';
 
 export type PermissionRequest =
-  | { kind: 'file'; paths: string[] }
+  | { kind: 'file'; paths: string[]; destructive?: boolean }
   | { kind: 'command'; command: string; network: 'none' | 'bridge'; environment: 'docker' | 'host' }
   | {
       kind: 'fusion';
@@ -69,7 +69,8 @@ export function permissionDecision(
 
   if (request.kind === 'file') {
     const secret = request.paths.some(secretPath);
-    if (mode === 'auto' && !secret)
+    const high = secret || request.destructive === true;
+    if (mode === 'auto' && !high)
       return {
         kind: 'file',
         target: request.paths.join(', '),
@@ -84,10 +85,12 @@ export function permissionDecision(
       target: request.paths.join(', '),
       actor,
       mode,
-      risk: secret ? 'high' : 'low',
+      risk: high ? 'high' : 'low',
       reason: secret
         ? '비밀 또는 인증 설정으로 사용될 수 있는 파일을 변경합니다.'
-        : '프로젝트 파일을 변경합니다.',
+        : request.destructive
+          ? '프로젝트 파일이나 폴더를 삭제합니다. 이 작업은 자동으로 되돌릴 수 없습니다.'
+          : '프로젝트 파일을 변경합니다.',
       action: 'prompt',
     };
   }

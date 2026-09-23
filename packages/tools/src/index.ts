@@ -12,6 +12,7 @@ import {
 } from '@lodex/contracts';
 import { createTwoFilesPatch } from 'diff';
 import { proposeChanges, changeInputSchema } from './changes';
+import { pathOperationSchemas, runPathOperation } from './path-operations';
 export { proposeChanges, checkChanges, writeChanges } from './changes';
 export {
   executeCommand,
@@ -46,6 +47,7 @@ const blocked = (name: string) =>
 const dotenvName = (name: string) => /^\.env(?:\.|$)/i.test(name);
 const pathSchema = z.string().min(1).max(4096).default('.');
 const schemas = {
+  ...pathOperationSchemas,
   propose_changes: changeInputSchema,
   propose_edit: z.strictObject({
     path: pathSchema,
@@ -67,6 +69,14 @@ const schemas = {
   }),
 };
 const descriptions: Record<keyof typeof schemas, string> = {
+  inspect_path:
+    'Inspect one existing project file or directory before move_path or delete_path. Returns a content fingerprint, kind, bounded entry count, and byte count. Reads at most 2,000 entries and 32 MiB. Secret, generated, linked, and project-root paths are excluded.',
+  make_directory:
+    'Create one directory inside an existing project directory after permission review. Does not create missing parents and never overwrites an existing path.',
+  move_path:
+    'Move one reviewed file or directory inside the project. First call inspect_path and pass its exact expectedFingerprint. The destination parent must exist and the destination must not exist. Never overwrites.',
+  delete_path:
+    'Delete one reviewed project file or directory. First call inspect_path and pass its exact expectedFingerprint. Non-empty directories require recursive=true. This is destructive and always requires user review unless Full Access is active.',
   propose_changes:
     'Propose a reviewed set of 1-8 UTF-8 file changes. kind edit requires read_file sha256, one exact oldText and newText. kind create requires a nonexistent path inside an EXISTING directory and content. A missing project-root .env or .env.* file may be created this way, but existing dotenv files cannot be read or edited. Paths must be distinct. Optional thenRun fuses one Docker validation command with the approved change set. Total tool arguments stay under 16 KiB. NEVER writes before approval. No directories or deletion.',
   propose_edit:
@@ -402,6 +412,7 @@ export async function runProjectTool(
   signal: AbortSignal,
   onProposal?: (edit: EditProposal) => void,
   onChanges?: (changes: ChangeSet) => void,
+  authorizeMutation?: (paths: string[], destructive: boolean) => Promise<boolean>,
 ): Promise<string> {
   try {
     signal.throwIfAborted();
@@ -413,6 +424,16 @@ export async function runProjectTool(
     } catch {
       throw new AppError('TOOL_ARGUMENTS', '도구 인자는 완성된 JSON이어야 합니다.');
     }
+    if (Object.hasOwn(pathOperationSchemas, name))
+      return JSON.stringify(
+        await runPathOperation(
+          project,
+          name as keyof typeof pathOperationSchemas,
+          value,
+          signal,
+          authorizeMutation,
+        ),
+      );
     if (name === 'propose_changes') {
       const changes = await proposeChanges(project, schemas.propose_changes.parse(value), signal);
       onChanges?.(changes);
