@@ -67,6 +67,40 @@ export class InferenceScheduler {
     return {
       listModels: (signal) => metadata().listModels(signal),
       capabilities: (model) => metadata().capabilities(model),
+      async countInputTokens(request, signal) {
+        signal.throwIfAborted();
+        const config = request.config;
+        const release = await (
+          config.provider === 'openrouter' ? scheduler.cloud : scheduler.local
+        ).acquire(signal);
+        let lease: RuntimeLease | undefined;
+        try {
+          signal.throwIfAborted();
+          if (config.managedModelId)
+            lease = await scheduler.runtime.acquire(
+              config.managedModelId,
+              signal,
+              config.managedModelVersion,
+            );
+          signal.throwIfAborted();
+          const effective = lease
+            ? { ...config, model: lease.model, baseUrl: lease.baseUrl }
+            : config;
+          const provider = make(
+            { ...session, config: effective },
+            config.provider === 'openrouter' ? scheduler.key() : (lease?.key ?? null),
+          );
+          return provider.countInputTokens
+            ? await provider.countInputTokens({ ...request, config: effective }, signal)
+            : null;
+        } finally {
+          try {
+            await lease?.release();
+          } finally {
+            release();
+          }
+        }
+      },
       async *generate(request, signal) {
         signal.throwIfAborted();
         const config = request.config;

@@ -30,6 +30,69 @@ const consume = async (iter: AsyncIterable<unknown>) => {
 };
 
 describe('per-generation model leases', () => {
+  it('counts the fully formatted request through the managed model and releases its lease', async () => {
+    const release = vi.fn(async () => {});
+    const acquire = vi.fn<RuntimeManager['acquire']>(
+      async () =>
+        ({
+          profileId: 'one',
+          model: 'alias',
+          baseUrl: 'http://127.0.0.1:10/v1',
+          key: 'fixture',
+          release,
+        }) as RuntimeLease,
+    );
+    const countInputTokens = vi.fn(async (received: InferenceRequest) => {
+      expect(received.config).toMatchObject({
+        model: 'alias',
+        baseUrl: 'http://127.0.0.1:10/v1',
+      });
+      return 42;
+    });
+    const scheduler = new InferenceScheduler(
+      { acquire },
+      () => null,
+      () => ({
+        listModels: async () => [],
+        capabilities: async () => ({ tools: true, streaming: true }),
+        countInputTokens,
+        async *generate() {
+          yield { type: 'finished', reason: 'stop' };
+        },
+      }),
+    );
+
+    await expect(
+      scheduler.provider(session).countInputTokens!(
+        request('one'),
+        new AbortController().signal,
+      ),
+    ).resolves.toBe(42);
+    expect(acquire).toHaveBeenCalledWith('one', expect.any(AbortSignal), 1);
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns no exact count when the selected provider has no tokenizer endpoint', async () => {
+    const scheduler = new InferenceScheduler(
+      { acquire: vi.fn() },
+      () => null,
+      () => ({
+        listModels: async () => [],
+        capabilities: async () => ({ tools: true, streaming: true }),
+        async *generate() {
+          yield { type: 'finished', reason: 'stop' };
+        },
+      }),
+    );
+
+    await expect(
+      scheduler.provider(session).countInputTokens!(
+        { ...request(''), config: { ...session.config, managedModelId: undefined } },
+        new AbortController().signal,
+      ),
+    ).resolves.toBeNull();
+  });
+
   it('releases the parent before a different child model and cancels queued work without acquiring VRAM', async () => {
     const calls: string[] = [];
     let releaseGeneration!: () => void, started!: () => void;

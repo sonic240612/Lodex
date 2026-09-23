@@ -343,7 +343,7 @@ describe('skills daemon integration', () => {
     const blocked = await app.send(cleared);
     expect(blocked.status).toBe(403);
     expect((await blocked.json()).error.code).toBe('SKILL_CLOUD_CONSENT');
-    expect(app.factory).toHaveBeenCalledTimes(1);
+    expect(app.factory).toHaveBeenCalledTimes(2);
     expect(requests).toHaveLength(1);
     expect((await app.store.session(session.id)).messages).toHaveLength(completed.messages.length);
   });

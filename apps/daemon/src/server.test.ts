@@ -2115,7 +2115,7 @@ describe('authenticated daemon integration', () => {
     await vi.waitFor(async () =>
       expect((await app.store.session(session.id)).run?.status).toBe('completed'),
     );
-    expect(app.factory).toHaveBeenCalledTimes(1);
+    expect(app.factory).toHaveBeenCalledTimes(2);
     expect((await app.store.session(session.id)).messages.at(-1)?.content).toBe('안녕 Lodex');
   });
   it('cancels an active request and never marks late content complete', async () => {
