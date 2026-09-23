@@ -940,7 +940,10 @@ describe('authenticated daemon integration', () => {
       listModels: async () => [],
       capabilities: async () => ({ tools: true, streaming: true }),
       async *generate(request) {
-        expect(request.tools?.map((t) => t.function.name)).toEqual(['propose_plan']);
+        expect(request.tools?.map((t) => t.function.name)).toEqual([
+          'propose_plan',
+          'search_history',
+        ]);
         if (round++ === 0) {
           yield {
             type: 'tool_call_delta',
@@ -1665,6 +1668,7 @@ describe('authenticated daemon integration', () => {
       'read_many_files',
       'search_text',
       'propose_plan',
+      'search_history',
     ]);
     expect(requests[1]!.messages.at(-1)).toMatchObject({ role: 'tool', toolCallId: 'read-1' });
     expect(requests[1]!.messages.at(-1)?.content).toContain('안녕 프로젝트');

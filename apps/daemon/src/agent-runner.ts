@@ -28,6 +28,7 @@ import {
 } from '@lodex/tools';
 import type { Store } from '@lodex/storage';
 import { proposePlan } from './planning';
+import { searchSessionHistory } from './history';
 import { autopilotVerificationRequest, completeGoal, verifyAutopilot } from './autopilot';
 import { runSkillTool } from './skills';
 import type {
@@ -851,6 +852,8 @@ export async function runAgent(options: {
           if (!options.observations)
             throw new AppError('OBSERVATION_UNAVAILABLE', '보관된 도구 결과를 읽을 수 없습니다.');
           result = await options.observations.recall(session.id, call.arguments);
+        } else if (call.name === 'search_history') {
+          result = searchSessionHistory(session, call.arguments);
         } else if (call.name.startsWith('mcp_')) {
           if (!options.mcp) throw new AppError('MCP_DISABLED', 'MCP 도구가 연결되지 않았습니다.');
           if (

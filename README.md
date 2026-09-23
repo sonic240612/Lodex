@@ -21,7 +21,7 @@ Desktop agent harness for local LLMs and OpenRouter.
 - Connect stdio, Streamable HTTP, and legacy SSE MCP servers; select tools, preview resources and prompts, attach reviewed content, handle Sampling and Elicitation, and sign in with OAuth PKCE.
 - Pair a Telegram bot for remote messages, status, plan inspection, cancellation, and approved Build access.
 - Keep the daemon, Telegram, and active agent runs alive when the window is closed; reopen or quit Lodex from the system tray.
-- Use Eco mode, automatic fast compaction, local ObservationPack archives, and on-demand recall for large tool results.
+- Use Eco mode, automatic fast compaction, bounded current-conversation history search, local ObservationPack archives, and on-demand recall for large tool results.
 - Choose LLM-based **Context compaction** or deterministic **Quick compaction**. Full transcripts stay in SQLite.
 - View Markdown/GFM messages, collapsible thinking and tool activity, active context usage, generation metrics, and a jump-to-latest button.
 - Create daily or manual secret-free JSON backups, apply count/age retention, and export them through the native save dialog.
@@ -82,6 +82,7 @@ Full Access is stored per conversation. File hashes, path checks, symlink checks
 - The latest four complete messages normally remain verbatim. Original messages are not deleted.
 - Eco mode compacts earlier and asks the model for shorter answers.
 - In Eco mode, ObservationPack stores large tool results locally after two full sends and exposes exact paged recall when needed.
+- The agent can search persisted text from the current conversation when compaction omits an older detail; search results are bounded and never cross conversation boundaries.
 - With current llama.cpp servers, the context meter uses the model's applied chat template and tokenizer. Older or remote providers show the conservative estimate or provider-reported usage.
 
 ## Projects and execution
