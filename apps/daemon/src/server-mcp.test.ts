@@ -26,12 +26,16 @@ async function fixture(
     plain?: boolean;
     goal?: boolean;
     sampling?: boolean;
+    elicitation?: boolean;
+    secretElicitation?: boolean;
   } = {},
 ) {
   let calls = 0,
     connections = 0,
-    samplingResponses = 0;
+    samplingResponses = 0,
+    elicitationResponses = 0;
   let pendingSample: { id: number; response: ServerResponse } | undefined;
+  let pendingElicitation: { id: number; response: ServerResponse } | undefined;
   let description = 'Echo fixture';
   const mcp = createServer(async (req, res) => {
     if (req.method !== 'POST') {
@@ -53,6 +57,36 @@ async function fixture(
           jsonrpc: '2.0',
           id: pending.id,
           result: { content: [{ type: 'text', text: message.result.content.text }] },
+        })}\n\n`,
+      );
+      return;
+    }
+    if (options.elicitation && message.id === 89 && !message.method) {
+      elicitationResponses++;
+      res.writeHead(202);
+      res.end();
+      const pending = pendingElicitation;
+      pendingElicitation = undefined;
+      if (message.error) {
+        pending?.response.end(
+          `data: ${JSON.stringify({
+            jsonrpc: '2.0',
+            id: pending.id,
+            error: {
+              code: -32000,
+              message: message.error.message ?? 'Elicitation rejected by client',
+            },
+          })}\n\n`,
+        );
+        return;
+      }
+      pending?.response.end(
+        `data: ${JSON.stringify({
+          jsonrpc: '2.0',
+          id: pending.id,
+          result: {
+            content: [{ type: 'text', text: message.result.content.projectName }],
+          },
         })}\n\n`,
       );
       return;
@@ -106,6 +140,37 @@ async function fixture(
               ],
               maxTokens: 64,
               includeContext: 'none',
+            },
+          })}\n\n`,
+        );
+        return;
+      }
+      if (options.elicitation) {
+        pendingElicitation = { id: message.id, response: res };
+        res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
+        res.write(
+          `data: ${JSON.stringify({
+            jsonrpc: '2.0',
+            id: 89,
+            method: 'elicitation/create',
+            params: {
+              mode: 'form',
+              message: 'Choose the project name',
+              requestedSchema: {
+                type: 'object',
+                properties: options.secretElicitation
+                  ? { apiToken: { type: 'string', title: 'API token' } }
+                  : {
+                      projectName: {
+                        type: 'string',
+                        title: 'Project name',
+                        minLength: 1,
+                        maxLength: 40,
+                      },
+                      public: { type: 'boolean', title: 'Public', default: false },
+                    },
+                required: [options.secretElicitation ? 'apiToken' : 'projectName'],
+              },
             },
           })}\n\n`,
         );
@@ -244,6 +309,7 @@ async function fixture(
     calls: () => calls,
     connections: () => connections,
     samplingResponses: () => samplingResponses,
+    elicitationResponses: () => elicitationResponses,
     change: () => {
       description = 'Changed definition';
     },
@@ -312,6 +378,63 @@ describe('MCP session integration', () => {
         .at(-1)
         ?.activities?.find((entry) => entry.id === activity!.id)?.approval,
     ).toMatchObject({ status: 'approved', decidedBy: 'user' });
+  });
+  it('pauses for MCP form elicitation, validates the answer and never persists its values', async () => {
+    const f = await fixture({ elicitation: true });
+    expect((await f.send()).status).toBe(200);
+    await expect
+      .poll(
+        async () =>
+          (await f.store.session(f.session.id)).messages
+            .at(-1)
+            ?.activities?.find((activity) => activity.elicitation)?.elicitation?.status,
+      )
+      .toBe('pending');
+    const waiting = await f.store.session(f.session.id);
+    const activity = waiting.messages.at(-1)?.activities?.find((entry) => entry.elicitation);
+    expect(activity?.elicitation).toMatchObject({
+      mode: 'form',
+      message: 'Choose the project name',
+      fields: [
+        { name: 'projectName', type: 'string', required: true },
+        { name: 'public', type: 'boolean', default: false },
+      ],
+    });
+    const invalid = await f.request('/v1/mcp/elicitation', {
+      sessionId: waiting.id,
+      expectedVersion: waiting.version,
+      activityId: activity!.id,
+      action: 'accept',
+      content: { projectName: '' },
+    });
+    expect(invalid.status).toBe(400);
+    const accepted = await f.request('/v1/mcp/elicitation', {
+      sessionId: waiting.id,
+      expectedVersion: waiting.version,
+      activityId: activity!.id,
+      action: 'accept',
+      content: { projectName: 'Private answer', public: false },
+    });
+    expect(accepted.status).toBe(200);
+    await expect
+      .poll(async () => (await f.store.session(f.session.id)).run?.status)
+      .toBe('completed');
+    expect(f.elicitationResponses()).toBe(1);
+    const completed = await f.store.session(f.session.id);
+    const serialized = JSON.stringify(
+      completed.messages.at(-1)?.activities?.find((entry) => entry.id === activity!.id),
+    );
+    expect(serialized).not.toContain('Private answer');
+    expect(JSON.parse(serialized).elicitation.status).toBe('accepted');
+  });
+  it('rejects MCP forms that request secrets before exposing an input field', async () => {
+    const f = await fixture({ elicitation: true, secretElicitation: true });
+    expect((await f.send()).status).toBe(200);
+    await expect.poll(async () => (await f.store.session(f.session.id)).run?.status).toBe('failed');
+    expect(f.elicitationResponses()).toBe(1);
+    const completed = await f.store.session(f.session.id);
+    expect(completed.messages.at(-1)?.error).toContain('자동으로 반복하지 마세요');
+    expect(completed.messages.at(-1)?.activities?.some((entry) => entry.elicitation)).toBe(false);
   });
   it('settles the audit if cancellation arrives while persisting call intent', async () => {
     const f = await fixture();

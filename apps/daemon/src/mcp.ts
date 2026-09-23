@@ -9,6 +9,8 @@ import {
   type Root,
   type CreateMessageRequestParams,
   type CreateMessageResult,
+  type ElicitRequestParams,
+  type ElicitResult,
 } from '@lodex/mcp';
 
 export function selectedMcpTools(session: Session, registrations: McpRegistration[]) {
@@ -36,6 +38,10 @@ export class RunMcp {
   private sampling = new Map<
     string,
     (params: CreateMessageRequestParams, signal: AbortSignal) => Promise<CreateMessageResult>
+  >();
+  private elicitation = new Map<
+    string,
+    (params: ElicitRequestParams, signal: AbortSignal) => Promise<ElicitResult>
   >();
   constructor(
     private options: {
@@ -71,6 +77,7 @@ export class RunMcp {
       params: CreateMessageRequestParams,
       signal: AbortSignal,
     ) => Promise<CreateMessageResult>;
+    elicitation?: (params: ElicitRequestParams, signal: AbortSignal) => Promise<ElicitResult>;
   }): Promise<string> {
     if (options.mode !== 'build')
       throw new AppError('MCP_PLAN', 'Plan 모드에서는 MCP 도구를 실행하지 않습니다.', 403);
@@ -94,6 +101,7 @@ export class RunMcp {
     };
     await options.record(audit);
     if (options.sampling) this.sampling.set(selected.server.id, options.sampling);
+    if (options.elicitation) this.elicitation.set(selected.server.id, options.elicitation);
     try {
       let connection = this.connections.get(selected.server.id);
       const oauthToken = await this.options.resolveOAuthToken?.(
@@ -124,6 +132,19 @@ export class RunMcp {
                       '현재 MCP 호출에 연결된 Sampling 요청이 아닙니다.',
                     );
                   return handler(params, samplingSignal);
+                },
+              }
+            : {}),
+          ...(options.elicitation
+            ? {
+                elicitation: (params: ElicitRequestParams, elicitationSignal: AbortSignal) => {
+                  const handler = this.elicitation.get(selected.server.id);
+                  if (!handler)
+                    throw new AppError(
+                      'MCP_ELICITATION_INACTIVE',
+                      '현재 MCP 호출에 연결된 사용자 입력 요청이 아닙니다.',
+                    );
+                  return handler(params, elicitationSignal);
                 },
               }
             : {}),
@@ -162,6 +183,7 @@ export class RunMcp {
       throw error;
     } finally {
       this.sampling.delete(selected.server.id);
+      this.elicitation.delete(selected.server.id);
     }
   }
   async close() {
@@ -171,6 +193,7 @@ export class RunMcp {
     this.connections.clear();
     this.tokens.clear();
     this.sampling.clear();
+    this.elicitation.clear();
     if (results.some((result) => result.status === 'rejected'))
       throw new AppError(
         'MCP_CLOSE_UNKNOWN',

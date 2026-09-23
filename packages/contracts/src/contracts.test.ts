@@ -7,6 +7,7 @@ import {
   modelConfigSchema,
   planSchema,
   autopilotLimitsSchema,
+  elicitationActionSchema,
 } from './index';
 describe('command boundary', () => {
   it('requires pinned unique skill selections and explicit cloud consent', () => {
@@ -90,6 +91,35 @@ describe('command boundary', () => {
       outputTokens: null,
       costUsd: 1,
     });
+  });
+  it('bounds MCP elicitation answers and keeps decline payload-free', () => {
+    const base = {
+      sessionId: crypto.randomUUID(),
+      expectedVersion: 2,
+      activityId: crypto.randomUUID(),
+    };
+    expect(
+      elicitationActionSchema.safeParse({
+        ...base,
+        action: 'accept',
+        content: { name: 'Lodex', public: true, tags: ['agent'] },
+      }).success,
+    ).toBe(true);
+    expect(elicitationActionSchema.safeParse({ ...base, action: 'accept' }).success).toBe(false);
+    expect(
+      elicitationActionSchema.safeParse({
+        ...base,
+        action: 'decline',
+        content: { leaked: 'value' },
+      }).success,
+    ).toBe(false);
+    expect(
+      elicitationActionSchema.safeParse({
+        ...base,
+        action: 'accept',
+        content: { tooLarge: 'x'.repeat(17000) },
+      }).success,
+    ).toBe(false);
   });
   it.each([
     'http://example.com/v1',

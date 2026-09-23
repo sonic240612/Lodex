@@ -14,6 +14,7 @@ import {
   type DeleteSessionsResult,
   type EditAction,
   type ApprovalAction,
+  type ElicitationAction,
   type ChangeSet,
   type ChangeStatus,
   type CommandExecution,
@@ -163,6 +164,9 @@ export class Store {
   }
   decideApproval(action: ApprovalAction): Promise<Session> {
     return this.call('decideApproval', action);
+  }
+  decideElicitation(action: ElicitationAction): Promise<Session> {
+    return this.call('decideElicitation', action);
   }
   recordSkillRead(
     sessionId: string,

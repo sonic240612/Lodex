@@ -8,10 +8,12 @@ import {
   deleteSessionsSchema,
   editActionSchema,
   approvalActionSchema,
+  elicitationActionSchema,
   type ChangeStatus,
   type ChangeSet,
   type EditAction,
   type ApprovalAction,
+  type ElicitationAction,
   type SecretSource,
   activityProposal,
   providerSchema,
@@ -75,6 +77,7 @@ import {
   mcpConfigSchema,
   McpOAuthManager,
   type McpConfig,
+  type ElicitResult,
 } from '@lodex/mcp';
 import { RunMcp, selectedMcpTools } from './mcp';
 import { loadMcpSecret, loadTelegramSecret, telegramToken } from './secrets';
@@ -259,6 +262,12 @@ export async function startServer(options: ServerOptions) {
       resolve: (activity: Activity) => void;
       reject: (reason: unknown) => void;
     };
+    elicitation?: {
+      sessionId: string;
+      activityId: string;
+      resolve: (result: ElicitResult) => void;
+      reject: (reason: unknown) => void;
+    };
   };
   const active = new Map<string, ActiveRun>();
   let telegram!: Telegram;
@@ -288,6 +297,12 @@ export async function startServer(options: ServerOptions) {
         reject(new AppError('APPROVAL_PENDING', '이미 검토를 기다리는 수정안이 있습니다.', 409));
         return;
       }
+      if (run.elicitation) {
+        reject(
+          new AppError('ELICITATION_PENDING', '이미 MCP 사용자 입력을 기다리고 있습니다.', 409),
+        );
+        return;
+      }
       const clear = () => {
         signal.removeEventListener('abort', abort);
         if (run.approval?.activityId === activityId) delete run.approval;
@@ -302,6 +317,45 @@ export async function startServer(options: ServerOptions) {
         resolve: (activity) => {
           clear();
           resolve(activity);
+        },
+        reject: (reason) => {
+          clear();
+          reject(reason);
+        },
+      };
+      signal.addEventListener('abort', abort, { once: true });
+      if (signal.aborted) abort();
+    });
+  const waitForElicitation = (
+    runId: string,
+    sessionId: string,
+    activityId: string,
+    signal: AbortSignal,
+  ): Promise<ElicitResult> =>
+    new Promise((resolve, reject) => {
+      const run = active.get(runId);
+      if (!run) {
+        reject(new AppError('RUN_NOT_FOUND', '실행 중인 응답을 찾을 수 없습니다.', 409));
+        return;
+      }
+      if (run.approval || run.elicitation) {
+        reject(new AppError('ELICITATION_PENDING', '이미 사용자 결정을 기다리고 있습니다.', 409));
+        return;
+      }
+      const clear = () => {
+        signal.removeEventListener('abort', abort);
+        if (run.elicitation?.activityId === activityId) delete run.elicitation;
+      };
+      const abort = () => {
+        clear();
+        reject(signal.reason);
+      };
+      run.elicitation = {
+        sessionId,
+        activityId,
+        resolve: (result) => {
+          clear();
+          resolve(result);
         },
         reject: (reason) => {
           clear();
@@ -465,6 +519,105 @@ export async function startServer(options: ServerOptions) {
     finishApproval(decided, action.activityId);
     return decided;
   };
+  const reviewElicitation = async (action: ElicitationAction): Promise<Session> => {
+    const current = await store.session(action.sessionId);
+    const activity = current.messages
+      .flatMap((message) => message.activities ?? [])
+      .find((entry) => entry.id === action.activityId);
+    const pending = activity?.elicitation;
+    const live = current.run ? active.get(current.run.id)?.elicitation : undefined;
+    if (!pending || pending.status !== 'pending' || live?.activityId !== action.activityId)
+      throw new AppError(
+        'MCP_ELICITATION_EXPIRED',
+        '이 MCP 입력 요청은 더 이상 실행 중이 아닙니다.',
+        409,
+      );
+    if (action.action === 'accept') {
+      const content = action.content ?? {};
+      const fields = pending.fields ?? [];
+      const known = new Set(fields.map((field) => field.name));
+      if (Object.keys(content).some((name) => !known.has(name)))
+        throw new AppError('MCP_ELICITATION_VALUE', 'MCP 폼에 없는 입력값이 포함되어 있습니다.');
+      for (const field of fields) {
+        const value = content[field.name];
+        if (value === undefined) {
+          if (field.required)
+            throw new AppError(
+              'MCP_ELICITATION_VALUE',
+              `${field.title} 필드는 반드시 입력해야 합니다.`,
+            );
+          continue;
+        }
+        if (field.type === 'boolean') {
+          if (typeof value !== 'boolean')
+            throw new AppError('MCP_ELICITATION_VALUE', `${field.title} 값이 올바르지 않습니다.`);
+          continue;
+        }
+        if (field.type === 'number' || field.type === 'integer') {
+          if (
+            typeof value !== 'number' ||
+            !Number.isFinite(value) ||
+            (field.type === 'integer' && !Number.isInteger(value)) ||
+            (field.minimum !== undefined && value < field.minimum) ||
+            (field.maximum !== undefined && value > field.maximum)
+          )
+            throw new AppError('MCP_ELICITATION_VALUE', `${field.title} 값이 범위를 벗어났습니다.`);
+          continue;
+        }
+        if (field.type === 'multiselect') {
+          const allowed = new Set(field.options?.map((option) => option.value));
+          if (
+            !Array.isArray(value) ||
+            value.some((item) => typeof item !== 'string' || !allowed.has(item)) ||
+            new Set(value).size !== value.length ||
+            (field.minItems !== undefined && value.length < field.minItems) ||
+            (field.maxItems !== undefined && value.length > field.maxItems)
+          )
+            throw new AppError(
+              'MCP_ELICITATION_VALUE',
+              `${field.title} 선택값이 올바르지 않습니다.`,
+            );
+          continue;
+        }
+        if (typeof value !== 'string')
+          throw new AppError('MCP_ELICITATION_VALUE', `${field.title} 값이 올바르지 않습니다.`);
+        if (
+          (field.minLength !== undefined && value.length < field.minLength) ||
+          (field.maxLength !== undefined && value.length > field.maxLength) ||
+          (field.type === 'select' && !field.options?.some((option) => option.value === value))
+        )
+          throw new AppError('MCP_ELICITATION_VALUE', `${field.title} 값이 범위를 벗어났습니다.`);
+        if (field.format === 'email' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value))
+          throw new AppError(
+            'MCP_ELICITATION_VALUE',
+            `${field.title} 이메일 주소가 올바르지 않습니다.`,
+          );
+        if (field.format === 'uri') {
+          try {
+            new URL(value);
+          } catch {
+            throw new AppError('MCP_ELICITATION_VALUE', `${field.title} URL이 올바르지 않습니다.`);
+          }
+        }
+        if (field.format === 'date' && !/^\d{4}-\d{2}-\d{2}$/.test(value))
+          throw new AppError('MCP_ELICITATION_VALUE', `${field.title} 날짜가 올바르지 않습니다.`);
+        if (
+          field.format === 'date-time' &&
+          (!value.includes('T') || !Number.isFinite(Date.parse(value)))
+        )
+          throw new AppError(
+            'MCP_ELICITATION_VALUE',
+            `${field.title} 날짜와 시간이 올바르지 않습니다.`,
+          );
+      }
+    }
+    const decided = await store.decideElicitation(action);
+    live.resolve({
+      action: action.action,
+      ...(action.action === 'accept' ? { content: action.content ?? {} } : {}),
+    });
+    return decided;
+  };
   async function execute(
     session: Session,
     controller: AbortController,
@@ -533,6 +686,8 @@ export async function startServer(options: ServerOptions) {
         ...(observations ? { observations } : {}),
         waitForApproval: (activityId, signal) =>
           waitForApproval(session.run!.id, session.id, activityId, signal),
+        waitForElicitation: (activityId, signal) =>
+          waitForElicitation(session.run!.id, session.id, activityId, signal),
         applyApprovedEdit: async (activityId) => {
           const current = await store.session(session.id);
           try {
@@ -917,6 +1072,7 @@ export async function startServer(options: ServerOptions) {
     tokenSource: () => telegramTokenSource,
     dispatch: (value) => serial(() => command(value)),
     decideApproval: (value) => serial(() => reviewApproval(value)),
+    decideElicitation: (value) => serial(() => reviewElicitation(value)),
     ...(options.telegramFetch ? { fetch: options.telegramFetch } : {}),
   });
   const server = createServer(async (request, response) => {
@@ -1413,6 +1569,13 @@ export async function startServer(options: ServerOptions) {
           throw new AppError('INVALID_COMMAND', '권한 결정 요청이 올바르지 않습니다.');
         json(response, 200, {
           session: await serial(() => reviewApproval(parsed.data)),
+        });
+      } else if (request.method === 'POST' && url.pathname === '/v1/mcp/elicitation') {
+        const parsed = elicitationActionSchema.safeParse(await readJson(request));
+        if (!parsed.success)
+          throw new AppError('INVALID_COMMAND', 'MCP 입력 응답이 올바르지 않습니다.');
+        json(response, 200, {
+          session: await serial(() => reviewElicitation(parsed.data)),
         });
       } else if (request.method === 'POST' && url.pathname === '/v1/sessions/delete') {
         const parsed = deleteSessionsSchema.safeParse(await readJson(request));

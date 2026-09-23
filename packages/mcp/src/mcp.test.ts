@@ -83,6 +83,7 @@ async function httpFixture(
     requireKey?: string;
     changed?: boolean;
     inputRequiredSampling?: boolean;
+    inputRequiredElicitation?: boolean;
   } = {},
 ) {
   const requests: {
@@ -145,6 +146,30 @@ async function httpFixture(
             requestState: 'opaque-fixture-state',
           };
     }
+    if (options.modern && options.inputRequiredElicitation && message.method === 'tools/call') {
+      const elicited = message.params?.inputResponses?.form as
+        { action?: string; content?: Record<string, unknown> } | undefined;
+      result = elicited
+        ? { content: [{ type: 'text', text: String(elicited.content?.name ?? '') }] }
+        : {
+            resultType: 'input_required',
+            inputRequests: {
+              form: {
+                method: 'elicitation/create',
+                params: {
+                  mode: 'form',
+                  message: 'Choose a fixture name',
+                  requestedSchema: {
+                    type: 'object',
+                    properties: { name: { type: 'string', title: 'Name' } },
+                    required: ['name'],
+                  },
+                },
+              },
+            },
+            requestState: 'opaque-elicitation-state',
+          };
+    }
     if (options.changed && message.method === 'tools/list')
       result = { tools: [{ ...tool, description: 'changed' }] };
     if (options.modern && result && !('resultType' in result))
@@ -183,6 +208,49 @@ async function httpFixture(
   };
 }
 describe('MCP protocol boundary', () => {
+  it('fulfills a legacy form elicitation without persisting or changing its values', async () => {
+    const dir = await directory(),
+      script = join(dir, 'elicitation-server.cjs'),
+      received = join(dir, 'elicitation.json');
+    await writeFile(
+      script,
+      `const readline=require('node:readline'),fs=require('node:fs');const tool=${JSON.stringify(tool)};let pending;
+const lines=readline.createInterface({input:process.stdin});lines.on('line',line=>{const m=JSON.parse(line);
+if(m.id===89&&!m.method){fs.writeFileSync(${JSON.stringify(received)},JSON.stringify(m.result));process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:pending.id,result:{content:[{type:'text',text:m.result.content.name}]}})+'\\n');return;}
+if(m.id===undefined)return;
+if(m.method==='initialize'){process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result:{protocolVersion:'2025-11-25',capabilities:{tools:{}},serverInfo:{name:'elicitation fixture',version:'1'}}})+'\\n');return;}
+if(m.method==='tools/list'){process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result:{tools:[tool]}})+'\\n');return;}
+if(m.method==='tools/call'){pending=m;process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:89,method:'elicitation/create',params:{mode:'form',message:'Enter a name',requestedSchema:{type:'object',properties:{name:{type:'string',title:'Name'}},required:['name']}}})+'\\n');return;}
+});`,
+    );
+    const connection = await connect(
+      validateConfig({
+        name: 'elicitation fixture',
+        transport: 'stdio',
+        executable: process.execPath,
+        args: [script],
+        cwd: dir,
+        protocol: 'legacy',
+      }),
+      { elicitation: async () => ({ action: 'accept', content: { name: 'Lodex' } }) },
+    );
+    const selected = connection.registration.tools[0]!;
+    await expect(
+      connection.call({
+        name: selected.name,
+        revision: selected.revision,
+        arguments: { text: 'run' },
+        mode: 'build',
+        signal: AbortSignal.timeout(3000),
+      }),
+    ).resolves.toMatchObject({ content: [{ type: 'text', text: 'Lodex' }] });
+    await expect
+      .poll(async () => JSON.parse(await readFile(received, 'utf8')))
+      .toEqual({
+        action: 'accept',
+        content: { name: 'Lodex' },
+      });
+  });
   it('fulfills an isolated legacy sampling request during a tool call', async () => {
     const dir = await directory(),
       script = join(dir, 'sampling-server.cjs'),
@@ -275,6 +343,28 @@ if(m.method==='tools/call'){pending=m;process.stdout.write(JSON.stringify({jsonr
           content: { type: 'text', text: 'modern sampled safely' },
         },
       },
+    });
+  });
+  it('fulfills modern input_required elicitation and preserves request state', async () => {
+    const server = await httpFixture({ modern: true, sse: true, inputRequiredElicitation: true });
+    const connection = await connect(server.config, {
+      elicitation: async () => ({ action: 'accept', content: { name: 'Modern Lodex' } }),
+    });
+    const selected = connection.registration.tools[0]!;
+    await expect(
+      connection.call({
+        name: selected.name,
+        revision: selected.revision,
+        arguments: { text: 'run modern' },
+        mode: 'build',
+        signal: AbortSignal.timeout(3000),
+      }),
+    ).resolves.toMatchObject({ content: [{ type: 'text', text: 'Modern Lodex' }] });
+    const calls = server.requests.filter((request) => request.method === 'tools/call');
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.params).toMatchObject({
+      requestState: 'opaque-elicitation-state',
+      inputResponses: { form: { action: 'accept', content: { name: 'Modern Lodex' } } },
     });
   });
   it('advertises and returns only the explicitly selected project root', async () => {

@@ -487,6 +487,65 @@ export const approvalActionSchema = z.strictObject({
   action: z.enum(['approve', 'reject']),
 });
 export type ApprovalAction = z.infer<typeof approvalActionSchema>;
+const elicitationValueSchema = z.union([
+  z.string().max(8192),
+  z.number().finite(),
+  z.boolean(),
+  z.array(z.string().max(2048)).max(100),
+]);
+export const elicitationActionSchema = z
+  .strictObject({
+    sessionId: idSchema,
+    expectedVersion: z.number().int().nonnegative(),
+    activityId: idSchema,
+    action: z.enum(['accept', 'decline', 'cancel']),
+    content: z.record(z.string().min(1).max(200), elicitationValueSchema).optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (value.action === 'accept' && !value.content)
+      ctx.addIssue({ code: 'custom', path: ['content'], message: '입력값이 필요합니다.' });
+    if (value.action !== 'accept' && value.content)
+      ctx.addIssue({
+        code: 'custom',
+        path: ['content'],
+        message: '거절에는 입력값을 보낼 수 없습니다.',
+      });
+    if (value.content && new TextEncoder().encode(JSON.stringify(value.content)).byteLength > 16384)
+      ctx.addIssue({ code: 'custom', path: ['content'], message: '입력값이 너무 큽니다.' });
+  });
+export type ElicitationAction = z.infer<typeof elicitationActionSchema>;
+export type ElicitationValue = z.infer<typeof elicitationValueSchema>;
+export interface McpElicitationOption {
+  value: string;
+  title: string;
+}
+export interface McpElicitationField {
+  name: string;
+  type: 'string' | 'number' | 'integer' | 'boolean' | 'select' | 'multiselect';
+  title: string;
+  description?: string;
+  required: boolean;
+  default?: ElicitationValue;
+  minimum?: number;
+  maximum?: number;
+  minLength?: number;
+  maxLength?: number;
+  format?: 'email' | 'uri' | 'date' | 'date-time';
+  minItems?: number;
+  maxItems?: number;
+  options?: McpElicitationOption[];
+}
+export interface McpElicitation {
+  source: string;
+  mode: 'form' | 'url';
+  message: string;
+  status: 'pending' | 'accepted' | 'declined' | 'cancelled';
+  requestedAt: string;
+  decidedAt?: string;
+  fields?: McpElicitationField[];
+  url?: string;
+  elicitationId?: string;
+}
 export interface PermissionDecision {
   kind: 'file' | 'command' | 'mcp' | 'fusion';
   target: string;
@@ -523,6 +582,7 @@ export interface Activity {
   };
   execution?: CommandExecution;
   approval?: PermissionDecision;
+  elicitation?: McpElicitation;
   planProposal?: PlanProposal;
   edit?: EditProposal;
   changes?: ChangeSet;

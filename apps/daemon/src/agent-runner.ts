@@ -3,6 +3,8 @@ import {
   AppError,
   autopilotLimitsSchema,
   type Activity,
+  type McpElicitation,
+  type McpElicitationField,
   type ContextManifest,
   type InferenceMessage,
   type InferenceProvider,
@@ -22,7 +24,13 @@ import type { Store } from '@lodex/storage';
 import { proposePlan } from './planning';
 import { autopilotVerificationRequest, completeGoal, verifyAutopilot } from './autopilot';
 import { runSkillTool } from './skills';
-import type { CreateMessageRequestParams, CreateMessageResult } from '@lodex/mcp';
+import type {
+  CreateMessageRequestParams,
+  CreateMessageResult,
+  ElicitRequestParams,
+  ElicitResult,
+  PrimitiveSchemaDefinition,
+} from '@lodex/mcp';
 import type { RunMcp } from './mcp';
 import type { RegisteredSkill } from '@lodex/skills';
 import { parseDelegation, runSubagents } from './subagents';
@@ -62,6 +70,95 @@ function samplingMessages(params: CreateMessageRequestParams): InferenceMessage[
   });
 }
 
+const secretElicitation =
+  /(?:password|passphrase|passwd|secret|token|api[ _-]?key|credential|private[ _-]?key|비밀번호|암호|토큰|인증|비밀)/i;
+
+function elicitationOptions(schema: PrimitiveSchemaDefinition) {
+  if ('oneOf' in schema)
+    return schema.oneOf.map((option) => ({ value: option.const, title: option.title }));
+  if ('enum' in schema)
+    return schema.enum.map((value, index) => ({
+      value,
+      title: 'enumNames' in schema ? (schema.enumNames?.[index] ?? value) : value,
+    }));
+  if (schema.type === 'array') {
+    if ('anyOf' in schema.items)
+      return schema.items.anyOf.map((option) => ({ value: option.const, title: option.title }));
+    return schema.items.enum.map((value) => ({ value, title: value }));
+  }
+  return undefined;
+}
+
+function normalizeElicitation(params: ElicitRequestParams, source: string): McpElicitation {
+  if (Buffer.byteLength(params.message) > 8192)
+    throw new AppError('MCP_ELICITATION_INPUT', 'MCP 사용자 입력 안내가 8 KiB를 초과했습니다.');
+  const base = {
+    source,
+    message: params.message,
+    status: 'pending' as const,
+    requestedAt: new Date().toISOString(),
+  };
+  if (params.mode === 'url') {
+    const url = new URL(params.url);
+    if (
+      url.protocol !== 'https:' ||
+      url.username ||
+      url.password ||
+      params.elicitationId.length > 500
+    )
+      throw new AppError(
+        'MCP_ELICITATION_URL',
+        'MCP 외부 입력 링크는 사용자 정보가 없는 HTTPS 주소여야 합니다.',
+      );
+    return { ...base, mode: 'url', url: url.href, elicitationId: params.elicitationId };
+  }
+  const entries = Object.entries(params.requestedSchema.properties);
+  if (entries.length > 32)
+    throw new AppError('MCP_ELICITATION_INPUT', 'MCP 입력 필드는 최대 32개까지 지원합니다.');
+  const required = new Set(params.requestedSchema.required ?? []);
+  if ([...required].some((name) => !params.requestedSchema.properties[name]))
+    throw new AppError('MCP_ELICITATION_SCHEMA', 'MCP 필수 입력 필드가 정의되어 있지 않습니다.');
+  const fields: McpElicitationField[] = entries.map(([name, schema]) => {
+    if (
+      name.length > 200 ||
+      secretElicitation.test([name, schema.title, schema.description].filter(Boolean).join(' '))
+    )
+      throw new AppError(
+        'MCP_ELICITATION_SECRET',
+        'MCP 폼으로 비밀번호·토큰·인증 정보는 입력할 수 없습니다.',
+      );
+    const options = elicitationOptions(schema);
+    if (options && (options.length < 1 || options.length > 100))
+      throw new AppError('MCP_ELICITATION_SCHEMA', 'MCP 선택 항목은 1~100개여야 합니다.');
+    const type = schema.type === 'array' ? 'multiselect' : options ? 'select' : schema.type;
+    return {
+      name,
+      type,
+      title: (schema.title ?? name).slice(0, 300),
+      ...(schema.description ? { description: schema.description.slice(0, 1000) } : {}),
+      required: required.has(name),
+      ...('default' in schema && schema.default !== undefined ? { default: schema.default } : {}),
+      ...('minimum' in schema && schema.minimum !== undefined ? { minimum: schema.minimum } : {}),
+      ...('maximum' in schema && schema.maximum !== undefined ? { maximum: schema.maximum } : {}),
+      ...('minLength' in schema && schema.minLength !== undefined
+        ? { minLength: schema.minLength }
+        : {}),
+      ...('maxLength' in schema && schema.maxLength !== undefined
+        ? { maxLength: Math.min(schema.maxLength, 8192) }
+        : {}),
+      ...('format' in schema && schema.format ? { format: schema.format } : {}),
+      ...('minItems' in schema && schema.minItems !== undefined
+        ? { minItems: schema.minItems }
+        : {}),
+      ...('maxItems' in schema && schema.maxItems !== undefined
+        ? { maxItems: Math.min(schema.maxItems, 100) }
+        : {}),
+      ...(options ? { options } : {}),
+    } as McpElicitationField;
+  });
+  return { ...base, mode: 'form', fields };
+}
+
 function aggregate(rounds: Partial<Usage>[], cloud: boolean): Partial<Usage> {
   const sum = (key: 'inputTokens' | 'outputTokens' | 'costUsd') =>
     rounds.every((r) => typeof r[key] === 'number')
@@ -93,6 +190,7 @@ export async function runAgent(options: {
   subagents?: { config: ModelConfig; provider: InferenceProvider };
   pricing?: (config: ModelConfig) => ModelPricing | undefined;
   waitForApproval?: (activityId: string, signal: AbortSignal) => Promise<Activity>;
+  waitForElicitation?: (activityId: string, signal: AbortSignal) => Promise<ElicitResult>;
   applyApprovedEdit?: (activityId: string) => Promise<void>;
   observations?: ObservationPack;
 }) {
@@ -412,6 +510,57 @@ export async function runAgent(options: {
       throw error;
     }
   };
+  const elicitForMcp = async (
+    params: ElicitRequestParams,
+    elicitationSignal: AbortSignal,
+    source: string,
+  ): Promise<ElicitResult> => {
+    const elicitation = normalizeElicitation(params, source);
+    const card: Activity = {
+      id: randomUUID(),
+      kind: 'tool',
+      label: 'MCP 사용자 입력',
+      status: 'running',
+      text: '',
+      elicitation,
+    };
+    activities.push(card);
+    await save();
+    const nestedSignal = AbortSignal.any([signal, elicitationSignal]);
+    try {
+      if (!options.waitForElicitation)
+        throw new AppError(
+          'MCP_ELICITATION_UNAVAILABLE',
+          '이 환경에서는 MCP 사용자 입력을 받을 수 없습니다.',
+        );
+      const result = await options.waitForElicitation(card.id, nestedSignal);
+      card.elicitation!.status =
+        result.action === 'accept'
+          ? 'accepted'
+          : result.action === 'decline'
+            ? 'declined'
+            : 'cancelled';
+      card.elicitation!.decidedAt = new Date().toISOString();
+      card.status = result.action === 'accept' ? 'completed' : 'cancelled';
+      card.text =
+        result.action === 'accept'
+          ? '사용자 입력을 MCP 서버에 전달했습니다. 입력값은 활동 기록에 저장하지 않았습니다.'
+          : result.action === 'decline'
+            ? '사용자가 MCP 입력 요청을 거절했습니다.'
+            : 'MCP 입력 요청을 취소했습니다.';
+      await save();
+      return result;
+    } catch (error) {
+      if (card.elicitation?.status === 'pending') {
+        card.elicitation.status = 'cancelled';
+        card.elicitation.decidedAt = new Date().toISOString();
+      }
+      card.status = nestedSignal.aborted ? 'cancelled' : 'failed';
+      card.text = error instanceof Error ? error.message : String(error);
+      await save();
+      throw error;
+    }
+  };
   try {
     for (;;) {
       signal.throwIfAborted();
@@ -721,6 +870,8 @@ export async function runAgent(options: {
                 await store.recordMcpCall(session.id, card.id, audit);
               },
               sampling: (params, samplingSignal) => sampleForMcp(params, samplingSignal, call.name),
+              elicitation: (params, elicitationSignal) =>
+                elicitForMcp(params, elicitationSignal, call.name),
             });
         } else if (call.name === 'read_skill' || call.name === 'read_skill_resource') {
           result = await runSkillTool({

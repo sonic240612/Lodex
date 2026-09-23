@@ -11,6 +11,7 @@ import {
   type Command,
   type CommandResult,
   type ApprovalAction,
+  type ElicitationAction,
   type Activity,
   type Session,
   type TelegramConfig,
@@ -69,6 +70,7 @@ interface Journal {
   outbox: Outbox[];
   unknownDeliveries: number;
   notifiedApprovalId?: string;
+  notifiedElicitationId?: string;
 }
 type Options = {
   store: Store;
@@ -76,6 +78,7 @@ type Options = {
   tokenSource?: () => SecretSource;
   dispatch: (command: Command) => Promise<CommandResult>;
   decideApproval: (action: ApprovalAction) => Promise<Session>;
+  decideElicitation: (action: ElicitationAction) => Promise<Session>;
   fetch?: typeof fetch;
 };
 class BotError extends AppError {
@@ -529,6 +532,7 @@ export class Telegram {
   }
   private async process(signal: AbortSignal) {
     await this.notifyPendingApproval();
+    await this.notifyPendingElicitation();
     for (const item of this.state.inbox) {
       signal.throwIfAborted();
       if (item.status === 'done') continue;
@@ -589,13 +593,56 @@ export class Telegram {
             await this.save();
             continue;
           }
+          if (text === '/decline' || text === '/cancel-input' || text.startsWith('/answer ')) {
+            if (!this.state.config.allowBuild)
+              throw new AppError(
+                'TELEGRAM_BUILD',
+                'Telegram 설정에서 Build 원격 요청을 먼저 허용하세요.',
+              );
+            const elicitation = this.pendingElicitation(session);
+            if (!elicitation)
+              throw new AppError('TELEGRAM_ELICITATION', '대기 중인 MCP 입력 요청이 없습니다.');
+            let action: ElicitationAction['action'] =
+              text === '/decline' ? 'decline' : text === '/cancel-input' ? 'cancel' : 'accept';
+            let content: Record<string, string | number | boolean | string[]> | undefined;
+            if (action === 'accept') {
+              try {
+                const parsed: unknown = JSON.parse(text.slice('/answer '.length));
+                if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
+                  throw new Error();
+                content = parsed as Record<string, string | number | boolean | string[]>;
+              } catch {
+                throw new AppError('TELEGRAM_ELICITATION', '사용법: /answer {"필드":"값"}');
+              }
+            }
+            await this.options.decideElicitation({
+              sessionId: session.id,
+              expectedVersion: session.version,
+              activityId: elicitation.id,
+              action,
+              ...(content ? { content } : {}),
+            });
+            if (action === 'accept') item.text = '/answer [redacted]';
+            item.status = 'done';
+            this.enqueue(
+              action === 'accept'
+                ? 'MCP 입력을 제출했습니다.'
+                : action === 'decline'
+                  ? 'MCP 입력을 거절했습니다.'
+                  : 'MCP 입력을 취소했습니다.',
+            );
+            await this.save();
+            continue;
+          }
           if (text === '/status') {
             const approval = this.pendingApproval(session);
+            const elicitation = this.pendingElicitation(session);
             this.enqueue(
               session.title +
                 '\n' +
                 (session.run?.status ?? 'idle') +
                 (approval ? '\n승인 대기: ' + this.approvalSummary(approval) : '') +
+                (elicitation ? '\nMCP 입력 대기: ' + elicitation.elicitation!.message : '') +
                 '\n' +
                 (session.messages.filter((m) => m.role === 'assistant').at(-1)?.content ?? ''),
             );
@@ -635,7 +682,7 @@ export class Telegram {
           }
           if (text === '/help' || text === '/start') {
             this.enqueue(
-              '/ask 메시지 — 연결한 대화에 요청\n/goal 목표 — 독립 목표 실행\n/resume — 중단된 /goal 계속\n/run — 저장 계획 자동 실행\n/plan · /todo — 목표와 할 일 조회\n/todo goal 목표 | 완료 기준\n/todo add 할 일 | 완료 기준\n/todo done 번호 · /todo undo 번호 · /todo remove 번호\n/autopilot ask|auto|full — 승인 단계 변경\n/approve · /deny — 대기 작업 결정\n/stop — 현재 실행 중지\n일반 텍스트도 요청으로 전달됩니다. 원격 Build와 권한 변경은 Telegram 설정에서 허용해야 합니다.',
+              '/ask 메시지 — 연결한 대화에 요청\n/goal 목표 — 독립 목표 실행\n/resume — 중단된 /goal 계속\n/run — 저장 계획 자동 실행\n/plan · /todo — 목표와 할 일 조회\n/todo goal 목표 | 완료 기준\n/todo add 할 일 | 완료 기준\n/todo done 번호 · /todo undo 번호 · /todo remove 번호\n/autopilot ask|auto|full — 승인 단계 변경\n/approve · /deny — 대기 작업 결정\n/answer JSON · /decline · /cancel-input — MCP 입력 결정\n/stop — 현재 실행 중지\n일반 텍스트도 요청으로 전달됩니다. 원격 Build와 권한 변경은 Telegram 설정에서 허용해야 합니다.',
             );
             item.status = 'done';
             await this.save();
@@ -831,6 +878,11 @@ export class Telegram {
       .flatMap((message) => message.activities ?? [])
       .findLast((activity) => activity.approval?.status === 'pending');
   }
+  private pendingElicitation(session: Session): Activity | undefined {
+    return session.messages
+      .flatMap((message) => message.activities ?? [])
+      .findLast((activity) => activity.elicitation?.status === 'pending');
+  }
   private approvalSummary(activity: Activity) {
     const approval = activity.approval!;
     return approval.kind + ' · ' + approval.target + '\n사유: ' + approval.reason;
@@ -857,6 +909,35 @@ export class Telegram {
         '\n/approve 또는 /deny 로 결정하세요.',
     );
     this.state.notifiedApprovalId = approval.id;
+    await this.save();
+  }
+  private async notifyPendingElicitation() {
+    if (
+      !this.state.owner ||
+      !this.state.config.transmissionConsent ||
+      !this.state.config.allowBuild ||
+      !this.state.config.sessionId
+    )
+      return;
+    let session: Session;
+    try {
+      session = await this.options.store.session(this.state.config.sessionId);
+    } catch {
+      return;
+    }
+    const activity = this.pendingElicitation(session);
+    if (!activity || activity.id === this.state.notifiedElicitationId) return;
+    const elicitation = activity.elicitation!;
+    const details =
+      elicitation.mode === 'url'
+        ? `\n링크: ${elicitation.url}\n완료 후 /answer {}`
+        : `\n필드: ${(elicitation.fields ?? [])
+            .map((field) => `${field.name}${field.required ? '*' : ''}(${field.type})`)
+            .join(', ')}\n/answer {"필드":"값"}`;
+    this.enqueue(
+      `MCP 사용자 입력이 필요합니다.\n${elicitation.message}${details}\n/decline 또는 /cancel-input`,
+    );
+    this.state.notifiedElicitationId = activity.id;
     await this.save();
   }
   private async deliver(signal: AbortSignal) {

@@ -18,7 +18,7 @@ Desktop agent harness for local LLMs and OpenRouter.
 - Choose **Ask**, **Approve for me**, or **Full Access** per conversation. Plan mode remains read-only.
 - Use `/goal` for goal-driven runs, or run saved plan tasks with dependencies, completion criteria, verification commands, and budgets.
 - Import local `SKILL.md` folders using Agent Skills, Codex, Claude Code, pi, OpenCode, OpenClaw, or Hermes metadata.
-- Connect stdio and Streamable HTTP MCP servers, select tools, preview resources and prompts, attach reviewed content, and sign in with OAuth PKCE.
+- Connect stdio and Streamable HTTP MCP servers, select tools, preview resources and prompts, attach reviewed content, handle Sampling and Elicitation, and sign in with OAuth PKCE.
 - Pair a Telegram bot for remote messages, status, plan inspection, cancellation, and approved Build access.
 - Keep the daemon, Telegram, and active agent runs alive when the window is closed; reopen or quit Lodex from the system tray.
 - Use Eco mode, automatic fast compaction, local ObservationPack archives, and on-demand recall for large tool results.
@@ -94,13 +94,13 @@ Docker execution is opt-in and uses the configured image, CPU, memory, network, 
 
 Skill imports read metadata first and load instructions or referenced text only when the model requests them. Importing a skill does not execute hooks, scripts, or dependency installers.
 
-MCP configuration accepts common `mcpServers` JSON. Lodex supports selected tools, static and parameterized text resources, prompts, argument completion, catalog revision checks, secret references, and OAuth for pre-registered public clients. During an agent run, a server that requests roots receives only the selected project folder. Text-only MCP Sampling runs through the selected model with shared model, token, and cost budgets; it receives no Lodex conversation or project context and requires approval unless the conversation uses Full Access. Keep MCP secrets in `.env` with `LODEX_MCP_` names. OAuth tokens are stored in the ignored `.env.mcp` file.
+MCP configuration accepts common `mcpServers` JSON. Lodex supports selected tools, static and parameterized text resources, prompts, argument completion, catalog revision checks, secret references, and OAuth for pre-registered public clients. During an agent run, a server that requests roots receives only the selected project folder. Text-only MCP Sampling runs through the selected model with shared model, token, and cost budgets; it receives no Lodex conversation or project context and requires approval unless the conversation uses Full Access. MCP Elicitation shows forms or HTTPS links above the composer while a tool call is running and does not store submitted values in activity history. Forms requesting passwords, tokens, or credentials are blocked. Keep MCP secrets in `.env` with `LODEX_MCP_` names. OAuth tokens are stored in the ignored `.env.mcp` file.
 
 ## Telegram
 
 Create a bot with [BotFather](https://core.telegram.org/bots/tutorial#obtain-your-bot-token), enter the token in Telegram settings or set `TELEGRAM_BOT_TOKEN` in `.env`, select a conversation, enable transmission, and approve the pairing IDs.
 
-Commands include `/ask`, `/goal`, `/resume`, `/run`, `/status`, `/plan`, `/todo`, `/autopilot ask|auto|full`, `/approve`, `/deny`, and `/stop`. `/todo` can set the saved goal, add tasks with completion criteria, mark them done, undo them, or remove them by number. Remote Build actions and permission changes require Build access in Telegram settings. Unknown delivery outcomes are recorded and never retried automatically.
+Commands include `/ask`, `/goal`, `/resume`, `/run`, `/status`, `/plan`, `/todo`, `/autopilot ask|auto|full`, `/approve`, `/deny`, `/answer`, `/decline`, `/cancel-input`, and `/stop`. `/todo` can set the saved goal, add tasks with completion criteria, mark them done, undo them, or remove them by number. Remote Build actions and permission changes require Build access in Telegram settings. Unknown delivery outcomes are recorded and never retried automatically.
 
 Closing the desktop window keeps Lodex running in the system tray. Use **Quit Lodex** from the tray menu to stop the daemon and Telegram connection.
 

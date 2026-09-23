@@ -21,6 +21,7 @@ import {
   type DeleteSessions,
   type EditAction,
   type ApprovalAction,
+  type ElicitationAction,
   defaultPermissionMode,
   localUrlSchema,
   type RuntimeSnapshot,
@@ -433,6 +434,15 @@ export async function approvalAction(action: ApprovalAction): Promise<Session> {
   const result = await invoke<{ session: Session }>('daemon_request', {
     method: 'POST',
     path: '/v1/approvals',
+    body: action,
+  });
+  return result.session;
+}
+export async function elicitationAction(action: ElicitationAction): Promise<Session> {
+  if (!nativeDesktop) throw new Error('MCP 사용자 입력은 데스크톱 앱에서 사용할 수 있습니다.');
+  const result = await invoke<{ session: Session }>('daemon_request', {
+    method: 'POST',
+    path: '/v1/mcp/elicitation',
     body: action,
   });
   return result.session;

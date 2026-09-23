@@ -1334,6 +1334,21 @@ describe('durable worker storage', () => {
             requestedAt: new Date().toISOString(),
           },
         },
+        {
+          id: crypto.randomUUID(),
+          kind: 'tool',
+          label: 'MCP 사용자 입력',
+          status: 'running',
+          text: '',
+          elicitation: {
+            source: 'fixture',
+            mode: 'form',
+            message: 'Choose a value',
+            status: 'pending',
+            requestedAt: new Date().toISOString(),
+            fields: [{ name: 'value', type: 'string', title: 'Value', required: true }],
+          },
+        },
       ],
     });
     await close(store);
@@ -1343,6 +1358,9 @@ describe('durable worker storage', () => {
     expect(
       (await reopened.session(session.id)).messages.at(-1)?.activities?.[0]?.approval,
     ).toMatchObject({ status: 'rejected', decidedBy: 'policy' });
+    expect(
+      (await reopened.session(session.id)).messages.at(-1)?.activities?.[1]?.elicitation,
+    ).toMatchObject({ status: 'cancelled' });
     const seq = (await reopened.snapshot()).lastSeq;
     await close(reopened);
     const reopenedAgain = await open(path);

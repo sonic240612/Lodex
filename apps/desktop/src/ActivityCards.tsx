@@ -97,6 +97,23 @@ export function ActivityCards({
               <pre>{activity.approval.target}</pre>
             </div>
           )}
+          {activity.elicitation && (
+            <div className="activity-section">
+              <span>
+                MCP 사용자 입력 · {activity.elicitation.mode === 'url' ? '외부 링크' : '폼'}
+              </span>
+              <small>
+                {activity.elicitation.status === 'pending'
+                  ? '사용자 입력 대기 중'
+                  : activity.elicitation.status === 'accepted'
+                    ? '제출됨 · 입력값은 저장하지 않음'
+                    : activity.elicitation.status === 'declined'
+                      ? '거절됨'
+                      : '취소됨'}
+              </small>
+              <p>{activity.elicitation.message}</p>
+            </div>
+          )}
           {activity.execution && (
             <div className="activity-section">
               <span>명령 · {activity.execution.cwd}</span>

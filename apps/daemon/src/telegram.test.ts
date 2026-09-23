@@ -8,6 +8,7 @@ import {
   commandSchema,
   deleteSessionsSchema,
   type ApprovalAction,
+  type ElicitationAction,
   type Command,
 } from '@lodex/contracts';
 import { Store } from '@lodex/storage';
@@ -98,11 +99,13 @@ async function fixture() {
   ).session;
   const dispatch = vi.fn((command: Command) => store.apply(command));
   const decideApproval = vi.fn((action: ApprovalAction) => store.decideApproval(action));
+  const decideElicitation = vi.fn((action: ElicitationAction) => store.decideElicitation(action));
   const options = () => ({
     store,
     loadToken: async () => token,
     dispatch,
     decideApproval,
+    decideElicitation,
     fetch: bot.fetch,
   });
   let manager = await Telegram.open(options());
@@ -133,6 +136,7 @@ async function fixture() {
     session,
     dispatch,
     decideApproval,
+    decideElicitation,
     pair,
     get manager() {
       return manager;
@@ -393,6 +397,67 @@ describe('durable Telegram channel', () => {
     expect(
       session.messages.flatMap((message) => message.activities ?? [])[0]?.approval,
     ).toMatchObject({ status: 'approved', decidedBy: 'user' });
+  });
+
+  it('notifies and submits MCP elicitation JSON without persisting answer values', async () => {
+    const app = await fixture();
+    await app.pair();
+    await app.manager.configure({
+      enabled: true,
+      sessionId: app.session.id,
+      allowBuild: true,
+      transmissionConsent: true,
+    });
+    const session = await app.store.session(app.session.id);
+    const sent = await app.store.apply(
+      makeCommand({
+        type: 'send_message',
+        sessionId: session.id,
+        expectedVersion: session.version,
+        content: '입력 테스트',
+      }),
+    );
+    const activityId = crypto.randomUUID();
+    await app.store.updateRun({
+      sessionId: session.id,
+      runId: sent.session.run!.id,
+      activities: [
+        {
+          id: activityId,
+          kind: 'tool',
+          label: 'MCP 사용자 입력',
+          status: 'running',
+          text: '',
+          elicitation: {
+            source: 'fixture',
+            mode: 'form',
+            message: '프로젝트 이름을 입력하세요.',
+            status: 'pending',
+            requestedAt: new Date().toISOString(),
+            fields: [{ name: 'name', type: 'string', title: '이름', required: true }],
+          },
+        },
+      ],
+    });
+    app.manager.wake();
+    await expect
+      .poll(() =>
+        app.bot.sent.some((message) => message.text.includes('MCP 사용자 입력이 필요합니다.')),
+      )
+      .toBe(true);
+    app.bot.push([update(2, '/answer {"name":"private fixture"}')]);
+    await expect.poll(() => app.decideElicitation.mock.calls.length).toBe(1);
+    expect(app.decideElicitation.mock.calls[0]![0]).toMatchObject({
+      activityId,
+      action: 'accept',
+      content: { name: 'private fixture' },
+    });
+    const recorded = await app.store.session(session.id);
+    expect(JSON.stringify(recorded.messages.at(-1)?.activities)).not.toContain('private fixture');
+    await expect
+      .poll(async () => JSON.stringify((await app.store.integration('telegram'))?.document))
+      .not.toContain('private fixture');
+    expect(recorded.messages.at(-1)?.activities?.[0]?.elicitation?.status).toBe('accepted');
   });
 
   it('records uncertain sends without replay and retries only an explicit rate-limit rejection', async () => {

@@ -1009,6 +1009,80 @@ button {
   background: var(--accent);
   color: var(--bg);
 }
+.elicitation-banner {
+  align-items: stretch;
+  flex-direction: column;
+  max-height: min(62vh, 520px);
+  overflow: auto;
+}
+.elicitation-banner .elicitation-content {
+  display: block;
+}
+.elicitation-banner .elicitation-content > p {
+  margin: 5px 0 10px;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+.elicitation-fields {
+  display: grid;
+  gap: 10px;
+}
+.elicitation-field {
+  display: grid;
+  gap: 4px;
+}
+.elicitation-field > span {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+.elicitation-field > small {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: normal;
+}
+.elicitation-field > input,
+.elicitation-field > select {
+  width: 100%;
+  padding: 8px 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text);
+}
+.elicitation-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px 12px;
+}
+.elicitation-options label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text);
+  font-size: 12px;
+}
+.elicitation-url {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.elicitation-url code {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.elicitation-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
 .composer {
   border: 1px solid #ffffff12;
   background: var(--surface);

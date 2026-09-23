@@ -13,15 +13,18 @@ import {
   autopilotLimitsSchema,
   defaultPermissionMode,
   type PermissionMode,
+  type ElicitationValue,
 } from '@lodex/contracts';
 import {
   approvalAction,
+  elicitationAction,
   models,
   nativeDesktop,
   saveKey,
   sendCommand,
   snapshot,
   subscribe,
+  openMcpLogin,
 } from './bridge';
 import { Icon, Logo } from './icons';
 import { useWorkspace } from './state';
@@ -30,6 +33,7 @@ import { loadLastModelConfig } from './model-preference';
 import { ProjectDialog } from './ProjectDialog';
 import { Markdown } from './Markdown';
 import { ConversationHistory } from './ConversationHistory';
+import { McpElicitationBanner } from './McpElicitationBanner';
 import { ExecutionPanel } from './ExecutionPanel';
 import { AutopilotPanel } from './AutopilotPanel';
 import { appendPlanTask, normalizePlanDraft, removePlanTask } from './plan-draft';
@@ -120,6 +124,9 @@ export function App() {
   const pendingApproval = session?.messages
     .flatMap((message) => message.activities ?? [])
     .find((activity) => activity.approval?.status === 'pending');
+  const pendingElicitation = session?.messages
+    .flatMap((message) => message.activities ?? [])
+    .find((activity) => activity.elicitation?.status === 'pending');
   const project = workspace.projects.find((p) => p.id === workspace.selectedProjectId);
   const visibleSessions = workspace.sessions.filter(
     (s) => (s.projectId ?? null) === workspace.selectedProjectId,
@@ -359,6 +366,33 @@ export function App() {
         ).session;
         workspace.upsert(updated);
       }
+    } catch (failure) {
+      setError(messageError(failure));
+      try {
+        workspace.replace(await snapshot());
+      } catch {
+        /* Reconnect refreshes. */
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function decideElicitation(
+    action: 'accept' | 'decline' | 'cancel',
+    content?: Record<string, ElicitationValue>,
+  ) {
+    if (!session || !pendingElicitation || busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      const updated = await elicitationAction({
+        sessionId: session.id,
+        expectedVersion: session.version,
+        activityId: pendingElicitation.id,
+        action,
+        ...(action === 'accept' ? { content: content ?? {} } : {}),
+      });
+      workspace.upsert(updated);
     } catch (failure) {
       setError(messageError(failure));
       try {
@@ -826,6 +860,15 @@ export function App() {
           )}
         </div>
         <div className="composer-area">
+          {pendingElicitation?.elicitation && (
+            <McpElicitationBanner
+              key={pendingElicitation.id}
+              activity={pendingElicitation}
+              busy={busy}
+              onDecide={decideElicitation}
+              onOpen={openMcpLogin}
+            />
+          )}
           {pendingApproval?.approval && (
             <div className="permission-banner" role="alertdialog" aria-label="작업 권한 요청">
               <div>
@@ -1160,7 +1203,10 @@ export function App() {
             <details className="context-report">
               <summary>
                 입력 구성 · {session.run.context.inputTokens === undefined ? '추정' : '실측'}{' '}
-                {(session.run.context.inputTokens ?? session.run.context.inputEstimateTokens).toLocaleString()} 토큰
+                {(
+                  session.run.context.inputTokens ?? session.run.context.inputEstimateTokens
+                ).toLocaleString()}{' '}
+                토큰
               </summary>
               <dl className="metrics-list">
                 {session.run.context.inputTokens !== undefined && (

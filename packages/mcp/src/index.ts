@@ -11,6 +11,8 @@ import {
   type Root,
   type CreateMessageRequestParams,
   type CreateMessageResult,
+  type ElicitRequestParams,
+  type ElicitResult,
   type Transport,
   type JsonSchemaType,
   type jsonSchemaValidator,
@@ -24,6 +26,11 @@ export { validateConfig, mcpConfigSchema } from './config';
 export type { McpConfig, SecretResolver } from './config';
 export type { Root } from '@modelcontextprotocol/client';
 export type { CreateMessageRequestParams, CreateMessageResult } from '@modelcontextprotocol/client';
+export type {
+  ElicitRequestParams,
+  ElicitResult,
+  PrimitiveSchemaDefinition,
+} from '@modelcontextprotocol/client';
 export { importMcpConfigurations, type McpImport } from './import';
 export * from './oauth';
 
@@ -403,6 +410,7 @@ export class McpConnection {
       params: CreateMessageRequestParams,
       signal: AbortSignal,
     ) => Promise<CreateMessageResult>;
+    elicitation?: (params: ElicitRequestParams, signal: AbortSignal) => Promise<ElicitResult>;
   }): Promise<McpConnection> {
     const config = validateConfig(options.config);
     options.signal.throwIfAborted();
@@ -429,6 +437,7 @@ export class McpConnection {
     const clientCapabilities = {
       ...(roots.length ? { roots: { listChanged: false } } : {}),
       ...(options.sampling ? { sampling: {} } : {}),
+      ...(options.elicitation ? { elicitation: { form: { applyDefaults: false }, url: {} } } : {}),
     };
     const client = new Client(
       { name: 'lodex', version: '0.1.0' },
@@ -437,7 +446,7 @@ export class McpConnection {
         enforceStrictCapabilities: true,
         listMaxPages: 8,
         inputRequired: {
-          autoFulfill: roots.length > 0 || !!options.sampling,
+          autoFulfill: roots.length > 0 || !!options.sampling || !!options.elicitation,
           maxRounds: 3,
         },
         jsonSchemaValidator: validators(),
@@ -452,6 +461,16 @@ export class McpConnection {
       client.setRequestHandler('sampling/createMessage', async (request, context) => {
         boundedShape(request.params, 131072);
         const result = await options.sampling!(
+          request.params,
+          AbortSignal.any([options.signal, context.mcpReq.signal]),
+        );
+        boundedShape(result, 131072);
+        return result;
+      });
+    if (options.elicitation)
+      client.setRequestHandler('elicitation/create', async (request, context) => {
+        boundedShape(request.params, 131072);
+        const result = await options.elicitation!(
           request.params,
           AbortSignal.any([options.signal, context.mcpReq.signal]),
         );

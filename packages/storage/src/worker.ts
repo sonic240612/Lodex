@@ -29,6 +29,7 @@ port.on('message', (request: { id: number; method: keyof StorageEngine; args: un
         'recordCreatedFile',
         'recordExecution',
         'decideApproval',
+        'decideElicitation',
         'recordSkillRead',
         'registeredMcp',
         'saveRegisteredMcp',

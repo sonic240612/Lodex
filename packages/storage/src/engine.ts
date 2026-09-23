@@ -44,6 +44,7 @@ import {
   permissionModeSchema,
   defaultPermissionMode,
   type ApprovalAction,
+  type ElicitationAction,
   type ContextCompaction,
   contextCompactionSchema,
 } from '@lodex/contracts';
@@ -977,6 +978,10 @@ export class StorageEngine {
             activity.approval.decidedBy = 'policy';
             activity.approval.decidedAt = session.run.finishedAt!;
           }
+          if (activity.elicitation?.status === 'pending') {
+            activity.elicitation.status = 'cancelled';
+            activity.elicitation.decidedAt = session.run.finishedAt!;
+          }
           for (const child of activity.subagents ?? []) {
             if (child.status === 'queued' || child.status === 'running') {
               child.status = update.status === 'cancelled' ? 'cancelled' : 'interrupted';
@@ -1066,6 +1071,35 @@ export class StorageEngine {
       activity.approval.decidedBy = 'user';
       activity.approval.decidedAt = new Date().toISOString();
       this.persist(session);
+      return session;
+    });
+  }
+  decideElicitation(action: ElicitationAction): Session {
+    return this.transaction(() => {
+      const session = this.session(action.sessionId);
+      if (session.version !== action.expectedVersion)
+        throw new AppError(
+          'VERSION_CONFLICT',
+          '대화가 변경되었습니다. 최신 MCP 입력 요청을 확인해 주세요.',
+          409,
+        );
+      const activity = session.messages
+        .flatMap((message) => message.activities ?? [])
+        .find((entry) => entry.id === action.activityId);
+      if (!activity?.elicitation || activity.elicitation.status !== 'pending')
+        throw new AppError(
+          'MCP_ELICITATION_NOT_FOUND',
+          '대기 중인 MCP 입력 요청을 찾을 수 없습니다.',
+          404,
+        );
+      activity.elicitation.status =
+        action.action === 'accept'
+          ? 'accepted'
+          : action.action === 'decline'
+            ? 'declined'
+            : 'cancelled';
+      activity.elicitation.decidedAt = new Date().toISOString();
+      this.persist(session); // Deliberately persists only the decision, never submitted values.
       return session;
     });
   }
