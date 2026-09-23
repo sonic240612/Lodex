@@ -54,6 +54,15 @@ export function ActivityCards({
                     <span>
                       {child.provider} · {child.model} · 모델 {child.modelCalls}회 · 도구{' '}
                       {child.toolCalls}회
+                      {typeof child.usage?.inputTokens === 'number'
+                        ? ` · 입력 ${child.usage.inputTokens.toLocaleString()} 토큰`
+                        : ''}
+                      {typeof child.usage?.outputTokens === 'number'
+                        ? ` · 출력 ${child.usage.outputTokens.toLocaleString()} 토큰`
+                        : ''}
+                      {typeof child.usage?.costUsd === 'number'
+                        ? ` · $${child.usage.costUsd.toFixed(6)}`
+                        : ''}
                     </span>
                     <pre>{child.text || '결과 대기 중…'}</pre>
                     {child.error && <p role="alert">{child.error}</p>}

@@ -187,7 +187,9 @@ describe('role routing and durable delegation', () => {
     ).toBe(true);
     expect(
       children.every((r) =>
-        r.tools?.every((t) => ['read_file', 'list_files', 'search_text'].includes(t.function.name)),
+        r.tools?.every((t) =>
+          ['inspect_path', 'read_file', 'list_files', 'search_text'].includes(t.function.name),
+        ),
       ),
     ).toBe(true);
     expect(

@@ -9,6 +9,7 @@ import {
   type SubagentRecord,
 } from '@lodex/contracts';
 import { inspectSkillDirectory } from '@lodex/skills';
+import { inspectProject } from '@lodex/tools';
 import { parseDelegation, runSubagents } from './subagents';
 
 const config = { ...defaultModelConfig(), provider: 'demo' as const, model: 'child' };
@@ -168,6 +169,54 @@ describe('isolated read-only subagents', () => {
       expect(result.subagents[0]).toMatchObject({
         status: 'completed',
         skillReads: [{ skillId: skill.id, revision: skill.revision, path: 'SKILL.md' }],
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('lets a child inspect a project path without exposing mutation tools', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'lodex-subagent-project-'));
+    try {
+      await writeFile(join(directory, 'fixture.txt'), 'project evidence');
+      const requests: InferenceRequest[] = [];
+      const options = {
+        ...opts(async function* (request) {
+          requests.push(structuredClone(request));
+          if (requests.length === 1) {
+            yield {
+              type: 'tool_call_delta' as const,
+              index: 0,
+              id: 'inspect-1',
+              name: 'inspect_path',
+              arguments: JSON.stringify({ path: 'fixture.txt' }),
+            };
+            yield { type: 'finished' as const, reason: 'tool_calls' };
+          } else {
+            expect(request.messages.at(-1)).toMatchObject({
+              role: 'tool',
+              toolCallId: 'inspect-1',
+            });
+            yield { type: 'text_delta' as const, text: 'The file fingerprint was verified.' };
+            yield { type: 'usage' as const, usage: { inputTokens: 20, outputTokens: 6 } };
+            yield { type: 'finished' as const, reason: 'stop' };
+          }
+        }),
+        project: await inspectProject(directory),
+      };
+      const result = JSON.parse(await runSubagents([{ task: 'Inspect fixture.txt' }], options));
+      expect(requests[0]?.tools?.map((tool) => tool.function.name)).toEqual([
+        'inspect_path',
+        'list_files',
+        'read_file',
+        'search_text',
+      ]);
+      expect(requests[0]?.tools?.some((tool) => tool.function.name === 'delete_path')).toBe(false);
+      expect(result.subagents[0]).toMatchObject({
+        status: 'completed',
+        modelCalls: 2,
+        toolCalls: 1,
+        readResults: [{ tool: 'inspect_path', partial: false }],
       });
     } finally {
       await rm(directory, { recursive: true, force: true });
