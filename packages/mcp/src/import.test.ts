@@ -119,6 +119,67 @@ env_vars = ["LODEX_MCP_LOCAL_TOKEN"]
     expect(v1[0]).toMatchObject({ name: 'one', config: { transport: 'http' }, issues: [] });
   });
 
+  it('imports Hermes YAML mcp_servers without exposing inline credentials', () => {
+    const values = importMcpConfigurations(
+      `
+# ~/.hermes/config.yaml
+mcp_servers:
+  local-tools:
+    command: ${JSON.stringify(process.execPath)}
+    args:
+      - fixture.js
+    cwd: .
+    env:
+      TOKEN: "\${LODEX_MCP_HERMES_LOCAL}"
+  remote-docs:
+    type: http
+    url: https://example.com/mcp
+    headers:
+      Authorization: "Bearer \${LODEX_MCP_HERMES_REMOTE}"
+`,
+      process.cwd(),
+    );
+    expect(values).toHaveLength(2);
+    expect(values[0]).toMatchObject({
+      name: 'local-tools',
+      config: {
+        transport: 'stdio',
+        executable: process.execPath,
+        args: ['fixture.js'],
+        cwd: process.cwd(),
+        env: { TOKEN: { secretRef: 'LODEX_MCP_HERMES_LOCAL', prefix: '' } },
+      },
+      issues: [],
+    });
+    expect(values[1]).toMatchObject({
+      name: 'remote-docs',
+      config: {
+        transport: 'http',
+        url: 'https://example.com/mcp',
+        headers: {
+          Authorization: { secretRef: 'LODEX_MCP_HERMES_REMOTE', prefix: 'Bearer ' },
+        },
+      },
+      issues: [],
+    });
+
+    const rejected = importMcpConfigurations(`
+mcp_servers:
+  unsafe:
+    command: node
+    env:
+      TOKEN: private-token-fixture
+`);
+    expect(rejected[0]?.config).toBeNull();
+    expect(JSON.stringify(rejected)).not.toContain('private-token-fixture');
+  });
+
+  it('rejects malformed YAML instead of treating it as an empty server', () => {
+    expect(() => importMcpConfigurations('mcp_servers: [unterminated')).toThrow(
+      'JSON, JSONC, TOML 또는 YAML',
+    );
+  });
+
   it('preserves legacy SSE endpoints used by older agent configurations', () => {
     const values = importMcpConfigurations(
       JSON.stringify({

@@ -302,7 +302,7 @@ async fn pick_mcp_config(app: tauri::AppHandle) -> Result<Option<Value>, String>
             .dialog()
             .file()
             .set_title("MCP 설정 파일 선택")
-            .add_filter("MCP config", &["json", "jsonc", "toml"])
+            .add_filter("MCP config", &["json", "jsonc", "toml", "yaml", "yml"])
             .blocking_pick_file();
         let Some(selected) = selected else {
             return Ok(None);

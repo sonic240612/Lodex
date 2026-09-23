@@ -801,9 +801,9 @@ export function McpManager({
         <section>
           <h3>{previous ? `${previous.config.name} 설정 편집` : '서버 설정 가져오기'}</h3>
           <p>
-            Codex TOML, Claude·pi 계열 mcpServers JSON, OpenCode JSONC 또는 서버 하나의 설정을 붙여
-            넣으세요. stdio는 설치된 node·python 등의 절대 경로가 필요하며, 기존 SSE 서버는
-            transport를 sse로 지정할 수 있습니다.
+            Codex TOML, Claude·pi 계열 mcpServers JSON, OpenCode JSONC, Hermes YAML 또는 서버 하나의
+            설정을 붙여 넣으세요. stdio는 설치된 node·python 등의 절대 경로가 필요하며, 기존 SSE
+            서버는 transport를 sse로 지정할 수 있습니다.
           </p>
           <p>
             키는 앱 .env의 LODEX_MCP_ 변수로 관리합니다. env·headers에는 secretRef를 사용하세요.

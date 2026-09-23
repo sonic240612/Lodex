@@ -1,6 +1,7 @@
 import { isAbsolute, resolve } from 'node:path';
 import { parse as parseJsonc, type ParseError } from 'jsonc-parser';
 import { parse as parseToml } from 'smol-toml';
+import { parse as parseYaml } from 'yaml';
 import { AppError } from '@lodex/contracts';
 import { validateConfig, type McpConfig } from './config';
 
@@ -20,8 +21,8 @@ function parseSource(text: string): Record<string, unknown> {
   if (/\0/.test(text))
     throw new AppError('MCP_IMPORT_JSON', 'MCP 설정에 NUL 문자를 사용할 수 없습니다.');
   const trimmed = text.trimStart();
-  try {
-    if (trimmed.startsWith('{')) {
+  if (trimmed.startsWith('{')) {
+    try {
       const errors: ParseError[] = [];
       const value: unknown = parseJsonc(text, errors, {
         allowTrailingComma: true,
@@ -30,13 +31,27 @@ function parseSource(text: string): Record<string, unknown> {
       });
       if (errors.length) throw new Error('Invalid JSONC');
       return object(value);
+    } catch {
+      throw new AppError('MCP_IMPORT_JSON', 'MCP 설정이 올바른 JSON 또는 JSONC 형식이 아닙니다.');
     }
+  }
+  try {
     return object(parseToml(text));
   } catch {
-    throw new AppError(
-      'MCP_IMPORT_JSON',
-      'MCP 설정이 올바른 JSON, JSONC 또는 TOML 형식이 아닙니다.',
-    );
+    try {
+      const value: unknown = parseYaml(text, {
+        schema: 'core',
+        merge: false,
+        maxAliasCount: 0,
+      });
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error();
+      return value as Record<string, unknown>;
+    } catch {
+      throw new AppError(
+        'MCP_IMPORT_JSON',
+        'MCP 설정이 올바른 JSON, JSONC, TOML 또는 YAML 형식이 아닙니다.',
+      );
+    }
   }
 }
 
