@@ -112,7 +112,7 @@ async function fixture(provider: InferenceProvider, manualOnly = false) {
     await expect.poll(async () => (await store.session(id)).run?.status).toBe('completed');
     return store.session(id);
   };
-  return { store, request, factory, root, skill, create, configure, send, finished };
+  return { dir, store, request, factory, root, skill, create, configure, send, finished };
 }
 
 function readingProvider(
@@ -150,6 +150,39 @@ function readingProvider(
 }
 
 describe('skills daemon integration', () => {
+  it('discovers skills from a registered project and rejects unknown project IDs', async () => {
+    const app = await fixture(plainProvider([]));
+    const projectRoot = join(app.dir, 'project');
+    const skillRoot = join(projectRoot, '.claude', 'skills', 'project-review');
+    await mkdir(skillRoot, { recursive: true });
+    await writeFile(
+      join(skillRoot, 'SKILL.md'),
+      '---\nname: project-review\ndescription: Review this project.\n---\nRead the project.\n',
+    );
+    const projectResponse = await app.request('/v1/projects', { path: projectRoot });
+    expect(projectResponse.status).toBe(200);
+    const project = (await projectResponse.json()).project as { id: string };
+    const discovered = await app.request(
+      `/v1/skills/discover?projectId=${encodeURIComponent(project.id)}`,
+    );
+    expect(discovered.status).toBe(200);
+    expect((await discovered.json()).skills).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: skillRoot,
+          dialect: 'claude',
+          scope: 'project',
+          source: 'Claude Code',
+        }),
+      ]),
+    );
+    const missing = await app.request(
+      `/v1/skills/discover?projectId=${encodeURIComponent(crypto.randomUUID())}`,
+    );
+    expect(missing.status).toBe(404);
+    expect((await missing.json()).error.code).toBe('PROJECT_NOT_FOUND');
+  });
+
   it('registers passive metadata without adding unselected skills or their bodies to requests', async () => {
     const requests: InferenceRequest[] = [];
     const app = await fixture(plainProvider(requests));

@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Session } from '@lodex/contracts';
-import type { RegisteredSkill, SkillDialect, SkillPlatform } from '@lodex/skills';
+import type { DiscoveredSkill, RegisteredSkill, SkillDialect, SkillPlatform } from '@lodex/skills';
 import {
+  discoverSkills,
   nativeDesktop,
   pickProjectFolder,
   registeredSkills,
@@ -40,15 +41,21 @@ const supportsCurrentPlatform = (skill: RegisteredSkill) => {
   const platform = currentPlatform();
   return !skill.platforms?.length || (platform !== null && skill.platforms.includes(platform));
 };
+const samePath = (left: string, right: string) =>
+  currentPlatform() === 'windows'
+    ? left.toLocaleLowerCase() === right.toLocaleLowerCase()
+    : left === right;
 
 export function SkillManager({
   session,
+  projectId,
   provider,
   connected,
   onClose,
   onSave,
 }: {
   session: Session | undefined;
+  projectId: string | undefined;
   provider: string;
   connected: boolean;
   onClose: () => void;
@@ -59,6 +66,7 @@ export function SkillManager({
     busyRef = useRef(false),
     catalogRequest = useRef(0);
   const [skills, setSkills] = useState<RegisteredSkill[]>([]);
+  const [discovered, setDiscovered] = useState<DiscoveredSkill[] | null>(null);
   const [loaded, setLoaded] = useState(!nativeDesktop);
   const [selected, setSelected] = useState<Selection[]>(() => session?.skills ?? []);
   const [consent, setConsent] = useState(session?.skillCloudConsent ?? false);
@@ -284,6 +292,71 @@ export function SkillManager({
               {busy ? '처리 중…' : session ? '대화에 적용' : '선택한 스킬로 새 대화'}
             </button>
           </fieldset>
+        </section>
+        <section aria-labelledby="skill-discovery-title">
+          <h3 id="skill-discovery-title">기본 위치에서 찾기</h3>
+          <p>
+            Codex·Claude Code·pi·OpenCode·OpenClaw·Hermes와 Agent Skills의 알려진 사용자 폴더를
+            확인합니다. 프로젝트가 선택되어 있으면 프로젝트 전용 폴더도 함께 확인합니다.
+          </p>
+          <button
+            type="button"
+            disabled={unavailable || busy}
+            onClick={() =>
+              void operation(async () => {
+                const next = await discoverSkills(projectId);
+                if (mounted.current) {
+                  setDiscovered(next);
+                  setStatus(
+                    next.length
+                      ? `${next.length}개의 스킬 폴더를 찾았습니다.`
+                      : '알려진 기본 위치에서 스킬을 찾지 못했습니다.',
+                  );
+                }
+              }, false)
+            }
+          >
+            기본 위치 검색
+          </button>
+          {discovered && discovered.length > 0 && (
+            <ul className="skill-discovery-list" aria-label="발견한 스킬 폴더">
+              {discovered.map((candidate) => {
+                const registered = skills.some((skill) =>
+                  samePath(skill.source.rootPath, candidate.path),
+                );
+                return (
+                  <li key={`${candidate.dialect}:${candidate.path}`}>
+                    <span>
+                      <strong>{candidate.path.split(/[\\/]/).at(-1)}</strong>
+                      <small>
+                        {dialectNames[candidate.dialect]} ·{' '}
+                        {candidate.scope === 'project' ? '프로젝트' : '사용자'}
+                      </small>
+                      <span className="skill-source">{candidate.path}</span>
+                    </span>
+                    <button
+                      type="button"
+                      disabled={unavailable || busy || registered}
+                      onClick={() =>
+                        void operation(async () => {
+                          await registerSkill({
+                            path: candidate.path,
+                            dialect: candidate.dialect,
+                          });
+                          if (mounted.current)
+                            setStatus(
+                              `${candidate.source} 스킬을 등록했습니다. 사용할 대화에서 선택하세요.`,
+                            );
+                        })
+                      }
+                    >
+                      {registered ? '등록됨' : '등록'}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
         </section>
         <section className="skill-catalog" aria-label="등록한 스킬">
           <h3>등록한 스킬</h3>

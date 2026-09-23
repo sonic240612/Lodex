@@ -70,7 +70,12 @@ import { runAgent } from './agent-runner';
 import { planningTool } from './planning';
 import { goalCompletionTool, verificationTools } from './autopilot';
 import { RuntimeManager } from '@lodex/local-runtime';
-import { inspectSkillDirectory, skillCatalog, type RegisteredSkill } from '@lodex/skills';
+import {
+  discoverSkillDirectories,
+  inspectSkillDirectory,
+  skillCatalog,
+  type RegisteredSkill,
+} from '@lodex/skills';
 import { skillTools } from './skills';
 import {
   McpConnection,
@@ -1421,6 +1426,23 @@ export async function startServer(options: ServerOptions) {
         );
       } else if (request.method === 'GET' && url.pathname === '/v1/skills') {
         json(response, 200, { skills: await store.registeredSkills() });
+      } else if (request.method === 'GET' && url.pathname === '/v1/skills/discover') {
+        const projectId = url.searchParams.get('projectId');
+        let projectPath: string | undefined;
+        if (projectId) {
+          if (!z.uuid().safeParse(projectId).success)
+            throw new AppError('SKILL_INPUT', '프로젝트 ID가 올바르지 않습니다.');
+          const project = (await store.snapshot()).projects.find((entry) => entry.id === projectId);
+          if (!project)
+            throw new AppError('PROJECT_NOT_FOUND', '프로젝트를 찾을 수 없습니다.', 404);
+          projectPath = project.path;
+        }
+        json(response, 200, {
+          skills: await discoverSkillDirectories({
+            ...(projectPath ? { projectPath } : {}),
+            signal: AbortSignal.timeout(15000),
+          }),
+        });
       } else if (request.method === 'POST' && url.pathname === '/v1/skills/register') {
         const parsed = skillRegistrationInput.safeParse(await readJson(request));
         if (!parsed.success)

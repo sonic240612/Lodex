@@ -14,6 +14,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import {
+  discoverSkillDirectories,
   inspectSkillDirectory,
   readSkill,
   readSkillResource,
@@ -41,6 +42,48 @@ afterEach(async () => {
 });
 
 describe('passive skill registration', () => {
+  it('discovers documented user and project roots without following linked directories', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'lodex-skill-discovery-'));
+    directories.push(home);
+    const project = join(home, 'project');
+    const codex = join(home, '.codex', 'skills', 'codex-skill');
+    const hermes = join(home, '.hermes', 'skills', 'category', 'hermes-skill');
+    const claude = join(project, '.claude', 'skills', 'claude-skill');
+    const unrelated = join(home, 'random', 'ignored-skill');
+    for (const path of [codex, hermes, claude, unrelated]) {
+      await mkdir(path, { recursive: true });
+      await writeFile(
+        join(path, 'SKILL.md'),
+        `---\nname: ${path.split(/[\\/]/).at(-1)}\ndescription: Discovery fixture.\n---\nUse it.\n`,
+      );
+    }
+    const linkedTarget = join(home, 'linked-target');
+    await mkdir(linkedTarget);
+    await writeFile(
+      join(linkedTarget, 'SKILL.md'),
+      '---\nname: linked\ndescription: Must stay excluded.\n---\n',
+    );
+    await symlink(
+      linkedTarget,
+      join(home, '.codex', 'skills', 'linked'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+
+    const found = await discoverSkillDirectories({ home, projectPath: project });
+    expect(found).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ path: codex, dialect: 'codex', scope: 'user' }),
+        expect.objectContaining({ path: hermes, dialect: 'hermes', scope: 'user' }),
+        expect.objectContaining({ path: claude, dialect: 'claude', scope: 'project' }),
+      ]),
+    );
+    expect(found.some((entry) => entry.path === unrelated)).toBe(false);
+    expect(
+      found.some((entry) => entry.path === linkedTarget || entry.path.endsWith('linked')),
+    ).toBe(false);
+    expect(found[0]?.scope).toBe('project');
+  });
+
   it('preserves BOM/CRLF instructions, multiline YAML and exact byte provenance, with a metadata-only catalog', async () => {
     const text =
       '\ufeff---\r\nname: example\r\ndescription: >-\r\n  Inspect files\r\n  with Korean text.\r\nmetadata:\r\n  author: "Sample author"\r\n---\r\n\r\n# 절차\r\nRead references/guide.md.\r\n';

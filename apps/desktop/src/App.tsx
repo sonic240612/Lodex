@@ -1330,6 +1330,7 @@ export function App() {
           <SkillManager
             key={session?.id ?? 'new'}
             session={session}
+            projectId={session?.projectId ?? workspace.selectedProjectId ?? undefined}
             provider={contextProvider}
             connected={workspace.connected}
             onClose={() => setSkillManager(false)}

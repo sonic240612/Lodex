@@ -1,5 +1,5 @@
 import { Channel, invoke, isTauri } from '@tauri-apps/api/core';
-import type { RegisteredSkill, SkillDialect } from '@lodex/skills';
+import type { DiscoveredSkill, RegisteredSkill, SkillDialect } from '@lodex/skills';
 import type { McpConfig, McpRegistration, McpImport } from '@lodex/mcp';
 import type { OAuthPreparation, OAuthStatus } from '@lodex/mcp';
 import {
@@ -398,6 +398,16 @@ export async function registeredSkills(): Promise<RegisteredSkill[]> {
   const result = await invoke<{ skills: RegisteredSkill[] }>('daemon_request', {
     method: 'GET',
     path: '/v1/skills',
+    body: null,
+  });
+  return result.skills;
+}
+export async function discoverSkills(projectId?: string): Promise<DiscoveredSkill[]> {
+  if (!nativeDesktop) throw new Error('스킬 검색은 데스크톱 앱에서 사용할 수 있습니다.');
+  const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : '';
+  const result = await invoke<{ skills: DiscoveredSkill[] }>('daemon_request', {
+    method: 'GET',
+    path: '/v1/skills/discover' + query,
     body: null,
   });
   return result.skills;

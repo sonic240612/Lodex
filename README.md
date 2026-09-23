@@ -17,7 +17,7 @@ Desktop agent harness for local LLMs and OpenRouter.
 - Run Docker commands with saved limits. Full Access enables host files, shell commands, environment variables, network access, and selected MCP calls.
 - Choose **Ask**, **Approve for me**, or **Full Access** per conversation. Plan mode remains read-only.
 - Use `/goal` for goal-driven runs, or run saved plan tasks with dependencies, completion criteria, verification commands, and budgets.
-- Import local `SKILL.md` folders using Agent Skills, Codex, Claude Code, pi, OpenCode, OpenClaw, or Hermes metadata, including Hermes operating-system restrictions.
+- Discover documented user and project skill folders, then import local `SKILL.md` packages using Agent Skills, Codex, Claude Code, pi, OpenCode, OpenClaw, or Hermes metadata, including Hermes operating-system restrictions.
 - Connect stdio, Streamable HTTP, and legacy SSE MCP servers; select tools, preview resources and prompts, attach reviewed content, handle Sampling and Elicitation, and sign in with OAuth PKCE.
 - Pair a Telegram bot for remote messages, status, plan inspection, cancellation, and approved Build access.
 - Keep the daemon, Telegram, and active agent runs alive when the window is closed; reopen or quit Lodex from the system tray.

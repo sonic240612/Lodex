@@ -24,6 +24,7 @@ import type {
 } from './types';
 export type * from './types';
 export { SKILL_LIMITS } from './files';
+export { discoverSkillDirectories } from './discovery';
 
 const signalOrDefault = (signal?: AbortSignal) => signal ?? new AbortController().signal;
 

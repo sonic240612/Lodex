@@ -3,6 +3,13 @@ export type SkillDialect =
 export type SkillInvocation = 'model' | 'user';
 export type SkillPlatform = 'windows' | 'macos' | 'linux';
 
+export interface DiscoveredSkill {
+  path: string;
+  dialect: SkillDialect;
+  scope: 'user' | 'project';
+  source: string;
+}
+
 export interface SkillDiagnostic {
   code: string;
   message: string;

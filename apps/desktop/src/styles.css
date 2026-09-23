@@ -2332,6 +2332,28 @@ input[type='checkbox'] {
 .skill-manager .skill-selection-list button {
   white-space: nowrap;
 }
+.skill-manager .skill-discovery-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  border-top: 1px solid var(--border);
+}
+.skill-manager .skill-discovery-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+.skill-manager .skill-discovery-list li > span {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+.skill-manager .skill-discovery-list button {
+  flex: 0 0 auto;
+}
 .skill-manager .skill-consent {
   align-items: flex-start;
   margin: 16px 0;

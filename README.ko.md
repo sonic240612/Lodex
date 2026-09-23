@@ -17,7 +17,7 @@
 - 제한을 설정한 Docker 명령 실행, 전체 접근의 호스트 파일·셸·환경 변수·네트워크·MCP 사용
 - 대화별 **승인 요청**·**대신 승인**·**전체 접근** 권한. Plan 모드는 항상 읽기 전용
 - `/goal` 목표 실행과 선행 작업·완료 기준·검증 명령·예산을 사용하는 저장 계획 실행
-- Agent Skills·Codex·Claude Code·pi·OpenCode·OpenClaw·Hermes 형식과 Hermes 운영체제 제한을 반영하는 로컬 `SKILL.md` 가져오기
+- 알려진 사용자·프로젝트 Skills 위치 검색, Agent Skills·Codex·Claude Code·pi·OpenCode·OpenClaw·Hermes 형식과 Hermes 운영체제 제한을 반영하는 로컬 `SKILL.md` 가져오기
 - stdio·Streamable HTTP·기존 SSE MCP, 도구 선택, 리소스·프롬프트 미리보기와 첨부, Sampling·Elicitation, OAuth PKCE 로그인
 - 원격 메시지·상태·계획 조회·중지·허용된 Build 작업을 위한 Telegram 봇
 - 창을 닫아도 데몬·Telegram·진행 중인 에이전트를 유지하는 시스템 트레이 백그라운드 실행
