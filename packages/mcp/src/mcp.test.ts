@@ -45,7 +45,14 @@ async function directory() {
   return dir;
 }
 function answer(
-  request: { method: string; params?: { arguments?: { text?: string } } },
+  request: {
+    method: string;
+    params?: {
+      arguments?: { text?: string };
+      inputResponses?: Record<string, unknown>;
+      requestState?: string;
+    };
+  },
   modern: boolean,
 ) {
   if (request.method === 'initialize')
@@ -75,9 +82,17 @@ async function httpFixture(
     redirect?: string;
     requireKey?: string;
     changed?: boolean;
+    inputRequiredSampling?: boolean;
   } = {},
 ) {
-  const requests: { method: string; params?: { arguments?: { text?: string } } }[] = [];
+  const requests: {
+    method: string;
+    params?: {
+      arguments?: { text?: string };
+      inputResponses?: Record<string, unknown>;
+      requestState?: string;
+    };
+  }[] = [];
   const server = createServer(async (req, res) => {
     if (options.requireKey && req.headers.authorization !== 'Bearer ' + options.requireKey) {
       res.writeHead(401);
@@ -107,10 +122,33 @@ async function httpFixture(
       req.socket.destroy();
       return;
     }
-    let result = answer(message, !!options.modern);
+    let result: Record<string, unknown> | undefined = answer(message, !!options.modern);
+    if (options.modern && options.inputRequiredSampling && message.method === 'tools/call') {
+      const sampled = message.params?.inputResponses?.sample as
+        { content?: { type?: string; text?: string } } | undefined;
+      result = sampled
+        ? { content: [{ type: 'text', text: sampled.content?.text ?? '' }] }
+        : {
+            resultType: 'input_required',
+            inputRequests: {
+              sample: {
+                method: 'sampling/createMessage',
+                params: {
+                  messages: [
+                    { role: 'user', content: { type: 'text', text: 'Modern sampling fixture' } },
+                  ],
+                  maxTokens: 24,
+                  includeContext: 'none',
+                },
+              },
+            },
+            requestState: 'opaque-fixture-state',
+          };
+    }
     if (options.changed && message.method === 'tools/list')
       result = { tools: [{ ...tool, description: 'changed' }] };
-    if (options.modern && result) Object.assign(result, { resultType: 'complete' });
+    if (options.modern && result && !('resultType' in result))
+      Object.assign(result, { resultType: 'complete' });
     if (options.modern && message.method === 'tools/list' && result)
       Object.assign(result, { ttlMs: 0, cacheScope: 'private' });
     const body = JSON.stringify({
@@ -145,6 +183,100 @@ async function httpFixture(
   };
 }
 describe('MCP protocol boundary', () => {
+  it('fulfills an isolated legacy sampling request during a tool call', async () => {
+    const dir = await directory(),
+      script = join(dir, 'sampling-server.cjs'),
+      received = join(dir, 'sampling.json');
+    await writeFile(
+      script,
+      `const readline=require('node:readline'),fs=require('node:fs');const tool=${JSON.stringify(tool)};let pending;
+const lines=readline.createInterface({input:process.stdin});lines.on('line',line=>{const m=JSON.parse(line);
+if(m.id===88&&!m.method){fs.writeFileSync(${JSON.stringify(received)},JSON.stringify(m.result));process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:pending.id,result:{content:[{type:'text',text:m.result.content.text}]}})+'\\n');return;}
+if(m.id===undefined)return;
+if(m.method==='initialize'){process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result:{protocolVersion:'2025-11-25',capabilities:{tools:{}},serverInfo:{name:'sampling fixture',version:'1'}}})+'\\n');return;}
+if(m.method==='tools/list'){process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result:{tools:[tool]}})+'\\n');return;}
+if(m.method==='tools/call'){pending=m;process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:88,method:'sampling/createMessage',params:{messages:[{role:'user',content:{type:'text',text:'Summarize this fixture'}}],maxTokens:32,includeContext:'none'}})+'\\n');return;}
+});`,
+    );
+    const seen: unknown[] = [];
+    const connection = await connect(
+      validateConfig({
+        name: 'sampling fixture',
+        transport: 'stdio',
+        executable: process.execPath,
+        args: [script],
+        cwd: dir,
+        protocol: 'legacy',
+      }),
+      {
+        sampling: async (params) => {
+          seen.push(params);
+          return {
+            model: 'fixture-model',
+            role: 'assistant',
+            content: { type: 'text', text: 'sampled safely' },
+            stopReason: 'endTurn',
+          };
+        },
+      },
+    );
+    const selected = connection.registration.tools[0]!;
+    await expect(
+      connection.call({
+        name: selected.name,
+        revision: selected.revision,
+        arguments: { text: 'run' },
+        mode: 'build',
+        signal: AbortSignal.timeout(3000),
+      }),
+    ).resolves.toMatchObject({ content: [{ type: 'text', text: 'sampled safely' }] });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({
+      messages: [{ role: 'user', content: { type: 'text', text: 'Summarize this fixture' } }],
+      maxTokens: 32,
+      includeContext: 'none',
+    });
+    await expect
+      .poll(async () => JSON.parse(await readFile(received, 'utf8')))
+      .toMatchObject({
+        model: 'fixture-model',
+        content: { type: 'text', text: 'sampled safely' },
+      });
+  });
+  it('fulfills modern input_required sampling and retries with the exact response and state', async () => {
+    const server = await httpFixture({ modern: true, sse: true, inputRequiredSampling: true });
+    const connection = await connect(server.config, {
+      sampling: async () => ({
+        model: 'fixture-modern',
+        role: 'assistant',
+        content: { type: 'text', text: 'modern sampled safely' },
+        stopReason: 'endTurn',
+      }),
+    });
+    const selected = connection.registration.tools[0]!;
+    await expect(
+      connection.call({
+        name: selected.name,
+        revision: selected.revision,
+        arguments: { text: 'run modern' },
+        mode: 'build',
+        signal: AbortSignal.timeout(3000),
+      }),
+    ).resolves.toMatchObject({
+      content: [{ type: 'text', text: 'modern sampled safely' }],
+    });
+    const calls = server.requests.filter((request) => request.method === 'tools/call');
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.params).toMatchObject({
+      requestState: 'opaque-fixture-state',
+      inputResponses: {
+        sample: {
+          model: 'fixture-modern',
+          content: { type: 'text', text: 'modern sampled safely' },
+        },
+      },
+    });
+  });
   it('advertises and returns only the explicitly selected project root', async () => {
     const dir = await directory(),
       script = join(dir, 'roots-server.cjs'),

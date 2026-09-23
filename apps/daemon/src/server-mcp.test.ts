@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createServer } from 'node:http';
+import { createServer, type ServerResponse } from 'node:http';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -25,10 +25,13 @@ async function fixture(
     cloud?: boolean;
     plain?: boolean;
     goal?: boolean;
+    sampling?: boolean;
   } = {},
 ) {
   let calls = 0,
-    connections = 0;
+    connections = 0,
+    samplingResponses = 0;
+  let pendingSample: { id: number; response: ServerResponse } | undefined;
   let description = 'Echo fixture';
   const mcp = createServer(async (req, res) => {
     if (req.method !== 'POST') {
@@ -39,6 +42,21 @@ async function fixture(
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(Buffer.from(chunk));
     const message = JSON.parse(Buffer.concat(chunks).toString());
+    if (options.sampling && message.id === 88 && !message.method) {
+      samplingResponses++;
+      res.writeHead(202);
+      res.end();
+      const pending = pendingSample;
+      pendingSample = undefined;
+      pending?.response.end(
+        `data: ${JSON.stringify({
+          jsonrpc: '2.0',
+          id: pending.id,
+          result: { content: [{ type: 'text', text: message.result.content.text }] },
+        })}\n\n`,
+      );
+      return;
+    }
     if (message.id === undefined) {
       res.writeHead(202);
       res.end();
@@ -74,6 +92,25 @@ async function fixture(
         return;
       }
       if (options.hold) return;
+      if (options.sampling) {
+        pendingSample = { id: message.id, response: res };
+        res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
+        res.write(
+          `data: ${JSON.stringify({
+            jsonrpc: '2.0',
+            id: 88,
+            method: 'sampling/createMessage',
+            params: {
+              messages: [
+                { role: 'user', content: { type: 'text', text: 'Summarize the fixture' } },
+              ],
+              maxTokens: 64,
+              includeContext: 'none',
+            },
+          })}\n\n`,
+        );
+        return;
+      }
       result = { content: [{ type: 'text', text: message.params.arguments.text }] };
     }
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -206,12 +243,76 @@ async function fixture(
     requests,
     calls: () => calls,
     connections: () => connections,
+    samplingResponses: () => samplingResponses,
     change: () => {
       description = 'Changed definition';
     },
   };
 }
 describe('MCP session integration', () => {
+  it('runs approved MCP sampling with isolated context and shared model accounting', async () => {
+    const f = await fixture({ sampling: true });
+    const full = (
+      await f.store.apply(
+        makeCommand({
+          type: 'set_permission_mode',
+          sessionId: f.session.id,
+          expectedVersion: f.session.version,
+          mode: 'full',
+        }),
+      )
+    ).session;
+    expect((await f.send(full)).status).toBe(200);
+    await expect.poll(async () => (await f.store.session(full.id)).run?.status).toBe('completed');
+    expect(f.calls()).toBe(1);
+    expect(f.samplingResponses()).toBe(1);
+    expect(f.requests).toHaveLength(3);
+    const sampling = f.requests[1]!;
+    expect(sampling.tools).toBeUndefined();
+    expect(sampling.messages[0]?.role).toBe('system');
+    expect(sampling.messages[0]?.content).toContain('isolated MCP Sampling request');
+    expect(JSON.stringify(sampling)).not.toContain('Use the selected tool');
+    const session = await f.store.session(full.id);
+    expect(
+      session.messages.at(-1)?.activities?.find((activity) => activity.label === 'MCP 모델 요청'),
+    ).toMatchObject({
+      status: 'completed',
+      text: 'Fixture complete',
+      approval: { status: 'approved', decidedBy: 'full_access' },
+    });
+  });
+  it('pauses an MCP sampling request for approval and resumes the same response immediately', async () => {
+    const f = await fixture({ sampling: true });
+    expect((await f.send()).status).toBe(200);
+    await expect
+      .poll(
+        async () =>
+          (await f.store.session(f.session.id)).messages
+            .at(-1)
+            ?.activities?.find((activity) => activity.label === 'MCP 모델 요청')?.approval?.status,
+      )
+      .toBe('pending');
+    const waiting = await f.store.session(f.session.id);
+    const activity = waiting.messages
+      .at(-1)
+      ?.activities?.find((activity) => activity.label === 'MCP 모델 요청');
+    const approved = await f.request('/v1/approvals', {
+      sessionId: waiting.id,
+      expectedVersion: waiting.version,
+      activityId: activity!.id,
+      action: 'approve',
+    });
+    expect(approved.status).toBe(200);
+    await expect
+      .poll(async () => (await f.store.session(f.session.id)).run?.status)
+      .toBe('completed');
+    expect(f.samplingResponses()).toBe(1);
+    expect(
+      (await f.store.session(f.session.id)).messages
+        .at(-1)
+        ?.activities?.find((entry) => entry.id === activity!.id)?.approval,
+    ).toMatchObject({ status: 'approved', decidedBy: 'user' });
+  });
   it('settles the audit if cancellation arrives while persisting call intent', async () => {
     const f = await fixture();
     const record = f.store.recordMcpCall.bind(f.store);

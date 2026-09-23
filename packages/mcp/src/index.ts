@@ -9,6 +9,8 @@ import {
   type ResourceTemplateType as ResourceTemplate,
   type Prompt,
   type Root,
+  type CreateMessageRequestParams,
+  type CreateMessageResult,
   type Transport,
   type JsonSchemaType,
   type jsonSchemaValidator,
@@ -21,6 +23,7 @@ import { validateConfig, resolveReferences, type McpConfig, type SecretResolver 
 export { validateConfig, mcpConfigSchema } from './config';
 export type { McpConfig, SecretResolver } from './config';
 export type { Root } from '@modelcontextprotocol/client';
+export type { CreateMessageRequestParams, CreateMessageResult } from '@modelcontextprotocol/client';
 export { importMcpConfigurations, type McpImport } from './import';
 export * from './oauth';
 
@@ -396,6 +399,10 @@ export class McpConnection {
     expected?: McpRegistration;
     oauthToken?: string | undefined;
     roots?: Root[];
+    sampling?: (
+      params: CreateMessageRequestParams,
+      signal: AbortSignal,
+    ) => Promise<CreateMessageResult>;
   }): Promise<McpConnection> {
     const config = validateConfig(options.config);
     options.signal.throwIfAborted();
@@ -419,13 +426,20 @@ export class McpConnection {
     }
     options.signal.throwIfAborted();
     const roots = safeRoots(options.roots);
+    const clientCapabilities = {
+      ...(roots.length ? { roots: { listChanged: false } } : {}),
+      ...(options.sampling ? { sampling: {} } : {}),
+    };
     const client = new Client(
       { name: 'lodex', version: '0.1.0' },
       {
-        capabilities: roots.length ? { roots: { listChanged: false } } : {},
+        capabilities: clientCapabilities,
         enforceStrictCapabilities: true,
         listMaxPages: 8,
-        inputRequired: { autoFulfill: false },
+        inputRequired: {
+          autoFulfill: roots.length > 0 || !!options.sampling,
+          maxRounds: 3,
+        },
         jsonSchemaValidator: validators(),
         versionNegotiation: {
           mode: config.protocol === '2026-07-28' ? { pin: '2026-07-28' } : config.protocol,
@@ -434,6 +448,16 @@ export class McpConnection {
       },
     );
     if (roots.length) client.setRequestHandler('roots/list', async () => ({ roots }));
+    if (options.sampling)
+      client.setRequestHandler('sampling/createMessage', async (request, context) => {
+        boundedShape(request.params, 131072);
+        const result = await options.sampling!(
+          request.params,
+          AbortSignal.any([options.signal, context.mcpReq.signal]),
+        );
+        boundedShape(result, 131072);
+        return result;
+      });
     const transport: Transport =
       config.transport === 'stdio'
         ? new OwnedStdioTransport(config, values, options.supervisorPath)
