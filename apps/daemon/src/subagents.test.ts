@@ -1,10 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   defaultModelConfig,
   type InferenceProvider,
   type InferenceRequest,
   type SubagentRecord,
 } from '@lodex/contracts';
+import { inspectSkillDirectory } from '@lodex/skills';
 import { parseDelegation, runSubagents } from './subagents';
 
 const config = { ...defaultModelConfig(), provider: 'demo' as const, model: 'child' };
@@ -124,6 +128,51 @@ describe('isolated read-only subagents', () => {
       expect(options.reserveToolCall).not.toHaveBeenCalled();
     },
   );
+
+  it('loads selected skill instructions on demand without copying parent history', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'lodex-subagent-skill-'));
+    try {
+      await writeFile(
+        join(directory, 'SKILL.md'),
+        '---\nname: subagent-help\ndescription: Gives read-only review guidance.\n---\nInspect the named files and cite exact evidence.\n',
+      );
+      const skill = await inspectSkillDirectory(directory);
+      const requests: InferenceRequest[] = [];
+      const options = {
+        ...opts(async function* (request) {
+          requests.push(structuredClone(request));
+          if (!request.messages.some((message) => message.role === 'tool')) {
+            yield {
+              type: 'tool_call_delta' as const,
+              index: 0,
+              id: 'read-skill-1',
+              name: 'read_skill',
+              arguments: JSON.stringify({ skillId: skill.id, revision: skill.revision }),
+            };
+            yield { type: 'finished' as const, reason: 'tool_calls' };
+          } else {
+            yield { type: 'text_delta' as const, text: 'Applied the selected review guidance.' };
+            yield { type: 'finished' as const, reason: 'stop' };
+          }
+        }),
+        skills: [skill],
+      };
+      const result = JSON.parse(await runSubagents([{ task: 'Review the design' }], options));
+      expect(requests).toHaveLength(2);
+      expect(requests[0]?.tools?.map((tool) => tool.function.name)).toEqual([
+        'read_skill',
+        'read_skill_resource',
+      ]);
+      expect(requests[0]?.messages).toHaveLength(2);
+      expect(requests[1]?.messages.at(-1)?.content).toContain('Inspect the named files');
+      expect(result.subagents[0]).toMatchObject({
+        status: 'completed',
+        skillReads: [{ skillId: skill.id, revision: skill.revision, path: 'SKILL.md' }],
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 
   it('checks the shared parent reservation before generation', async () => {
     const generate = vi.fn(async function* () {

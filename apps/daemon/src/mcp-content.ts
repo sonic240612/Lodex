@@ -40,11 +40,17 @@ export class McpContentPreviews {
       const result =
         input.kind === 'resource'
           ? await connection.readResource({ ...common, uri: input.entryKey })
-          : await connection.getPrompt({
-              ...common,
-              name: input.entryKey,
-              ...(input.arguments ? { arguments: input.arguments } : {}),
-            });
+          : input.kind === 'resource_template'
+            ? await connection.readResourceTemplate({
+                ...common,
+                uriTemplate: input.entryKey,
+                arguments: input.arguments ?? {},
+              })
+            : await connection.getPrompt({
+                ...common,
+                name: input.entryKey,
+                ...(input.arguments ? { arguments: input.arguments } : {}),
+              });
       snapshot = {
         id: randomUUID(),
         ...result.provenance,

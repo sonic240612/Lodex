@@ -428,6 +428,7 @@ export async function runAgent(options: {
           result = await runSubagents(parseDelegation(call.arguments), {
             ...options.subagents,
             ...(project ? { project } : {}),
+            ...(options.skills?.length ? { skills: options.skills } : {}),
             signal,
             reserveModelCall: (inputEstimateTokens) =>
               reserveModelCall(options.subagents!.config, inputEstimateTokens),

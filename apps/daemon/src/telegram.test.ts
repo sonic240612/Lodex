@@ -7,6 +7,7 @@ import {
   makeCommand,
   commandSchema,
   deleteSessionsSchema,
+  type ApprovalAction,
   type Command,
 } from '@lodex/contracts';
 import { Store } from '@lodex/storage';
@@ -96,7 +97,14 @@ async function fixture() {
     )
   ).session;
   const dispatch = vi.fn((command: Command) => store.apply(command));
-  const options = () => ({ store, loadToken: async () => token, dispatch, fetch: bot.fetch });
+  const decideApproval = vi.fn((action: ApprovalAction) => store.decideApproval(action));
+  const options = () => ({
+    store,
+    loadToken: async () => token,
+    dispatch,
+    decideApproval,
+    fetch: bot.fetch,
+  });
   let manager = await Telegram.open(options());
   cleanup.push(async () => {
     await manager.close();
@@ -124,6 +132,7 @@ async function fixture() {
     bot,
     session,
     dispatch,
+    decideApproval,
     pair,
     get manager() {
       return manager;
@@ -277,6 +286,68 @@ describe('durable Telegram channel', () => {
       content: 'inspect host',
     });
     expect((await app.store.session(session.id)).run?.actor).toBe('telegram');
+  });
+
+  it('notifies and resolves a pending approval from the paired account', async () => {
+    const app = await fixture();
+    await app.pair();
+    await app.manager.configure({
+      enabled: true,
+      sessionId: app.session.id,
+      allowBuild: true,
+      transmissionConsent: true,
+    });
+    let session = await app.store.session(app.session.id);
+    const sent = await app.store.apply(
+      makeCommand({
+        type: 'send_message',
+        sessionId: session.id,
+        expectedVersion: session.version,
+        content: '승인 테스트',
+      }),
+    );
+    const activityId = crypto.randomUUID();
+    await app.store.updateRun({
+      sessionId: session.id,
+      runId: sent.session.run!.id,
+      activities: [
+        {
+          id: activityId,
+          kind: 'tool',
+          label: 'run_command',
+          status: 'running',
+          text: '',
+          approval: {
+            kind: 'command',
+            target: 'npm test',
+            actor: 'telegram',
+            mode: 'ask',
+            risk: 'low',
+            reason: '프로젝트 명령 실행',
+            status: 'pending',
+            requestedAt: new Date().toISOString(),
+          },
+        },
+      ],
+    });
+    app.manager.wake();
+    await expect
+      .poll(() => app.bot.sent.some((message) => message.text.includes('승인이 필요합니다.')))
+      .toBe(true);
+    app.bot.push([update(2, '/approve')]);
+    await expect.poll(() => app.decideApproval.mock.calls.length).toBe(1);
+    expect(app.decideApproval.mock.calls[0]![0]).toMatchObject({
+      sessionId: session.id,
+      activityId,
+      action: 'approve',
+    });
+    await expect
+      .poll(() => app.bot.sent.some((message) => message.text === '승인했습니다.'))
+      .toBe(true);
+    session = await app.store.session(session.id);
+    expect(
+      session.messages.flatMap((message) => message.activities ?? [])[0]?.approval,
+    ).toMatchObject({ status: 'approved', decidedBy: 'user' });
   });
 
   it('records uncertain sends without replay and retries only an explicit rate-limit rejection', async () => {

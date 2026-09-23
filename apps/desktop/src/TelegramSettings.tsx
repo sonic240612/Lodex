@@ -259,7 +259,8 @@ export function TelegramSettings({
           </section>
         )}
         <p>
-          <code>/ask 메시지</code> · <code>/status</code> · <code>/plan</code> · <code>/stop</code>
+          <code>/ask 메시지</code> · <code>/status</code> · <code>/plan</code> ·{' '}
+          <code>/approve</code> · <code>/deny</code> · <code>/stop</code>
         </p>
         <p>
           일반 텍스트도 요청으로 전달됩니다. 파일 적용·설정 변경은 데스크톱에서 진행하세요. 앱이

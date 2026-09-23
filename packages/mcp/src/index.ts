@@ -3,6 +3,7 @@ import { lstat, realpath } from 'node:fs/promises';
 import {
   Client,
   StreamableHTTPClientTransport,
+  UriTemplate,
   type Tool,
   type Resource,
   type ResourceTemplateType as ResourceTemplate,
@@ -48,19 +49,21 @@ export interface McpResourceTemplate {
   name: string;
   revision: string;
   definition: ResourceTemplate;
-  supported: false;
-  issue: string;
+  variables: string[];
+  supported: boolean;
+  issue?: string;
 }
 export interface McpContent {
-  kind: 'resource' | 'prompt';
+  kind: 'resource' | 'resource_template' | 'prompt';
   text: string;
   messages?: { role: 'user' | 'assistant'; text: string }[];
   provenance: {
     serverId: string;
     serverRevision: string;
-    kind: 'resource' | 'prompt';
+    kind: 'resource' | 'resource_template' | 'prompt';
     entryKey: string;
     entryRevision: string;
+    resolvedUri?: string;
     sha256: string;
     bytes: number;
     readAt: string;
@@ -240,13 +243,32 @@ function templateCatalog(listed: ResourceTemplate[], secrets: string[]): McpReso
   checkCatalog(listed, (item) => item.uriTemplate);
   return listed.map((definition) => {
     const clean = redact(definition, secrets);
+    let variables: string[] = [],
+      issue: string | undefined;
+    try {
+      const parsed = new UriTemplate(definition.uriTemplate);
+      variables = parsed.variableNames;
+      if (
+        !catalogKey(definition.uriTemplate) ||
+        clean.uriTemplate !== definition.uriTemplate ||
+        variables.length < 1 ||
+        variables.length > 32 ||
+        new Set(variables).size !== variables.length ||
+        variables.some((name) => !catalogKey(name) || name.length > 128) ||
+        !textMimeType(definition.mimeType)
+      )
+        issue = '리소스 템플릿 URI·매개변수 또는 MIME 형식을 안전하게 사용할 수 없습니다.';
+    } catch {
+      issue = '리소스 템플릿 URI 형식이 올바르지 않습니다.';
+    }
     return {
       uriTemplate: clean.uriTemplate,
       name: clean.name,
       revision: hash(definition),
       definition: clean,
-      supported: false,
-      issue: '매개변수가 필요한 리소스 템플릿은 아직 읽을 수 없습니다.',
+      variables,
+      supported: !issue,
+      ...(issue ? { issue } : {}),
     };
   });
 }
@@ -514,6 +536,7 @@ export class McpConnection {
     text: string,
     maxBytes: number,
     messages?: McpContent['messages'],
+    resolvedUri?: string,
   ): McpContent {
     const bytes = Buffer.byteLength(text);
     if (bytes > maxBytes)
@@ -528,6 +551,7 @@ export class McpConnection {
         kind,
         entryKey,
         entryRevision,
+        ...(resolvedUri ? { resolvedUri } : {}),
         sha256: createHash('sha256').update(text).digest('hex'),
         bytes,
         readAt: new Date().toISOString(),
@@ -611,6 +635,109 @@ export class McpConnection {
       throw new AppError(
         'MCP_CONTENT_FAILED',
         'MCP 리소스를 읽지 못했습니다. 자동으로 다시 요청하지 않습니다.',
+      );
+    }
+  }
+  async readResourceTemplate(options: {
+    serverRevision: string;
+    uriTemplate: string;
+    revision: string;
+    arguments: Record<string, string>;
+    signal: AbortSignal;
+    maxBytes?: number;
+  }): Promise<McpContent> {
+    this.checkContent(options.serverRevision, options.signal);
+    const limit = contentLimit(options.maxBytes);
+    const chosen = this.registration.resourceTemplates?.find(
+      (item) => item.uriTemplate === options.uriTemplate && item.revision === options.revision,
+    );
+    if (!chosen?.supported)
+      throw new AppError('MCP_RESOURCE_TEMPLATE', '검토한 리소스 템플릿과 버전이 아닙니다.');
+    boundedShape(options.arguments, 16384);
+    if (
+      Object.keys(options.arguments).length !== chosen.variables.length ||
+      chosen.variables.some(
+        (name) =>
+          !Object.hasOwn(options.arguments, name) ||
+          typeof options.arguments[name] !== 'string' ||
+          options.arguments[name]!.length > 4096,
+      ) ||
+      Object.keys(options.arguments).some((name) => !chosen.variables.includes(name))
+    )
+      throw new AppError(
+        'MCP_ARGUMENTS',
+        '리소스 템플릿에 표시된 모든 매개변수만 문자열로 입력하세요.',
+      );
+    let resolvedUri: string;
+    try {
+      resolvedUri = new UriTemplate(chosen.uriTemplate).expand(options.arguments);
+    } catch {
+      throw new AppError('MCP_ARGUMENTS', '리소스 템플릿 URI를 만들 수 없습니다.');
+    }
+    if (!catalogKey(resolvedUri) || UriTemplate.isTemplate(resolvedUri))
+      throw new AppError('MCP_ARGUMENTS', '완성된 리소스 URI를 안전하게 사용할 수 없습니다.');
+    try {
+      const current = templateCatalog(
+        (
+          await this.client.listResourceTemplates(undefined, {
+            signal: options.signal,
+            timeout: 15000,
+            cacheMode: 'bypass',
+          })
+        ).resourceTemplates,
+        this.secrets,
+      );
+      if (
+        hash(current.map((item) => [item.uriTemplate, item.revision])) !==
+        hash(this.registration.resourceTemplates!.map((item) => [item.uriTemplate, item.revision]))
+      ) {
+        this.contentInvalidated = true;
+        throw new AppError(
+          'MCP_CATALOG_CHANGED',
+          'MCP 리소스 템플릿 목록이 변경되었습니다. 다시 검토하세요.',
+        );
+      }
+      this.checkContent(options.serverRevision, options.signal);
+      const result = await this.client.readResource(
+        { uri: resolvedUri },
+        {
+          signal: options.signal,
+          timeout: 30000,
+          cacheMode: 'bypass',
+        },
+      );
+      this.checkContent(options.serverRevision, options.signal);
+      boundedShape(result, 131072);
+      if (
+        !Array.isArray(result.contents) ||
+        result.contents.length < 1 ||
+        result.contents.length > 64 ||
+        result.contents.some(
+          (item) =>
+            item.uri !== resolvedUri ||
+            !('text' in item) ||
+            typeof item.text !== 'string' ||
+            'blob' in item ||
+            !textMimeType(item.mimeType),
+        )
+      )
+        throw new AppError('MCP_CONTENT', '완성된 템플릿 URI의 텍스트만 읽을 수 있습니다.');
+      const clean = redact(result.contents, this.secrets);
+      return this.content(
+        'resource_template',
+        chosen.uriTemplate,
+        chosen.revision,
+        clean.map((item) => ('text' in item ? item.text : '')).join('\n\n'),
+        limit,
+        undefined,
+        resolvedUri,
+      );
+    } catch (error) {
+      if (options.signal.aborted) options.signal.throwIfAborted();
+      if (error instanceof AppError) throw error;
+      throw new AppError(
+        'MCP_CONTENT_FAILED',
+        'MCP 리소스 템플릿을 읽지 못했습니다. 자동으로 다시 요청하지 않습니다.',
       );
     }
   }

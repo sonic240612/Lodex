@@ -79,7 +79,19 @@ async function fixture(modern = false) {
     if (message.method === 'resources/templates/list')
       result = { resourceTemplates: state.resourceTemplates };
     if (message.method === 'prompts/list') result = { prompts: state.prompts };
-    if (message.method === 'resources/read') result = { contents: state.contents };
+    if (message.method === 'resources/read')
+      result = {
+        contents:
+          message.params?.uri === 'fixture://guide'
+            ? state.contents
+            : [
+                {
+                  uri: message.params?.uri,
+                  text: `# Dynamic guide\nSelected ${message.params?.uri}`,
+                  mimeType: 'text/markdown',
+                },
+              ],
+      };
     if (message.method === 'prompts/get') result = { messages: state.messages };
     if (result && modern) {
       result.resultType = 'complete';
@@ -151,6 +163,16 @@ function promptOptions(connection: McpConnection) {
     signal: AbortSignal.timeout(2000),
   };
 }
+function templateOptions(connection: McpConnection) {
+  const selected = connection.registration.resourceTemplates![0]!;
+  return {
+    serverRevision: connection.registration.revision,
+    uriTemplate: selected.uriTemplate,
+    revision: selected.revision,
+    arguments: { name: 'setup notes' },
+    signal: AbortSignal.timeout(2000),
+  };
+}
 describe('MCP explicit content reads', () => {
   it.each([false, true])(
     'inspects and reads pinned text resources/prompts with modern=%s',
@@ -168,7 +190,8 @@ describe('MCP explicit content reads', () => {
       });
       expect(connection.registration.resourceTemplates?.[0]).toMatchObject({
         uriTemplate: 'fixture://guide/{name}',
-        supported: false,
+        variables: ['name'],
+        supported: true,
       });
       expect(
         server.requests.some((req) => ['resources/read', 'prompts/get'].includes(req.method)),
@@ -192,11 +215,20 @@ describe('MCP explicit content reads', () => {
         { role: 'user', text: 'Review this code.' },
         { role: 'assistant', text: 'Check behavior and tests.' },
       ]);
+      const dynamic = await connection.readResourceTemplate(templateOptions(connection));
+      expect(dynamic).toMatchObject({
+        kind: 'resource_template',
+        provenance: {
+          entryKey: 'fixture://guide/{name}',
+          resolvedUri: 'fixture://guide/setup%20notes',
+        },
+      });
+      expect(dynamic.text).toContain('fixture://guide/setup%20notes');
       expect(
         server.requests
           .filter((req) => req.method === 'resources/read')
           .map((req) => req.params?.uri),
-      ).toEqual(['fixture://guide']);
+      ).toEqual(['fixture://guide', 'fixture://guide/setup%20notes']);
       expect(
         server.requests
           .filter((req) => req.method === 'prompts/get')

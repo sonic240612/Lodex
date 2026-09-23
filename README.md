@@ -98,7 +98,7 @@ MCP configuration accepts common `mcpServers` JSON. Lodex supports selected tool
 
 Create a bot with [BotFather](https://core.telegram.org/bots/tutorial#obtain-your-bot-token), enter the token in Telegram settings or set `TELEGRAM_BOT_TOKEN` in `.env`, select a conversation, enable transmission, and approve the pairing IDs.
 
-Commands: `/ask`, `/status`, `/plan`, `/stop`. Lodex must remain running. Unknown delivery outcomes are recorded and never retried automatically.
+Commands: `/ask`, `/status`, `/plan`, `/approve`, `/deny`, `/stop`. Remote approvals require Build access in Telegram settings. Lodex must remain running. Unknown delivery outcomes are recorded and never retried automatically.
 
 ## Packages
 

@@ -120,8 +120,12 @@ function McpContentEntry({
       {preview && (
         <div className="mcp-content-preview" aria-label={`${name} 미리보기`}>
           <p className="skill-source">
-            {preview.kind === 'resource' ? '리소스' : '프롬프트'} · {preview.entryKey} ·{' '}
-            {preview.bytes.toLocaleString()} bytes
+            {preview.kind === 'resource'
+              ? '리소스'
+              : preview.kind === 'resource_template'
+                ? '리소스 템플릿'
+                : '프롬프트'}{' '}
+            · {preview.resolvedUri ?? preview.entryKey} · {preview.bytes.toLocaleString()} bytes
             <br />
             읽은 시간 {new Date(preview.readAt).toLocaleString()}
           </p>
@@ -259,7 +263,7 @@ export function McpManager({
   }
   function readContent(
     server: McpRegistration,
-    kind: 'resource' | 'prompt',
+    kind: 'resource' | 'resource_template' | 'prompt',
     entryKey: string,
     entryRevision: string,
     arguments_: Record<string, string>,
@@ -272,7 +276,7 @@ export function McpManager({
         kind,
         entryKey,
         entryRevision,
-        ...(kind === 'prompt' ? { arguments: arguments_ } : {}),
+        ...(kind === 'prompt' || kind === 'resource_template' ? { arguments: arguments_ } : {}),
       });
       if (mounted.current) setPreview(value);
     });
@@ -401,7 +405,12 @@ export function McpManager({
                   '저장된 서버 자료'}
               </strong>
               <p className="skill-source">
-                {attachment.kind === 'resource' ? '리소스' : '프롬프트'} · {attachment.entryKey}
+                {attachment.kind === 'resource'
+                  ? '리소스'
+                  : attachment.kind === 'resource_template'
+                    ? '리소스 템플릿'
+                    : '프롬프트'}{' '}
+                · {attachment.resolvedUri ?? attachment.entryKey}
                 <br />
                 {attachment.bytes.toLocaleString()} bytes ·{' '}
                 {new Date(attachment.readAt).toLocaleString()}
@@ -591,14 +600,49 @@ export function McpManager({
                     {!!server.resourceTemplates?.length && (
                       <>
                         <h4>리소스 템플릿</h4>
-                        <p>주소에 매개변수를 넣는 리소스 템플릿은 아직 지원하지 않습니다.</p>
-                        {server.resourceTemplates.map((template) => (
-                          <div className="mcp-content-entry" key={template.uriTemplate}>
-                            <strong>{template.name}</strong>
-                            <p className="skill-source">{template.uriTemplate}</p>
-                            {template.issue && <p>{template.issue}</p>}
-                          </div>
-                        ))}
+                        {server.resourceTemplates.map((template) => {
+                          const current =
+                            preview?.serverId === server.id &&
+                            preview.kind === 'resource_template' &&
+                            preview.entryKey === template.uriTemplate
+                              ? preview
+                              : undefined;
+                          return (
+                            <McpContentEntry
+                              key={server.revision + template.uriTemplate}
+                              name={template.name}
+                              source={
+                                template.uriTemplate +
+                                (template.definition.mimeType
+                                  ? ` · ${template.definition.mimeType}`
+                                  : '')
+                              }
+                              description={template.definition.description}
+                              parameters={template.variables.map((name) => ({
+                                name,
+                                required: true,
+                              }))}
+                              supported={template.supported}
+                              issue={template.issue}
+                              disabled={busy || unavailable || running || conflict}
+                              attachDisabledReason={attachDisabledReason}
+                              preview={current}
+                              onPreview={(arguments_) =>
+                                readContent(
+                                  server,
+                                  'resource_template',
+                                  template.uriTemplate,
+                                  template.revision,
+                                  arguments_,
+                                )
+                              }
+                              onInvalidate={() => {
+                                if (current) setPreview(undefined);
+                              }}
+                              onAttach={attachContent}
+                            />
+                          );
+                        })}
                       </>
                     )}
                   </>
@@ -716,7 +760,7 @@ export function McpManager({
             )}
           </fieldset>
           <p>
-            첨부는 텍스트 리소스와 프롬프트를 지원합니다. 이미지·파일 데이터와 리소스 템플릿,
+            첨부는 정적·매개변수형 텍스트 리소스와 프롬프트를 지원합니다. 이미지·파일 데이터와
             참조·정규식·format이 필요한 도구 입력 형식은 지원하지 않습니다.
           </p>
         </section>

@@ -8,6 +8,9 @@ import {
   telegramConfigSchema,
   type Command,
   type CommandResult,
+  type ApprovalAction,
+  type Activity,
+  type Session,
   type TelegramConfig,
   type TelegramPeer,
   type TelegramStatus,
@@ -63,12 +66,14 @@ interface Journal {
   inbox: Inbox[];
   outbox: Outbox[];
   unknownDeliveries: number;
+  notifiedApprovalId?: string;
 }
 type Options = {
   store: Store;
   loadToken: () => Promise<string | null>;
   tokenSource?: () => SecretSource;
   dispatch: (command: Command) => Promise<CommandResult>;
+  decideApproval: (action: ApprovalAction) => Promise<Session>;
   fetch?: typeof fetch;
 };
 class BotError extends AppError {
@@ -521,6 +526,7 @@ export class Telegram {
     }
   }
   private async process(signal: AbortSignal) {
+    await this.notifyPendingApproval();
     for (const item of this.state.inbox) {
       signal.throwIfAborted();
       if (item.status === 'done') continue;
@@ -561,11 +567,33 @@ export class Telegram {
           if (item.date < Math.floor(Date.now() / 1000) - 300)
             throw new AppError('TELEGRAM_EXPIRED', '요청이 만료되었습니다. 다시 보내세요.');
           const text = item.text.trim();
+          if (text === '/approve' || text === '/deny') {
+            if (!this.state.config.allowBuild)
+              throw new AppError(
+                'TELEGRAM_BUILD',
+                'Telegram 설정에서 Build 원격 요청을 먼저 허용하세요.',
+              );
+            const approval = this.pendingApproval(session);
+            if (!approval)
+              throw new AppError('TELEGRAM_APPROVAL', '대기 중인 승인 요청이 없습니다.');
+            await this.options.decideApproval({
+              sessionId: session.id,
+              expectedVersion: session.version,
+              activityId: approval.id,
+              action: text === '/approve' ? 'approve' : 'reject',
+            });
+            item.status = 'done';
+            this.enqueue(text === '/approve' ? '승인했습니다.' : '거절했습니다.');
+            await this.save();
+            continue;
+          }
           if (text === '/status') {
+            const approval = this.pendingApproval(session);
             this.enqueue(
               session.title +
                 '\n' +
                 (session.run?.status ?? 'idle') +
+                (approval ? '\n승인 대기: ' + this.approvalSummary(approval) : '') +
                 '\n' +
                 (session.messages.filter((m) => m.role === 'assistant').at(-1)?.content ?? ''),
             );
@@ -587,7 +615,7 @@ export class Telegram {
           }
           if (text === '/help' || text === '/start') {
             this.enqueue(
-              '/ask 메시지 — 연결한 대화에 요청\n/status — 현재 상태와 답변\n/plan — 목표와 할 일\n/stop — 현재 실행 중지\n일반 텍스트도 요청으로 전달됩니다. 파일 적용과 설정 변경은 데스크톱에서 진행하세요.',
+              '/ask 메시지 — 연결한 대화에 요청\n/status — 현재 상태와 답변\n/plan — 목표와 할 일\n/approve — 대기 중인 작업 승인\n/deny — 대기 중인 작업 거절\n/stop — 현재 실행 중지\n일반 텍스트도 요청으로 전달됩니다. 원격 승인은 Telegram 설정에서 Build 요청을 허용해야 합니다.',
             );
             item.status = 'done';
             await this.save();
@@ -660,6 +688,39 @@ export class Telegram {
         await this.save();
       }
     }
+  }
+  private pendingApproval(session: Session): Activity | undefined {
+    return session.messages
+      .flatMap((message) => message.activities ?? [])
+      .findLast((activity) => activity.approval?.status === 'pending');
+  }
+  private approvalSummary(activity: Activity) {
+    const approval = activity.approval!;
+    return approval.kind + ' · ' + approval.target + '\n사유: ' + approval.reason;
+  }
+  private async notifyPendingApproval() {
+    if (
+      !this.state.owner ||
+      !this.state.config.transmissionConsent ||
+      !this.state.config.allowBuild ||
+      !this.state.config.sessionId
+    )
+      return;
+    let session: Session;
+    try {
+      session = await this.options.store.session(this.state.config.sessionId);
+    } catch {
+      return;
+    }
+    const approval = this.pendingApproval(session);
+    if (!approval || approval.id === this.state.notifiedApprovalId) return;
+    this.enqueue(
+      '승인이 필요합니다.\n' +
+        this.approvalSummary(approval) +
+        '\n/approve 또는 /deny 로 결정하세요.',
+    );
+    this.state.notifiedApprovalId = approval.id;
+    await this.save();
   }
   private async deliver(signal: AbortSignal) {
     for (const item of this.state.outbox) {

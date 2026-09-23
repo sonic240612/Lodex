@@ -608,15 +608,6 @@ export async function startServer(options: ServerOptions) {
           'MCP 도구 설명과 실행 결과를 OpenRouter로 보내려면 이 대화의 MCP 전송 동의가 필요합니다. 선택을 해제해도 이전 내용은 기록에 남습니다.',
           403,
         );
-      const autonomous =
-        command.type === 'start_autopilot' ||
-        command.type === 'start_goal' ||
-        command.type === 'resume_goal';
-      if (autonomous && session.mcp?.length)
-        throw new AppError(
-          'MCP_AUTOPILOT',
-          'MCP 도구를 선택한 대화는 아직 자동 실행을 지원하지 않습니다. MCP 선택을 해제하고 실행하세요.',
-        );
       if (session.mode !== 'plan')
         mcpSelections = selectedMcpTools(session, await store.registeredMcp());
       const registrations = await store.registeredSkills();
@@ -873,6 +864,7 @@ export async function startServer(options: ServerOptions) {
     loadToken: resolveTelegramToken,
     tokenSource: () => telegramTokenSource,
     dispatch: (value) => serial(() => command(value)),
+    decideApproval: (value) => serial(() => reviewApproval(value)),
     ...(options.telegramFetch ? { fetch: options.telegramFetch } : {}),
   });
   const server = createServer(async (request, response) => {

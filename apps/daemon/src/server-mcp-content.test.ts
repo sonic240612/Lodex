@@ -67,7 +67,17 @@ async function fixture({ cloud = false }: { cloud?: boolean } = {}) {
           },
         ],
       };
-    if (message.method === 'resources/templates/list') result = { resourceTemplates: [] };
+    if (message.method === 'resources/templates/list')
+      result = {
+        resourceTemplates: [
+          {
+            uriTemplate: 'fixture://reference/{topic}',
+            name: 'Topic reference',
+            description: 'Reference selected by topic',
+            mimeType: 'text/plain',
+          },
+        ],
+      };
     if (message.method === 'prompts/list')
       result = {
         prompts: [
@@ -80,7 +90,16 @@ async function fixture({ cloud = false }: { cloud?: boolean } = {}) {
       };
     if (message.method === 'resources/read')
       result = {
-        contents: [{ uri: 'fixture://reference', mimeType: 'text/plain', text: data.text }],
+        contents: [
+          {
+            uri: message.params?.uri,
+            mimeType: 'text/plain',
+            text:
+              message.params?.uri === 'fixture://reference'
+                ? data.text
+                : `TEMPLATE_FIXTURE: ${message.params?.uri}`,
+          },
+        ],
       };
     if (message.method === 'prompts/get')
       result = {
@@ -172,19 +191,29 @@ async function fixture({ cloud = false }: { cloud?: boolean } = {}) {
       }),
     )
   ).session;
-  const input = (kind: 'resource' | 'prompt' = 'resource'): McpContentInput => ({
+  const input = (
+    kind: 'resource' | 'resource_template' | 'prompt' = 'resource',
+  ): McpContentInput => ({
     serverId: registration.id,
     serverRevision: registration.revision,
     kind,
     entryKey:
-      kind === 'resource' ? registration.resources![0]!.uri : registration.prompts![0]!.name,
+      kind === 'resource'
+        ? registration.resources![0]!.uri
+        : kind === 'resource_template'
+          ? registration.resourceTemplates![0]!.uriTemplate
+          : registration.prompts![0]!.name,
     entryRevision:
       kind === 'resource'
         ? registration.resources![0]!.revision
-        : registration.prompts![0]!.revision,
-    ...(kind === 'prompt' ? { arguments: { topic: 'selected code' } } : {}),
+        : kind === 'resource_template'
+          ? registration.resourceTemplates![0]!.revision
+          : registration.prompts![0]!.revision,
+    ...(kind === 'prompt' || kind === 'resource_template'
+      ? { arguments: { topic: 'selected code' } }
+      : {}),
   });
-  const preview = async (kind: 'resource' | 'prompt' = 'resource') => {
+  const preview = async (kind: 'resource' | 'resource_template' | 'prompt' = 'resource') => {
     const response = await request('/v1/mcp/content', input(kind));
     expect(response.status).toBe(200);
     return (await response.json()) as McpContentPreview;
@@ -312,7 +341,8 @@ describe('MCP reviewed content API', () => {
     const preview = await f.preview('prompt');
     expect(preview.text).toContain('PROMPT_FIXTURE: selected code');
     expect(preview.text).toContain('[assistant]');
-    expect((await f.attach(preview.id)).status).toBe(200);
+    const attached = await f.attach(preview.id);
+    expect({ status: attached.status, body: await attached.json() }).toMatchObject({ status: 200 });
     const requestsBeforeSend = f.rpc.length;
     expect((await f.send()).status).toBe(200);
     const saved = await f.completed();
@@ -333,6 +363,25 @@ describe('MCP reviewed content API', () => {
     ).toBe(false);
     expect(model.messages.filter((message) => message.role === 'assistant')).toEqual([]);
     expect(model.tools?.some((tool) => tool.function.name.startsWith('mcp_'))).toBe(false);
+  });
+
+  it('expands, previews and attaches a reviewed text resource template', async () => {
+    const f = await fixture();
+    const preview = await f.preview('resource_template');
+    expect(preview).toMatchObject({
+      kind: 'resource_template',
+      entryKey: 'fixture://reference/{topic}',
+      resolvedUri: 'fixture://reference/selected%20code',
+    });
+    expect(preview.text).toContain('fixture://reference/selected%20code');
+    const attachedTemplate = await f.attach(preview.id);
+    const attachedTemplateBody = await attachedTemplate.json();
+    expect(attachedTemplate.status, JSON.stringify(attachedTemplateBody)).toBe(200);
+    expect((await f.send()).status).toBe(200);
+    await f.completed();
+    expect(
+      f.modelRequests[0]?.messages.some((message) => message.content.includes(preview.text)),
+    ).toBe(true);
   });
 
   it('requires cloud consent to attach and remembers transmitted content after removal', async () => {

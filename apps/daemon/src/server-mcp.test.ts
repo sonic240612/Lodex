@@ -19,7 +19,13 @@ afterEach(async () => {
   for (const fn of cleanup.splice(0).reverse()) await fn();
 });
 async function fixture(
-  options: { drop?: boolean; hold?: boolean; cloud?: boolean; plain?: boolean } = {},
+  options: {
+    drop?: boolean;
+    hold?: boolean;
+    cloud?: boolean;
+    plain?: boolean;
+    goal?: boolean;
+  } = {},
 ) {
   let calls = 0,
     connections = 0;
@@ -97,13 +103,23 @@ async function fixture(
       requests.push(structuredClone(request));
       const name = request.tools?.find((tool) => tool.function.name.startsWith('mcp_'))?.function
         .name;
-      if (name && !options.plain && !request.messages.some((message) => message.role === 'tool')) {
+      const hasToolResult = request.messages.some((message) => message.role === 'tool');
+      if (name && !options.plain && !hasToolResult) {
         yield {
           type: 'tool_call_delta',
           index: 0,
           id: 'fixture-call',
           name,
           arguments: '{"text":"MCP result fixture"}',
+        };
+        yield { type: 'finished', reason: 'tool_calls' };
+      } else if (options.goal && hasToolResult) {
+        yield {
+          type: 'tool_call_delta',
+          index: 0,
+          id: 'fixture-complete-goal',
+          name: 'complete_goal',
+          arguments: JSON.stringify({ evidence: 'The selected MCP read completed successfully.' }),
         };
         yield { type: 'finished', reason: 'tool_calls' };
       } else {
@@ -252,6 +268,29 @@ describe('MCP session integration', () => {
         }),
       ),
     ).rejects.toMatchObject({ code: 'MCP_CHANGED' });
+  });
+  it('runs selected read-only MCP tools during a goal and completes without replay', async () => {
+    const f = await fixture({ goal: true });
+    const response = await f.request(
+      '/v1/commands',
+      makeCommand({
+        type: 'start_goal',
+        sessionId: f.session.id,
+        expectedVersion: f.session.version,
+        goal: 'Read the selected MCP source and finish with evidence',
+        limits: {},
+      }),
+    );
+    expect(response.status).toBe(200);
+    await expect
+      .poll(async () => (await f.store.session(f.session.id)).run?.status)
+      .toBe('completed');
+    expect(f.calls()).toBe(1);
+    const session = await f.store.session(f.session.id);
+    expect(session.autopilot).toMatchObject({ status: 'completed', goalDriven: true });
+    expect(session.messages.at(-1)?.activities?.find((a) => a.mcpCall)?.mcpCall?.status).toBe(
+      'completed',
+    );
   });
   it('does not start MCP in Plan even for readOnlyHint tools', async () => {
     const f = await fixture();
