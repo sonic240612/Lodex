@@ -146,3 +146,20 @@ export interface RuntimeSnapshot {
   resources: RuntimeResources;
   downloads: ModelDownload[];
 }
+
+export const backupSettingsSchema = z.strictObject({
+  automatic: z.boolean().default(true),
+  retentionCount: z.number().int().min(1).max(100).default(10),
+  retentionDays: z.number().int().min(1).max(3650).default(30),
+});
+export type BackupSettings = z.infer<typeof backupSettingsSchema>;
+export interface BackupRecord {
+  name: string;
+  createdAt: string;
+  bytes: number;
+  sha256: string;
+}
+export interface BackupSnapshot {
+  settings: BackupSettings;
+  backups: BackupRecord[];
+}

@@ -13,7 +13,12 @@ use std::{
     },
     time::Duration,
 };
-use tauri::{ipc::Channel, Manager, State};
+use tauri::{
+    ipc::Channel,
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Manager, State,
+};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
@@ -200,6 +205,11 @@ fn route_allowed(method: &str, path: &str) -> bool {
         | ("POST", "/v1/runtime/action")
         | ("POST", "/v1/runtime/downloads")
         | ("POST", "/v1/runtime/downloads/action")
+        | ("GET", "/v1/backups")
+        | ("POST", "/v1/backups/create")
+        | ("POST", "/v1/backups/export")
+        | ("POST", "/v1/backups/settings")
+        | ("POST", "/v1/backups/delete")
         | ("POST", "/v1/skills/register")
         | ("POST", "/v1/skills/remove")
         | ("POST", "/v1/mcp/import")
@@ -282,6 +292,68 @@ async fn pick_runtime_file(app: tauri::AppHandle, kind: String) -> Result<Option
     })
     .await
     .map_err(|_| "파일 선택 창을 열지 못했습니다.".to_string())?
+}
+#[tauri::command]
+async fn export_backup(
+    app: tauri::AppHandle,
+    state: State<'_, Bridge>,
+) -> Result<Option<Value>, String> {
+    let (port, token) = state.connection()?;
+    let response = state
+        .client
+        .post(format!("http://127.0.0.1:{}/v1/backups/export", port))
+        .bearer_auth(token)
+        .json(&json!({}))
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|_| "백업 파일을 만들지 못했습니다.")?;
+    if !response.status().is_success() {
+        return Err("백업 파일을 만들지 못했습니다.".into());
+    }
+    let value: Value = response
+        .json()
+        .await
+        .map_err(|_| "잘못된 백업 응답입니다.")?;
+    let source = value["path"].as_str().ok_or("백업 파일 경로가 없습니다.")?;
+    let name = value["backup"]["name"]
+        .as_str()
+        .ok_or("백업 파일 이름이 없습니다.")?
+        .to_owned();
+    let data_dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|_| "앱 데이터 폴더를 확인하지 못했습니다.")?;
+    let root = dunce::canonicalize(data_dir.join("backups"))
+        .map_err(|_| "백업 폴더를 확인하지 못했습니다.")?;
+    let source = dunce::canonicalize(source).map_err(|_| "백업 파일을 확인하지 못했습니다.")?;
+    if !source.starts_with(&root) || !source.is_file() {
+        return Err("허용되지 않은 백업 파일 경로입니다.".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let selected = app
+            .dialog()
+            .file()
+            .set_title("Lodex 데이터 내보내기")
+            .set_file_name(name)
+            .add_filter("Lodex backup", &["json"])
+            .blocking_save_file();
+        let Some(selected) = selected else {
+            return Ok(None);
+        };
+        let destination = selected
+            .into_path()
+            .map_err(|_| "로컬 파일 경로가 필요합니다.".to_string())?;
+        if destination != source {
+            std::fs::copy(&source, &destination)
+                .map_err(|_| "선택한 위치에 백업을 복사하지 못했습니다.".to_string())?;
+        }
+        Ok(Some(json!({
+            "path": dunce::simplified(&destination).to_string_lossy()
+        })))
+    })
+    .await
+    .map_err(|_| "파일 저장 창을 열지 못했습니다.".to_string())?
 }
 #[tauri::command]
 async fn daemon_request(
@@ -520,16 +592,49 @@ fn disconnect_events(state: State<'_, Bridge>) {
     state.stream_epoch.fetch_add(1, Ordering::SeqCst);
 }
 
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
 fn main() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+            show_main_window(app);
         }))
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "tray_show" => show_main_window(app),
+            "tray_quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|app, event| {
+            if matches!(
+                event,
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                } | TrayIconEvent::DoubleClick {
+                    button: MouseButton::Left,
+                    ..
+                }
+            ) {
+                show_main_window(app);
+            }
+        })
+        .on_window_event(|window, event| {
+            if window.label() == "main" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .setup(|app| {
             let daemon = start_daemon(app)?;
             app.manage(Bridge {
@@ -541,12 +646,24 @@ fn main() {
                 stream_epoch: AtomicU64::new(0),
                 secrets: Mutex::new(()),
             });
+            let show = MenuItem::with_id(app, "tray_show", "Lodex 열기", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "tray_quit", "완전히 종료", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show, &quit])?;
+            let mut tray = TrayIconBuilder::with_id("lodex")
+                .tooltip("Lodex")
+                .menu(&menu)
+                .show_menu_on_left_click(false);
+            if let Some(icon) = app.default_window_icon() {
+                tray = tray.icon(icon.clone());
+            }
+            tray.build(app)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             daemon_request,
             pick_project_folder,
             pick_runtime_file,
+            export_backup,
             open_external,
             set_openrouter_key,
             set_telegram_token,
@@ -555,12 +672,15 @@ fn main() {
         ])
         .build(tauri::generate_context!())
         .expect("Lodex could not start");
-    app.run(|handle, event| {
-        if matches!(event, tauri::RunEvent::Exit) {
+    app.run(|handle, event| match event {
+        tauri::RunEvent::Exit => {
             if let Some(bridge) = handle.try_state::<Bridge>() {
                 bridge.stop();
             }
         }
+        #[cfg(target_os = "macos")]
+        tauri::RunEvent::Reopen { .. } => show_main_window(handle),
+        _ => {}
     });
 }
 #[cfg(test)]
@@ -584,6 +704,8 @@ mod tests {
     fn renderer_cannot_access_secret_or_arbitrary_url() {
         assert!(route_allowed("GET", "/v1/state"));
         assert!(route_allowed("POST", "/v1/commands"));
+        assert!(route_allowed("GET", "/v1/backups"));
+        assert!(route_allowed("POST", "/v1/backups/export"));
         assert!(!route_allowed("PUT", "/v1/secret"));
         assert!(!route_allowed("GET", "https://example.com"));
         assert!(!route_allowed("POST", "/v1/models?provider=openrouter"));

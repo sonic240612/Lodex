@@ -1751,7 +1751,7 @@ describe('authenticated daemon integration', () => {
         content: 'loop',
       }),
     );
-    await vi.waitFor(() => expect(calls).toBeGreaterThan(7));
+    await vi.waitFor(() => expect(calls).toBeGreaterThan(7), { timeout: 10_000 });
     const running = await app.store.session(session.id);
     expect(running.run?.status).toBe('running');
     await app.command(

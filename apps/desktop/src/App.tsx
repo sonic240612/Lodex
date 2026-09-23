@@ -51,6 +51,9 @@ const RoutingSettings = lazy(() =>
 const TelegramSettings = lazy(() =>
   import('./TelegramSettings').then((module) => ({ default: module.TelegramSettings })),
 );
+const DataManager = lazy(() =>
+  import('./DataManager').then((module) => ({ default: module.DataManager })),
+);
 const WorktreeManager = lazy(() =>
   import('./WorktreeManager').then((module) => ({ default: module.WorktreeManager })),
 );
@@ -74,6 +77,7 @@ export function App() {
   const [worktreeManager, setWorktreeManager] = useState(false);
   const [skillManager, setSkillManager] = useState(false);
   const [mcpManager, setMcpManager] = useState(false);
+  const [dataManager, setDataManager] = useState(false);
   const [projectDialog, setProjectDialog] = useState(false);
   const [permissionMenu, setPermissionMenu] = useState(false);
   const [confirmFullAccess, setConfirmFullAccess] = useState(false);
@@ -568,6 +572,10 @@ export function App() {
         <button className="nav-item" onClick={() => setWorktreeManager(true)}>
           <Icon name="folder" size={18} />
           Worktree
+        </button>
+        <button className="nav-item" onClick={() => setDataManager(true)}>
+          <Icon name="settings" size={18} />
+          데이터와 백업
         </button>
         <div className="history-caption">
           <span>프로젝트</span>
@@ -1274,6 +1282,11 @@ export function App() {
             selectedId={session?.id ?? null}
             onClose={() => setTelegramSettings(false)}
           />
+        </Suspense>
+      )}
+      {dataManager && (
+        <Suspense fallback={null}>
+          <DataManager onClose={() => setDataManager(false)} />
         </Suspense>
       )}
       {worktreeManager && (

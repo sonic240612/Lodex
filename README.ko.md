@@ -20,9 +20,11 @@
 - Agent Skills·Codex·Claude Code·pi·OpenCode·OpenClaw·Hermes 형식의 로컬 `SKILL.md` 가져오기
 - stdio·Streamable HTTP MCP, 도구 선택, 리소스·프롬프트 미리보기와 첨부, OAuth PKCE 로그인
 - 원격 메시지·상태·계획 조회·중지·허용된 Build 작업을 위한 Telegram 봇
+- 창을 닫아도 데몬·Telegram·진행 중인 에이전트를 유지하는 시스템 트레이 백그라운드 실행
 - Eco 모드, 자동 빠른 압축, 대형 도구 결과의 로컬 ObservationPack 보관과 선택적 재호출
 - LLM 기반 **컨텍스트 압축**과 모델 호출 없는 **빠른 압축**. 전체 대화는 SQLite에 유지
 - Markdown/GFM, 접을 수 있는 thinking·도구 활동, 활성 컨텍스트·속도 표시, 최신 메시지 이동 버튼
+- 비밀 정보를 제외한 일별·수동 JSON 백업, 개수/기간 보존 정책, 네이티브 저장 창 내보내기
 
 ## 시작하기
 
@@ -99,6 +101,12 @@ MCP 설정은 일반적인 `mcpServers` JSON을 받습니다. 선택한 도구, 
 [BotFather](https://core.telegram.org/bots/tutorial#obtain-your-bot-token)에서 봇을 만든 뒤 Telegram 설정에 토큰을 입력하거나 `.env`에 `TELEGRAM_BOT_TOKEN`을 설정하세요. 대화를 선택하고 전송을 허용한 뒤 연결 ID를 승인합니다.
 
 명령: `/ask`, `/status`, `/plan`, `/approve`, `/deny`, `/stop`. 원격 승인은 Telegram 설정에서 Build 접근을 허용해야 합니다. Lodex가 실행 중이어야 합니다. 결과를 확인하지 못한 전달은 기록만 남기고 자동 재시도하지 않습니다.
+
+데스크톱 창을 닫아도 Lodex는 시스템 트레이에서 계속 실행됩니다. 데몬과 Telegram 연결을 종료하려면 트레이 메뉴의 **완전히 종료**를 사용하세요.
+
+## 데이터
+
+데이터 설정에서 대화·프로젝트·계획·모델 프로필·Skills·MCP 등록을 백업하거나 다른 위치로 내보낼 수 있습니다. API 키, OAuth 토큰, Telegram 봇 토큰과 모델 파일은 제외됩니다.
 
 ## 패키지
 

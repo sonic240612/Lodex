@@ -20,9 +20,11 @@ Desktop agent harness for local LLMs and OpenRouter.
 - Import local `SKILL.md` folders using Agent Skills, Codex, Claude Code, pi, OpenCode, OpenClaw, or Hermes metadata.
 - Connect stdio and Streamable HTTP MCP servers, select tools, preview resources and prompts, attach reviewed content, and sign in with OAuth PKCE.
 - Pair a Telegram bot for remote messages, status, plan inspection, cancellation, and approved Build access.
+- Keep the daemon, Telegram, and active agent runs alive when the window is closed; reopen or quit Lodex from the system tray.
 - Use Eco mode, automatic fast compaction, local ObservationPack archives, and on-demand recall for large tool results.
 - Choose LLM-based **Context compaction** or deterministic **Quick compaction**. Full transcripts stay in SQLite.
 - View Markdown/GFM messages, collapsible thinking and tool activity, active context usage, generation metrics, and a jump-to-latest button.
+- Create daily or manual secret-free JSON backups, apply count/age retention, and export them through the native save dialog.
 
 ## Quick start
 
@@ -99,6 +101,12 @@ MCP configuration accepts common `mcpServers` JSON. Lodex supports selected tool
 Create a bot with [BotFather](https://core.telegram.org/bots/tutorial#obtain-your-bot-token), enter the token in Telegram settings or set `TELEGRAM_BOT_TOKEN` in `.env`, select a conversation, enable transmission, and approve the pairing IDs.
 
 Commands: `/ask`, `/status`, `/plan`, `/approve`, `/deny`, `/stop`. Remote approvals require Build access in Telegram settings. Lodex must remain running. Unknown delivery outcomes are recorded and never retried automatically.
+
+Closing the desktop window keeps Lodex running in the system tray. Use **Quit Lodex** from the tray menu to stop the daemon and Telegram connection.
+
+## Data
+
+Data settings can create or export backups containing conversations, projects, plans, model profiles, Skills, and MCP registrations. API keys, OAuth tokens, Telegram bot tokens, and model files are excluded.
 
 ## Packages
 

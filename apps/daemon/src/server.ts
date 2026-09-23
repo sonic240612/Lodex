@@ -35,6 +35,7 @@ import {
   type ModelPricing,
   type Activity,
   telegramConfigSchema,
+  backupSettingsSchema,
 } from '@lodex/contracts';
 import { Store } from '@lodex/storage';
 import { ChatCompletionProvider, DemoProvider } from '@lodex/providers';
@@ -81,6 +82,7 @@ import { OAuthEnvStore } from './oauth-store';
 import { InferenceScheduler } from './inference-scheduler';
 import { subagentTool } from './subagents';
 import { isObservationMarker, ObservationPack, observationRecallTool } from './observations';
+import { Backups } from './backups';
 import { z } from 'zod';
 declare const __dirname: string;
 const skillRegistrationInput = z
@@ -117,6 +119,7 @@ interface ServerOptions {
   mcpSupervisorPath?: string;
   modelRoot?: string;
   modelFetch?: typeof fetch;
+  backupRoot?: string;
 }
 async function readJson(request: IncomingMessage): Promise<unknown> {
   if (!request.headers['content-type']?.startsWith('application/json'))
@@ -197,6 +200,40 @@ export async function startServer(options: ServerOptions) {
       ...(options.modelFetch ? { fetch: options.modelFetch } : {}),
     },
   );
+  const backups = options.backupRoot
+    ? await Backups.open(options.backupRoot, async () => {
+        const [state, profiles, settings, skills, mcp, telegramState, worktreeState] =
+          await Promise.all([
+            store.snapshot(),
+            store.localProfiles(),
+            store.runtimeSettings(),
+            store.registeredSkills(),
+            store.registeredMcp(),
+            store.integration('telegram'),
+            store.integration('worktrees'),
+          ]);
+        const telegramDocument = telegramState?.document as
+          | { config?: unknown; bot?: unknown; owner?: unknown }
+          | undefined;
+        return {
+          state,
+          profiles,
+          runtimeSettings: settings,
+          skills,
+          mcp,
+          integrations: {
+            telegram: telegramDocument
+              ? {
+                  config: telegramDocument.config,
+                  bot: telegramDocument.bot,
+                  owner: telegramDocument.owner,
+                }
+              : null,
+            worktrees: worktreeState?.document ?? null,
+          },
+        };
+      })
+    : undefined;
   let openrouterKey = options.openrouterKey ?? null;
   function validateInferenceConfig(config: ModelConfig) {
     if (config.provider !== 'demo' && !config.model)
@@ -1196,6 +1233,25 @@ export async function startServer(options: ServerOptions) {
         );
       } else if (request.method === 'GET' && url.pathname === '/v1/runtime') {
         json(response, 200, await runtime.snapshot());
+      } else if (request.method === 'GET' && url.pathname === '/v1/backups') {
+        if (!backups) throw new AppError('BACKUP_DISABLED', '백업 폴더가 설정되지 않았습니다.', 503);
+        json(response, 200, await backups.snapshot());
+      } else if (request.method === 'POST' && url.pathname === '/v1/backups/create') {
+        if (!backups) throw new AppError('BACKUP_DISABLED', '백업 폴더가 설정되지 않았습니다.', 503);
+        json(response, 201, await backups.create('manual'));
+      } else if (request.method === 'POST' && url.pathname === '/v1/backups/export') {
+        if (!backups) throw new AppError('BACKUP_DISABLED', '백업 폴더가 설정되지 않았습니다.', 503);
+        json(response, 201, await backups.create('export'));
+      } else if (request.method === 'POST' && url.pathname === '/v1/backups/settings') {
+        if (!backups) throw new AppError('BACKUP_DISABLED', '백업 폴더가 설정되지 않았습니다.', 503);
+        const parsed = backupSettingsSchema.safeParse(await readJson(request));
+        if (!parsed.success) throw new AppError('BACKUP_SETTINGS', '백업 보존 설정이 올바르지 않습니다.');
+        json(response, 200, await backups.configure(parsed.data));
+      } else if (request.method === 'POST' && url.pathname === '/v1/backups/delete') {
+        if (!backups) throw new AppError('BACKUP_DISABLED', '백업 폴더가 설정되지 않았습니다.', 503);
+        const parsed = z.strictObject({ name: z.string().min(1).max(200) }).safeParse(await readJson(request));
+        if (!parsed.success) throw new AppError('BACKUP_NAME', '백업 파일 이름이 올바르지 않습니다.');
+        json(response, 200, await backups.remove(parsed.data.name));
       } else if (request.method === 'POST' && url.pathname === '/v1/runtime/profiles') {
         const input = localProfileInputSchema.safeParse(await readJson(request));
         if (!input.success)
@@ -1428,6 +1484,7 @@ export async function startServer(options: ServerOptions) {
       await telegram.close();
       await worktrees?.close();
       await oauth?.close();
+      await backups?.close();
       for (const run of active.values()) run.abort.abort();
       await runtime.close();
       await queue;
