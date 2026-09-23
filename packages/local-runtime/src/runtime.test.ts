@@ -154,6 +154,7 @@ describe('managed local engines', () => {
       u32Entry('qwen3.attention.key_length', 128),
       u32Entry('qwen3.attention.value_length', 128),
       stringEntry('tokenizer.chat_template', '{% for message in messages %}'),
+      stringEntry('tokenizer.chat_template.tool_use', '{% for tool in tools %}'),
     ];
     const header = Buffer.alloc(24);
     header.write('GGUF');
@@ -180,6 +181,7 @@ describe('managed local engines', () => {
           'qwen3.attention.key_length': 128,
           'qwen3.attention.value_length': 128,
           'tokenizer.chat_template': '{% for message in messages %}',
+          'tokenizer.chat_template.tool_use': '{% for tool in tools %}',
         },
       });
     } finally {
@@ -191,6 +193,7 @@ describe('managed local engines', () => {
       nativeContextSize: 131072,
       layerCount: 28,
       embeddedChatTemplate: true,
+      embeddedToolTemplate: true,
       estimatedKvCacheMb: 7168,
       recommendedVramReservationMb: 7937,
       recommendedSettings: { contextSize: 131072, gpuLayers: 'all', kvOffload: true },

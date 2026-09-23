@@ -274,6 +274,7 @@ export async function inspectGguf(handle: FileHandle, size: number): Promise<Ggu
       key === 'general.architecture' ||
       key === 'tokenizer.ggml.model' ||
       key === 'tokenizer.chat_template' ||
+      key === 'tokenizer.chat_template.tool_use' ||
       key.endsWith('.context_length') ||
       wantedSuffixes.some((suffix) => key.endsWith(suffix));
     if (!wanted || type === 9) {
@@ -307,6 +308,7 @@ function normalizedMetadata(metadata: GgufMetadata) {
         ? metadata.values['tokenizer.ggml.model']
         : undefined,
     embeddedChatTemplate: typeof metadata.values['tokenizer.chat_template'] === 'string',
+    embeddedToolTemplate: typeof metadata.values['tokenizer.chat_template.tool_use'] === 'string',
     nativeContextSize: value('.context_length'),
     layerCount: value('.block_count'),
     embeddingLength: value('.embedding_length'),
@@ -409,6 +411,7 @@ export async function inspectLocalModel(
     ...(normalized.nativeContextSize ? { nativeContextSize: normalized.nativeContextSize } : {}),
     ...(normalized.layerCount ? { layerCount: normalized.layerCount } : {}),
     embeddedChatTemplate: normalized.embeddedChatTemplate,
+    embeddedToolTemplate: normalized.embeddedToolTemplate,
     recommendedSettings,
     recommendedVramReservationMb: gpuAvailable
       ? Math.min(Math.max(0, vramBudgetMb), Math.max(1024, estimatedTotalMb))
@@ -456,6 +459,7 @@ export async function inspectProfile(input: LocalProfileInput): Promise<LocalPro
     ...(normalized.architecture ? { modelArchitecture: normalized.architecture } : {}),
     ...(normalized.tokenizerModel ? { tokenizerModel: normalized.tokenizerModel } : {}),
     ...(normalized.embeddedChatTemplate ? { embeddedChatTemplate: true } : {}),
+    ...(normalized.embeddedToolTemplate ? { embeddedToolTemplate: true } : {}),
     ...(normalized.nativeContextSize ? { nativeContextSize: normalized.nativeContextSize } : {}),
   };
   engineArguments(profile, 1, 'probe'); // Reject unsupported/reserved options before persisting.

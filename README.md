@@ -43,7 +43,7 @@ On Windows, double-click `run-lodex.bat`. It installs missing npm packages and s
 
 ### Managed local model
 
-Open the model manager to download a public Hugging Face GGUF file or select one already on disk. Lodex reads model architecture, layer and attention dimensions, native context, tokenizer, and embedded chat-template metadata. It can fill settings from that metadata and the configured VRAM budget before registration. Download history survives app restarts. VRAM values are scheduler reservations, not hard GPU memory limits.
+Open the model manager to download a public Hugging Face GGUF file or select one already on disk. Lodex reads model architecture, layer and attention dimensions, native context, tokenizer, and embedded default and `tool_use` chat-template metadata. It can fill settings from that metadata and the configured VRAM budget before registration. Download history survives app restarts. VRAM values are scheduler reservations, not hard GPU memory limits.
 
 ### External llama-server
 

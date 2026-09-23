@@ -55,6 +55,7 @@ export interface LocalProfile extends Omit<LocalProfileInput, 'id' | 'expectedVe
   tokenizerModel?: string;
   nativeContextSize?: number;
   embeddedChatTemplate?: boolean;
+  embeddedToolTemplate?: boolean;
 }
 export const runtimeSettingsSchema = z
   .strictObject({
@@ -129,6 +130,7 @@ export interface ModelInspection {
   nativeContextSize?: number;
   layerCount?: number;
   embeddedChatTemplate: boolean;
+  embeddedToolTemplate: boolean;
   recommendedSettings: EngineSettings;
   recommendedVramReservationMb: number;
   estimatedKvCacheMb: number | null;

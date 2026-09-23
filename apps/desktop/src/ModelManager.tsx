@@ -560,6 +560,12 @@ export function ModelManager({
                       : profile.embeddedChatTemplate
                         ? 'GGUF 내장'
                         : 'llama.cpp 자동 판정'}
+                    {' · '}Tool template{' '}
+                    {profile.settings.chatTemplate
+                      ? '사용자 지정에서 판정'
+                      : profile.embeddedToolTemplate
+                        ? 'GGUF 내장'
+                        : '별도 메타데이터 없음'}
                   </p>
                   <p>
                     GGUF v{profile.ggufVersion} 헤더 확인 · 전체 파일 무결성 검사는 아직 수행하지
@@ -683,6 +689,8 @@ export function ModelManager({
                 {inspection.estimatedKvCacheMb === null
                   ? '메타데이터 부족'
                   : `${inspection.estimatedKvCacheMb.toLocaleString()} MiB`}
+                {' · '}Tool template{' '}
+                {inspection.embeddedToolTemplate ? 'GGUF 내장' : '별도 메타데이터 없음'}
                 <br />
                 <small>{inspection.recommendation}</small>
               </p>

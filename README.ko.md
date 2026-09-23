@@ -43,7 +43,7 @@ Windows에서는 `run-lodex.bat`를 더블클릭하면 빠진 npm 패키지를 �
 
 ### 관리형 로컬 모델
 
-모델 관리에서 공개 Hugging Face GGUF를 받거나 디스크의 파일을 선택하세요. 모델 아키텍처·레이어와 attention 크기·원래 컨텍스트·tokenizer·내장 chat template을 읽고, 설정한 VRAM 예산에 맞는 실행 설정을 등록 전에 채울 수 있습니다. 다운로드 이력은 앱을 다시 시작해도 유지됩니다. VRAM 값은 스케줄러 예약량이며 실제 GPU 메모리의 강제 제한이 아닙니다.
+모델 관리에서 공개 Hugging Face GGUF를 받거나 디스크의 파일을 선택하세요. 모델 아키텍처·레이어와 attention 크기·원래 컨텍스트·tokenizer·내장 기본 및 `tool_use` chat template을 읽고, 설정한 VRAM 예산에 맞는 실행 설정을 등록 전에 채울 수 있습니다. 다운로드 이력은 앱을 다시 시작해도 유지됩니다. VRAM 값은 스케줄러 예약량이며 실제 GPU 메모리의 강제 제한이 아닙니다.
 
 ### 외부 llama-server
 
