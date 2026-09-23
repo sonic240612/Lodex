@@ -119,6 +119,37 @@ env_vars = ["LODEX_MCP_LOCAL_TOKEN"]
     expect(v1[0]).toMatchObject({ name: 'one', config: { transport: 'http' }, issues: [] });
   });
 
+  it('preserves legacy SSE endpoints used by older agent configurations', () => {
+    const values = importMcpConfigurations(
+      JSON.stringify({
+        mcpServers: {
+          legacy: {
+            type: 'sse',
+            url: 'https://example.com/events',
+            headers: { Authorization: 'Bearer ${LODEX_MCP_LEGACY}' },
+          },
+        },
+      }),
+    );
+
+    expect(values).toEqual([
+      {
+        name: 'legacy',
+        config: {
+          name: 'legacy',
+          transport: 'sse',
+          url: 'https://example.com/events',
+          headers: {
+            Authorization: { secretRef: 'LODEX_MCP_LEGACY', prefix: 'Bearer ' },
+          },
+          protocol: 'auto',
+        },
+        issues: [],
+        warnings: [],
+      },
+    ]);
+  });
+
   it('does not return inline credentials and does not silently drop unsupported settings', () => {
     for (const source of [
       { url: 'https://example.com/mcp', headers: { Authorization: 'private-key-fixture' } },

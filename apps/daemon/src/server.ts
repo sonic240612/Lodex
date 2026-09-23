@@ -180,7 +180,7 @@ export async function startServer(options: ServerOptions) {
     config: McpConfig,
     signal: AbortSignal,
   ): Promise<string | undefined> => {
-    if (config.transport !== 'http' || !config.oauth) return undefined;
+    if (config.transport === 'stdio' || !config.oauth) return undefined;
     const token = await requireOAuth().accessToken(
       { resourceUrl: config.url, clientId: config.oauth.clientId },
       signal,
@@ -1329,7 +1329,7 @@ export async function startServer(options: ServerOptions) {
             (await store.registeredMcp())
               .filter(
                 (server) =>
-                  server.config.transport === 'http' &&
+                  server.config.transport !== 'stdio' &&
                   server.config.oauth?.clientId === input.data.clientId &&
                   new URL(server.config.url).href === new URL(input.data.resourceUrl).href,
               )

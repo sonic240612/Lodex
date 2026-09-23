@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { lstat, realpath } from 'node:fs/promises';
 import {
   Client,
+  SSEClientTransport,
   StreamableHTTPClientTransport,
   UriTemplate,
   type Tool,
@@ -326,12 +327,17 @@ function contentLimit(requested?: number) {
     throw new AppError('MCP_SIZE', 'MCP 텍스트 제한은 1~24576바이트여야 합니다.');
   return requested ?? 24576;
 }
-function endpointFetch(endpoint: string, signal: AbortSignal) {
-  const expected = new URL(endpoint).href;
+function endpointFetch(endpoint: string, signal: AbortSignal, sameOrigin = false) {
+  const expectedUrl = new URL(endpoint),
+    expected = expectedUrl.href;
   const fetcher = localUrlSchema.safeParse(endpoint).success ? privateServerFetch : fetch;
   return async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-    if (new URL(url).href !== expected)
+    const requested = new URL(url);
+    if (
+      requested.href !== expected &&
+      !(sameOrigin && requested.origin === expectedUrl.origin && init?.method === 'POST')
+    )
       throw new AppError('MCP_ENDPOINT', '등록한 MCP endpoint 외부로는 요청하지 않습니다.');
     const response = await fetcher(url, {
       ...init,
@@ -425,7 +431,7 @@ export class McpConnection {
         'MCP 실행 설정 또는 파일이 등록 이후 변경되었습니다. 다시 연결 검사하세요.',
       );
     const { values, secrets } = await resolveReferences(config, options.resolveSecret);
-    if (config.transport === 'http' && 'oauth' in config && config.oauth) {
+    if (config.transport !== 'stdio' && config.oauth) {
       const token = options.oauthToken;
       if (!token || token.length > 8192 || /[\u0000\r\n]/.test(token))
         throw new AppError('MCP_AUTH', 'MCP 서버에 로그인한 뒤 다시 연결하세요.');
@@ -480,17 +486,22 @@ export class McpConnection {
     const transport: Transport =
       config.transport === 'stdio'
         ? new OwnedStdioTransport(config, values, options.supervisorPath)
-        : new StreamableHTTPClientTransport(new URL(config.url), {
-            fetch: endpointFetch(config.url, options.signal),
-            requestInit: { headers: values },
-            onInsufficientScope: 'throw',
-            reconnectionOptions: {
-              maxRetries: 0,
-              initialReconnectionDelay: 1000,
-              maxReconnectionDelay: 1000,
-              reconnectionDelayGrowFactor: 1,
-            },
-          });
+        : config.transport === 'sse'
+          ? new SSEClientTransport(new URL(config.url), {
+              fetch: endpointFetch(config.url, options.signal, true),
+              requestInit: { headers: values },
+            })
+          : new StreamableHTTPClientTransport(new URL(config.url), {
+              fetch: endpointFetch(config.url, options.signal),
+              requestInit: { headers: values },
+              onInsufficientScope: 'throw',
+              reconnectionOptions: {
+                maxRetries: 0,
+                initialReconnectionDelay: 1000,
+                maxReconnectionDelay: 1000,
+                reconnectionDelayGrowFactor: 1,
+              },
+            });
     const abort = () => {
       void transport.close().catch(() => undefined);
     };

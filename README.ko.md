@@ -18,7 +18,7 @@
 - 대화별 **승인 요청**·**대신 승인**·**전체 접근** 권한. Plan 모드는 항상 읽기 전용
 - `/goal` 목표 실행과 선행 작업·완료 기준·검증 명령·예산을 사용하는 저장 계획 실행
 - Agent Skills·Codex·Claude Code·pi·OpenCode·OpenClaw·Hermes 형식의 로컬 `SKILL.md` 가져오기
-- stdio·Streamable HTTP MCP, 도구 선택, 리소스·프롬프트 미리보기와 첨부, Sampling·Elicitation, OAuth PKCE 로그인
+- stdio·Streamable HTTP·기존 SSE MCP, 도구 선택, 리소스·프롬프트 미리보기와 첨부, Sampling·Elicitation, OAuth PKCE 로그인
 - 원격 메시지·상태·계획 조회·중지·허용된 Build 작업을 위한 Telegram 봇
 - 창을 닫아도 데몬·Telegram·진행 중인 에이전트를 유지하는 시스템 트레이 백그라운드 실행
 - Eco 모드, 자동 빠른 압축, 대형 도구 결과의 로컬 ObservationPack 보관과 선택적 재호출
@@ -98,7 +98,7 @@ Docker 실행은 선택 사항이며 이미지·CPU·메모리·네트워크·�
 
 스킬은 메타데이터를 먼저 읽고 모델이 요청할 때만 지침이나 참조 문서를 불러옵니다. 스킬 가져오기는 훅·스크립트·의존성 설치를 실행하지 않습니다.
 
-MCP 설정은 Codex TOML, Claude·pi 계열 `mcpServers` JSON, OpenCode JSONC의 `mcp`·`mcp.servers` 형식을 가져옵니다. 선택한 도구, 정적·매개변수형 텍스트 리소스, 프롬프트, 인자 자동 완성, 카탈로그 변경 검사, 비밀 참조, 사전 등록 공개 클라이언트의 OAuth를 지원합니다. 에이전트 실행 중 서버가 root를 요청하면 선택한 프로젝트 폴더만 제공합니다. 텍스트 전용 MCP Sampling은 선택 모델과 공통 모델·토큰·비용 예산을 사용하고 Lodex 대화·프로젝트 문맥을 전달하지 않습니다. 전체 접근이 아니면 실행 전에 승인을 요청합니다. MCP Elicitation은 실행 중 폼이나 HTTPS 링크를 채팅창 위에 표시하며 제출값은 활동 기록에 저장하지 않습니다. 비밀번호·토큰·인증 정보를 요구하는 폼은 차단합니다. MCP 비밀은 `.env`의 `LODEX_MCP_` 이름으로 저장하세요. OAuth 토큰은 Git에서 제외된 `.env.mcp`에 저장됩니다.
+MCP 설정은 Codex TOML, Claude·pi 계열 `mcpServers` JSON, OpenCode JSONC의 `mcp`·`mcp.servers` 형식과 기존 `type: "sse"` endpoint를 가져옵니다. 선택한 도구, 정적·매개변수형 텍스트 리소스, 프롬프트, 인자 자동 완성, 카탈로그 변경 검사, 비밀 참조, 사전 등록 공개 클라이언트의 OAuth를 지원합니다. 에이전트 실행 중 서버가 root를 요청하면 선택한 프로젝트 폴더만 제공합니다. 텍스트 전용 MCP Sampling은 선택 모델과 공통 모델·토큰·비용 예산을 사용하고 Lodex 대화·프로젝트 문맥을 전달하지 않습니다. 전체 접근이 아니면 실행 전에 승인을 요청합니다. MCP Elicitation은 실행 중 폼이나 HTTPS 링크를 채팅창 위에 표시하며 제출값은 활동 기록에 저장하지 않습니다. 비밀번호·토큰·인증 정보를 요구하는 폼은 차단합니다. MCP 비밀은 `.env`의 `LODEX_MCP_` 이름으로 저장하세요. OAuth 토큰은 Git에서 제외된 `.env.mcp`에 저장됩니다.
 
 ## Telegram
 

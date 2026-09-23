@@ -67,6 +67,34 @@ export const mcpConfigSchema = z.discriminatedUnion('transport', [
       })
       .optional(),
   }),
+  z.strictObject({
+    ...common,
+    transport: z.literal('sse'),
+    url: text.refine((value) => {
+      try {
+        const url = new URL(value);
+        return (
+          !url.username &&
+          !url.password &&
+          !url.search &&
+          !url.hash &&
+          (url.protocol === 'https:' || localUrlSchema.safeParse(value).success)
+        );
+      } catch {
+        return false;
+      }
+    }, 'HTTPS 또는 사설 HTTP SSE endpoint가 필요합니다. URL에 인증 정보·쿼리를 넣지 마세요.'),
+    headers: references.default({}),
+    oauth: z
+      .strictObject({
+        clientId: z
+          .string()
+          .min(1)
+          .max(512)
+          .refine((value) => !/[\0\r\n]/.test(value)),
+      })
+      .optional(),
+  }),
 ]);
 export type McpConfig = z.infer<typeof mcpConfigSchema>;
 export type SecretResolver = (name: string) => Promise<string | null>;

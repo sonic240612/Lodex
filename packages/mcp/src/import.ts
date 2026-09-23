@@ -147,14 +147,13 @@ export function importMcpConfigurations(text: string, defaultCwd?: string): McpI
     const transport =
       rawType === 'local' || rawType === 'stdio'
         ? 'stdio'
-        : rawType === 'remote' ||
-            rawType === 'http' ||
-            rawType === 'sse' ||
-            rawType === 'streamable_http'
-          ? 'http'
-          : value.url
+        : rawType === 'sse'
+          ? 'sse'
+          : rawType === 'remote' || rawType === 'http' || rawType === 'streamable_http'
             ? 'http'
-            : 'stdio';
+            : value.url
+              ? 'http'
+              : 'stdio';
     const allowed = new Set([
       'name',
       'transport',
@@ -186,13 +185,9 @@ export function importMcpConfigurations(text: string, defaultCwd?: string): McpI
       issues.push('지원하지 않는 설정 필드가 있습니다. 가져오기를 생략했습니다.');
     if (
       rawType !== undefined &&
-      !['local', 'stdio', 'remote', 'http', 'streamable_http'].includes(String(rawType))
+      !['local', 'stdio', 'remote', 'http', 'sse', 'streamable_http'].includes(String(rawType))
     )
-      issues.push(
-        rawType === 'sse'
-          ? '기존 SSE 전송은 지원하지 않습니다. Streamable HTTP endpoint를 사용하세요.'
-          : '지원하지 않는 MCP 전송 형식입니다.',
-      );
+      issues.push('지원하지 않는 MCP 전송 형식입니다.');
     if (value.disabled === true || value.enabled === false)
       issues.push('원본 설정에서 비활성화한 서버입니다.');
     for (const key of [

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { createServer } from 'node:http';
+import { createServer, type ServerResponse } from 'node:http';
 import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -204,6 +204,70 @@ async function httpFixture(
       transport: 'http',
       url: 'http://127.0.0.1:' + address.port + '/mcp',
       protocol: 'auto',
+    }),
+  };
+}
+
+async function legacySseFixture() {
+  const requests: {
+      method: string;
+      id?: string | number;
+      params?: { arguments?: { text?: string } };
+    }[] = [],
+    streams = new Set<ServerResponse>();
+  const server = createServer(async (req, res) => {
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+    if (req.method === 'GET' && url.pathname === '/events') {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+      });
+      streams.add(res);
+      req.once('close', () => streams.delete(res));
+      res.write('event: endpoint\ndata: /messages\n\n');
+      return;
+    }
+    if (req.method !== 'POST' || url.pathname !== '/messages') {
+      res.writeHead(404);
+      res.end();
+      return;
+    }
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    const message = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    requests.push(message);
+    res.writeHead(202);
+    res.end();
+    if (message.id === undefined) return;
+    const result = answer(message, false);
+    const body = JSON.stringify({
+      jsonrpc: '2.0',
+      id: message.id,
+      ...(result === undefined
+        ? { error: { code: -32601, message: 'Unknown method' } }
+        : { result }),
+    });
+    for (const stream of streams) stream.write('data: ' + body + '\n\n');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  cleanup.push(
+    () =>
+      new Promise<void>((resolve) => {
+        for (const stream of streams) stream.end();
+        server.close(() => resolve());
+        server.closeAllConnections();
+      }),
+  );
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('No port');
+  return {
+    requests,
+    config: validateConfig({
+      name: 'Legacy SSE fixture',
+      transport: 'sse',
+      url: 'http://127.0.0.1:' + address.port + '/events',
+      protocol: 'legacy',
     }),
   };
 }
@@ -491,6 +555,24 @@ if(${modern}){result.resultType='complete';if(m.method==='tools/list'){result.tt
     await expect(
       connect(server.config, { expected: connection.registration }),
     ).rejects.toMatchObject({ code: 'MCP_CATALOG_CHANGED' });
+  });
+  it('connects to legacy SSE servers and uses only their same-origin message endpoint', async () => {
+    const server = await legacySseFixture(),
+      connection = await connect(server.config),
+      chosen = connection.registration.tools[0]!;
+    expect(connection.registration.protocol).toBe('2025-11-25');
+    expect(
+      (
+        await connection.call({
+          name: chosen.name,
+          revision: chosen.revision,
+          arguments: { text: 'over legacy SSE' },
+          mode: 'build',
+          signal: AbortSignal.timeout(2000),
+        })
+      ).content,
+    ).toEqual([{ type: 'text', text: 'over legacy SSE' }]);
+    expect(server.requests.filter((request) => request.method === 'tools/call')).toHaveLength(1);
   });
   it('resolves only explicit secret references and never follows redirects with credentials', async () => {
     const secret = 'fixture-only-secret',
