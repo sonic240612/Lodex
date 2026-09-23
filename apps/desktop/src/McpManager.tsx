@@ -5,6 +5,7 @@ import {
   completeMcpArgument,
   importMcp,
   nativeDesktop,
+  pickMcpConfig,
   previewMcpContent,
   registeredMcp,
   registerMcp,
@@ -225,6 +226,7 @@ function McpContentEntry({
 
 export function McpManager({
   session,
+  projectPath,
   provider,
   connected,
   onClose,
@@ -233,6 +235,7 @@ export function McpManager({
   onRemoveAttachment,
 }: {
   session: Session | undefined;
+  projectPath?: string | undefined;
   provider: string;
   connected: boolean;
   onClose: () => void;
@@ -254,6 +257,7 @@ export function McpManager({
   const [baseVersion, setBaseVersion] = useState(session?.version);
   const [source, setSource] = useState(''),
     [candidates, setCandidates] = useState<McpImport[]>([]);
+  const [sourceFile, setSourceFile] = useState<{ path: string; cwd?: string }>();
   const [previous, setPrevious] = useState<McpRegistration>();
   const [preview, setPreview] = useState<McpContentPreview>();
   const [approved, setApproved] = useState(false),
@@ -331,6 +335,7 @@ export function McpManager({
   function edit(server?: McpRegistration) {
     setPrevious(server);
     setSource(server ? JSON.stringify(server.config, null, 2) : '');
+    setSourceFile(undefined);
     setCandidates([]);
     setApproved(false);
     setError('');
@@ -796,8 +801,8 @@ export function McpManager({
         <section>
           <h3>{previous ? `${previous.config.name} 설정 편집` : '서버 설정 가져오기'}</h3>
           <p>
-            mcpServers JSON 또는 서버 하나의 설정을 붙여 넣으세요. stdio는 설치된 node·python 등의
-            절대 경로와 cwd가 필요합니다.
+            Codex TOML, Claude·pi 계열 mcpServers JSON, OpenCode JSONC 또는 서버 하나의 설정을 붙여
+            넣으세요. stdio는 설치된 node·python 등의 절대 경로가 필요합니다.
           </p>
           <p>
             키는 앱 .env의 LODEX_MCP_ 변수로 관리합니다. env·headers에는 secretRef를 사용하세요.
@@ -809,7 +814,7 @@ export function McpManager({
           </details>
           <fieldset disabled={busy || unavailable}>
             <label className="field">
-              설정 JSON
+              MCP 설정
               <textarea
                 rows={10}
                 spellCheck={false}
@@ -817,17 +822,37 @@ export function McpManager({
                 value={source}
                 onChange={(event) => {
                   setSource(event.target.value);
+                  setSourceFile(undefined);
                   setCandidates([]);
                   setApproved(false);
                 }}
               />
             </label>
+            {sourceFile && <p className="skill-source">불러온 파일: {sourceFile.path}</p>}
             <div className="edit-actions">
+              <button
+                type="button"
+                onClick={() =>
+                  void operation(async () => {
+                    const selected = await pickMcpConfig();
+                    if (!selected || !mounted.current) return;
+                    setSource(selected.text);
+                    setSourceFile({
+                      path: selected.path,
+                      ...(selected.cwd ? { cwd: selected.cwd } : {}),
+                    });
+                    setCandidates([]);
+                    setApproved(false);
+                  }, false)
+                }
+              >
+                설정 파일 선택
+              </button>
               <button
                 disabled={!source.trim()}
                 onClick={() =>
                   void operation(async () => {
-                    const values = await importMcp(source);
+                    const values = await importMcp(source, sourceFile?.cwd ?? projectPath);
                     setCandidates(values);
                     setApproved(false);
                   })
@@ -843,6 +868,11 @@ export function McpManager({
                 {candidate.issues.map((issue, i) => (
                   <p className="form-error" key={i}>
                     {issue}
+                  </p>
+                ))}
+                {candidate.warnings.map((warning, i) => (
+                  <p role="status" key={`warning-${i}`}>
+                    {warning}
                   </p>
                 ))}
                 {candidate.config && <pre>{JSON.stringify(candidate.config, null, 2)}</pre>}

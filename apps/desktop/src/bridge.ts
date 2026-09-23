@@ -126,6 +126,14 @@ export async function importMcp(text: string, cwd?: string): Promise<McpImport[]
   });
   return result.candidates;
 }
+export async function pickMcpConfig(): Promise<{
+  path: string;
+  text: string;
+  cwd?: string;
+} | null> {
+  if (!nativeDesktop) throw new Error('MCP 설정 파일 선택은 데스크톱 앱에서 사용할 수 있습니다.');
+  return invoke('pick_mcp_config');
+}
 export async function registerMcp(
   config: McpConfig,
   previous?: McpRegistration,

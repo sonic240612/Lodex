@@ -296,6 +296,40 @@ async fn pick_runtime_file(app: tauri::AppHandle, kind: String) -> Result<Option
     .map_err(|_| "파일 선택 창을 열지 못했습니다.".to_string())?
 }
 #[tauri::command]
+async fn pick_mcp_config(app: tauri::AppHandle) -> Result<Option<Value>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let selected = app
+            .dialog()
+            .file()
+            .set_title("MCP 설정 파일 선택")
+            .add_filter("MCP config", &["json", "jsonc", "toml"])
+            .blocking_pick_file();
+        let Some(selected) = selected else {
+            return Ok(None);
+        };
+        let path = selected
+            .into_path()
+            .map_err(|_| "로컬 파일 경로가 필요합니다.".to_string())?;
+        let metadata = std::fs::metadata(&path)
+            .map_err(|_| "선택한 MCP 설정 파일을 읽지 못했습니다.".to_string())?;
+        if !metadata.is_file() || metadata.len() > 131_072 {
+            return Err("MCP 설정은 128 KiB 이하의 일반 파일이어야 합니다.".into());
+        }
+        let text = std::fs::read_to_string(&path)
+            .map_err(|_| "MCP 설정은 UTF-8 텍스트여야 합니다.".to_string())?;
+        let cwd = path
+            .parent()
+            .map(|value| dunce::simplified(value).to_string_lossy().into_owned());
+        Ok(Some(json!({
+            "path": dunce::simplified(&path).to_string_lossy(),
+            "text": text,
+            "cwd": cwd
+        })))
+    })
+    .await
+    .map_err(|_| "파일 선택 창을 열지 못했습니다.".to_string())?
+}
+#[tauri::command]
 async fn export_backup(
     app: tauri::AppHandle,
     state: State<'_, Bridge>,
@@ -666,6 +700,7 @@ fn main() {
             daemon_request,
             pick_project_folder,
             pick_runtime_file,
+            pick_mcp_config,
             export_backup,
             open_external,
             set_openrouter_key,

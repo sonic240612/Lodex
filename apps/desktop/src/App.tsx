@@ -1296,6 +1296,11 @@ export function App() {
         <Suspense fallback={null}>
           <McpManager
             session={session}
+            projectPath={
+              workspace.projects.find(
+                (project) => project.id === (session?.projectId ?? workspace.selectedProjectId),
+              )?.path
+            }
             provider={contextProvider}
             connected={workspace.connected}
             onClose={() => setMcpManager(false)}

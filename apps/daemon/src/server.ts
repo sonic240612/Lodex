@@ -1347,7 +1347,7 @@ export async function startServer(options: ServerOptions) {
         const parsed = z
           .strictObject({ text: z.string().max(131072), cwd: z.string().max(4096).optional() })
           .safeParse(await readJson(request));
-        if (!parsed.success) throw new AppError('MCP_IMPORT', 'MCP 설정 JSON을 확인하세요.');
+        if (!parsed.success) throw new AppError('MCP_IMPORT', 'MCP 설정 입력을 확인하세요.');
         json(response, 200, {
           candidates: importMcpConfigurations(parsed.data.text, parsed.data.cwd),
         });
