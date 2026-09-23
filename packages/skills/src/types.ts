@@ -1,12 +1,7 @@
 export type SkillDialect =
-  | 'standard'
-  | 'codex'
-  | 'claude'
-  | 'pi'
-  | 'opencode'
-  | 'openclaw'
-  | 'hermes';
+  'standard' | 'codex' | 'claude' | 'pi' | 'opencode' | 'openclaw' | 'hermes';
 export type SkillInvocation = 'model' | 'user';
+export type SkillPlatform = 'windows' | 'macos' | 'linux';
 
 export interface SkillDiagnostic {
   code: string;
@@ -44,6 +39,7 @@ export interface RegisteredSkill {
   description: string;
   license?: string;
   compatibility?: string;
+  platforms?: SkillPlatform[];
   metadata: Record<string, string>;
   invocation: { model: boolean; user: boolean };
   dependencies: SkillDependency[];

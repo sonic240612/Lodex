@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Session } from '@lodex/contracts';
-import type { RegisteredSkill, SkillDialect } from '@lodex/skills';
+import type { RegisteredSkill, SkillDialect, SkillPlatform } from '@lodex/skills';
 import {
   nativeDesktop,
   pickProjectFolder,
@@ -28,6 +28,18 @@ const dialectNames: Record<SkillDialect, string> = {
 };
 const blank = (): Registration => ({ path: '', dialect: 'standard' });
 const failureMessage = (error: unknown) => (error instanceof Error ? error.message : String(error));
+const currentPlatform = (): SkillPlatform | null => {
+  if (typeof navigator === 'undefined') return null;
+  const value = `${navigator.platform} ${navigator.userAgent}`.toLowerCase();
+  if (value.includes('win')) return 'windows';
+  if (value.includes('mac')) return 'macos';
+  if (value.includes('linux')) return 'linux';
+  return null;
+};
+const supportsCurrentPlatform = (skill: RegisteredSkill) => {
+  const platform = currentPlatform();
+  return !skill.platforms?.length || (platform !== null && skill.platforms.includes(platform));
+};
 
 export function SkillManager({
   session,
@@ -64,7 +76,12 @@ export function SkillManager({
     !!registration.id && currentRegistration?.revision !== registration.expectedRevision;
   const invalidSelection = selected.some((selection) => {
     const skill = skills.find((entry) => entry.id === selection.id);
-    return !skill || !skill.invocation.model || skill.revision !== selection.revision;
+    return (
+      !skill ||
+      !skill.invocation.model ||
+      !supportsCurrentPlatform(skill) ||
+      skill.revision !== selection.revision
+    );
   });
 
   async function refresh() {
@@ -276,6 +293,7 @@ export function SkillManager({
           {skills.map((skill) => {
             const selection = selected.find((entry) => entry.id === skill.id);
             const stale = !!selection && selection.revision !== skill.revision;
+            const incompatible = !supportsCurrentPlatform(skill);
             return (
               <article className="skill-card" key={skill.id}>
                 <label className="check-field">
@@ -287,6 +305,7 @@ export function SkillManager({
                       busy ||
                       running ||
                       !skill.invocation.model ||
+                      incompatible ||
                       (!selection && selected.length >= 16)
                     }
                     onChange={(event) => choose(skill, event.target.checked)}
@@ -303,6 +322,9 @@ export function SkillManager({
                     모델 호출이 금지된 스킬입니다. 직접 첨부 기능은 아직 지원하지 않아 선택할 수
                     없습니다.
                   </p>
+                )}
+                {incompatible && (
+                  <p>현재 운영체제를 지원하지 않는 스킬이므로 이 대화에서 선택할 수 없습니다.</p>
                 )}
                 {stale && skill.invocation.model && (
                   <div className="skill-conflict">
@@ -329,6 +351,12 @@ export function SkillManager({
                       <>
                         <dt>호환성</dt>
                         <dd>{skill.compatibility}</dd>
+                      </>
+                    )}
+                    {skill.platforms?.length && (
+                      <>
+                        <dt>지원 운영체제</dt>
+                        <dd>{skill.platforms.join(', ')}</dd>
                       </>
                     )}
                     <dt>확인 시각</dt>

@@ -140,18 +140,39 @@ describe('passive skill registration', () => {
       );
       if (dialect === 'openclaw') {
         expect(skill.metadata.openclaw).toContain('dangerous-tool');
-        expect(skill.diagnostics.map((entry) => entry.code)).toContain(
-          'TOOL_POLICY_UNSUPPORTED',
-        );
+        expect(skill.diagnostics.map((entry) => entry.code)).toContain('TOOL_POLICY_UNSUPPORTED');
       }
       if (dialect === 'hermes') {
         expect(skill.metadata.hermes).toContain('terminal');
-        expect(skill.diagnostics.map((entry) => entry.code)).toContain(
-          'PLATFORM_POLICY_UNVERIFIED',
-        );
+        expect(skill.platforms).toEqual(['linux']);
+        expect(skillCatalog([skill], { platform: 'windows' }).policyExcludedIds).toEqual([
+          skill.id,
+        ]);
+        expect(skillCatalog([skill], { platform: 'linux' }).skills).toHaveLength(1);
+        await expect(
+          readSkill(skill, 'model', undefined, { platform: 'windows' }),
+        ).rejects.toMatchObject({ code: 'SKILL_PLATFORM' });
+        await expect(
+          readSkillResource(skill, 'references/guide.md', 'model', undefined, {
+            platform: 'windows',
+          }),
+        ).rejects.toMatchObject({ code: 'SKILL_PLATFORM' });
       }
     },
   );
+
+  it.each([
+    'platforms: windows',
+    'platforms: [android]',
+    'platforms: [windows, windows, linux, macos]',
+  ])('rejects invalid Hermes platform declarations: %s', async (platforms) => {
+    const { root } = await setup(
+      `---\nname: example\ndescription: Platform workflow.\n${platforms}\n---\nBody.`,
+    );
+    await expect(inspectSkillDirectory(root, { dialect: 'hermes' })).rejects.toMatchObject({
+      code: 'SKILL_METADATA',
+    });
+  });
 
   it('supports explicit Claude fallback metadata and enforces its manual-only/user-only policy values', async () => {
     const { root } = await setup(

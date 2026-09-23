@@ -18,6 +18,7 @@ import type {
   SkillDialect,
   SkillDocument,
   SkillInvocation,
+  SkillPlatform,
   SkillProvenance,
   SkillResource,
 } from './types';
@@ -93,9 +94,14 @@ export async function inspectSkillDirectory(
  */
 export function skillCatalog(
   skills: readonly RegisteredSkill[],
-  options: { invocation?: SkillInvocation; maxBytes?: number } = {},
+  options: {
+    invocation?: SkillInvocation;
+    maxBytes?: number;
+    platform?: SkillPlatform | null;
+  } = {},
 ): SkillCatalog {
   const invocation = options.invocation ?? 'model';
+  const platform = options.platform === undefined ? hostPlatform() : options.platform;
   const maxBytes = options.maxBytes ?? SKILL_LIMITS.catalogBytes;
   if (!Number.isInteger(maxBytes) || maxBytes < 2 || maxBytes > SKILL_LIMITS.catalogBytes)
     throw new AppError(
@@ -114,7 +120,7 @@ export function skillCatalog(
   for (const skill of skills) {
     if (seen.has(skill.id)) throw new AppError('SKILL_DUPLICATE', '중복된 스킬 등록 ID입니다.');
     seen.add(skill.id);
-    if (!skill.invocation[invocation]) {
+    if (!skill.invocation[invocation] || !supportsPlatform(skill, platform)) {
       result.policyExcludedIds.push(skill.id);
       continue;
     }
@@ -135,7 +141,24 @@ export function skillCatalog(
   return result;
 }
 
-function allowInvocation(skill: RegisteredSkill, invocation: SkillInvocation) {
+function hostPlatform(): SkillPlatform | null {
+  if (process.platform === 'win32') return 'windows';
+  if (process.platform === 'darwin') return 'macos';
+  if (process.platform === 'linux') return 'linux';
+  return null;
+}
+
+function supportsPlatform(skill: RegisteredSkill, platform: SkillPlatform | null) {
+  return !skill.platforms?.length || (platform !== null && skill.platforms.includes(platform));
+}
+
+function allowInvocation(
+  skill: RegisteredSkill,
+  invocation: SkillInvocation,
+  platform: SkillPlatform | null,
+) {
+  if (!supportsPlatform(skill, platform))
+    throw new AppError('SKILL_PLATFORM', '이 스킬은 현재 운영체제를 지원하지 않습니다.');
   if (!['model', 'user'].includes(invocation) || !skill.invocation[invocation])
     throw new AppError(
       'SKILL_INVOCATION',
@@ -202,9 +225,13 @@ export async function readSkill(
   skill: RegisteredSkill,
   invocation: SkillInvocation,
   suppliedSignal?: AbortSignal,
-  options: { maxBytes?: number } = {},
+  options: { maxBytes?: number; platform?: SkillPlatform | null } = {},
 ): Promise<SkillDocument> {
-  allowInvocation(skill, invocation);
+  allowInvocation(
+    skill,
+    invocation,
+    options.platform === undefined ? hostPlatform() : options.platform,
+  );
   const signal = signalOrDefault(suppliedSignal);
   signal.throwIfAborted();
   const limit = readLimit(options.maxBytes, SKILL_LIMITS.entryBytes);
@@ -233,9 +260,13 @@ export async function readSkillResource(
   path: string,
   invocation: SkillInvocation,
   suppliedSignal?: AbortSignal,
-  options: { maxBytes?: number } = {},
+  options: { maxBytes?: number; platform?: SkillPlatform | null } = {},
 ): Promise<SkillResource> {
-  allowInvocation(skill, invocation);
+  allowInvocation(
+    skill,
+    invocation,
+    options.platform === undefined ? hostPlatform() : options.platform,
+  );
   const signal = signalOrDefault(suppliedSignal);
   signal.throwIfAborted();
   const normalized = cleanRelative(path);

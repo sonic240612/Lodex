@@ -1,7 +1,13 @@
 import { parseDocument } from 'yaml';
 import { AppError } from '@lodex/contracts';
 import { SKILL_LIMITS } from './files';
-import type { RegisteredSkill, SkillDependency, SkillDiagnostic, SkillDialect } from './types';
+import type {
+  RegisteredSkill,
+  SkillDependency,
+  SkillDiagnostic,
+  SkillDialect,
+  SkillPlatform,
+} from './types';
 
 function object(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -84,6 +90,23 @@ function boolean(value: unknown, field: string, dialect: SkillDialect): boolean 
   throw new AppError('SKILL_METADATA', `${field} 필드에 올바른 boolean 값이 필요합니다.`);
 }
 
+function platforms(value: unknown): SkillPlatform[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > 3)
+    throw new AppError(
+      'SKILL_METADATA',
+      'platforms는 windows, macos, linux 중 최대 3개의 목록이어야 합니다.',
+    );
+  const supported = new Set<SkillPlatform>(['windows', 'macos', 'linux']);
+  const result = [...new Set(value)];
+  if (result.some((entry) => typeof entry !== 'string' || !supported.has(entry as SkillPlatform)))
+    throw new AppError(
+      'SKILL_METADATA',
+      'platforms에는 windows, macos, linux 값만 사용할 수 있습니다.',
+    );
+  return result.length ? (result as SkillPlatform[]) : undefined;
+}
+
 export function normalizeSkill(
   text: string,
   rootName: string,
@@ -133,7 +156,8 @@ export function normalizeSkill(
         metadata[key] = JSON.stringify(value);
         diagnostics.push({
           code: 'RUNTIME_METADATA_UNVERIFIED',
-          message: '외부 하네스의 환경·도구 요구 조건을 기록했지만 자동으로 권한을 부여하거나 설치하지 않습니다.',
+          message:
+            '외부 하네스의 환경·도구 요구 조건을 기록했지만 자동으로 권한을 부여하거나 설치하지 않습니다.',
           field: `metadata.${key}`,
         });
       } else
@@ -157,17 +181,19 @@ export function normalizeSkill(
     'disable-model-invocation',
     'user-invocable',
     ...(dialect === 'hermes' ? ['version', 'author', 'platforms', 'aliases', 'category'] : []),
-    ...(dialect === 'openclaw'
-      ? ['homepage', 'command-arg-mode']
-      : []),
+    ...(dialect === 'openclaw' ? ['homepage', 'command-arg-mode'] : []),
   ]);
   for (const field of Object.keys(fields)) {
     if (known.has(field)) continue;
     diagnostics.push({
-      code: ['allowed-tools', 'disallowed-tools', 'command-dispatch', 'command-tool'].includes(field)
+      code: ['allowed-tools', 'disallowed-tools', 'command-dispatch', 'command-tool'].includes(
+        field,
+      )
         ? 'TOOL_POLICY_UNSUPPORTED'
         : 'UNSUPPORTED_METADATA',
-      message: ['allowed-tools', 'disallowed-tools', 'command-dispatch', 'command-tool'].includes(field)
+      message: ['allowed-tools', 'disallowed-tools', 'command-dispatch', 'command-tool'].includes(
+        field,
+      )
         ? '선언된 도구 정책을 실행 권한으로 적용하지 않습니다. Lodex의 세션 권한을 사용합니다.'
         : '이 메타데이터 기능은 적용하지 않습니다.',
       field,
@@ -186,19 +212,16 @@ export function normalizeSkill(
   if (/\{baseDir\}/.test(body))
     diagnostics.push({
       code: 'BASEDIR_SUBSTITUTION_UNSUPPORTED',
-      message: '{baseDir}는 절대 경로로 치환하지 않습니다. 등록된 리소스는 전용 읽기 도구로만 엽니다.',
+      message:
+        '{baseDir}는 절대 경로로 치환하지 않습니다. 등록된 리소스는 전용 읽기 도구로만 엽니다.',
     });
-  if (dialect === 'hermes' && fields.platforms !== undefined)
-    diagnostics.push({
-      code: 'PLATFORM_POLICY_UNVERIFIED',
-      message: 'Hermes 플랫폼 제한을 기록했지만 현재 운영체제 자동 필터에는 적용하지 않습니다.',
-      field: 'platforms',
-    });
+  const supportedPlatforms = dialect === 'hermes' ? platforms(fields.platforms) : undefined;
   return {
     name,
     description,
     metadata,
     invocation,
+    ...(supportedPlatforms ? { platforms: supportedPlatforms } : {}),
     ...(fields.license === undefined
       ? {}
       : { license: requiredText(fields.license, 'license', 2000) }),
