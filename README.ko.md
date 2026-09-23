@@ -100,7 +100,7 @@ MCP 설정은 일반적인 `mcpServers` JSON을 받습니다. 선택한 도구, 
 
 [BotFather](https://core.telegram.org/bots/tutorial#obtain-your-bot-token)에서 봇을 만든 뒤 Telegram 설정에 토큰을 입력하거나 `.env`에 `TELEGRAM_BOT_TOKEN`을 설정하세요. 대화를 선택하고 전송을 허용한 뒤 연결 ID를 승인합니다.
 
-명령: `/ask`, `/status`, `/plan`, `/approve`, `/deny`, `/stop`. 원격 승인은 Telegram 설정에서 Build 접근을 허용해야 합니다. Lodex가 실행 중이어야 합니다. 결과를 확인하지 못한 전달은 기록만 남기고 자동 재시도하지 않습니다.
+명령: `/ask`, `/goal`, `/resume`, `/run`, `/status`, `/plan`, `/todo`, `/autopilot ask|auto|full`, `/approve`, `/deny`, `/stop`. `/todo`로 저장 목표와 완료 기준을 설정하고, 할 일을 추가하거나 번호로 완료·되돌리기·삭제할 수 있습니다. 원격 Build 작업과 권한 변경은 Telegram 설정에서 Build 접근을 허용해야 합니다. 결과를 확인하지 못한 전달은 기록만 남기고 자동 재시도하지 않습니다.
 
 데스크톱 창을 닫아도 Lodex는 시스템 트레이에서 계속 실행됩니다. 데몬과 Telegram 연결을 종료하려면 트레이 메뉴의 **완전히 종료**를 사용하세요.
 

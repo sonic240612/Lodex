@@ -5,6 +5,8 @@ import {
   AppError,
   commandSchema,
   makeCommand,
+  autopilotLimitsSchema,
+  planSchema,
   telegramConfigSchema,
   type Command,
   type CommandResult,
@@ -603,11 +605,29 @@ export class Telegram {
           }
           if (text === '/plan') {
             this.enqueue(
-              session.plan.goal +
+              (session.plan.goal || '저장된 목표 없음') +
                 '\n' +
-                session.plan.tasks
-                  .map((task) => (task.done ? '[x] ' : '[ ] ') + task.title)
-                  .join('\n'),
+                (session.plan.tasks.length
+                  ? session.plan.tasks
+                      .map(
+                        (task, index) => `${index + 1}. ${task.done ? '[x]' : '[ ]'} ${task.title}`,
+                      )
+                      .join('\n')
+                  : '저장된 할 일 없음'),
+            );
+            item.status = 'done';
+            await this.save();
+            continue;
+          }
+          if (text === '/todo') {
+            this.enqueue(
+              session.plan.tasks.length
+                ? session.plan.tasks
+                    .map(
+                      (task, index) => `${index + 1}. ${task.done ? '[x]' : '[ ]'} ${task.title}`,
+                    )
+                    .join('\n')
+                : '저장된 할 일이 없습니다.',
             );
             item.status = 'done';
             await this.save();
@@ -615,7 +635,7 @@ export class Telegram {
           }
           if (text === '/help' || text === '/start') {
             this.enqueue(
-              '/ask 메시지 — 연결한 대화에 요청\n/status — 현재 상태와 답변\n/plan — 목표와 할 일\n/approve — 대기 중인 작업 승인\n/deny — 대기 중인 작업 거절\n/stop — 현재 실행 중지\n일반 텍스트도 요청으로 전달됩니다. 원격 승인은 Telegram 설정에서 Build 요청을 허용해야 합니다.',
+              '/ask 메시지 — 연결한 대화에 요청\n/goal 목표 — 독립 목표 실행\n/resume — 중단된 /goal 계속\n/run — 저장 계획 자동 실행\n/plan · /todo — 목표와 할 일 조회\n/todo goal 목표 | 완료 기준\n/todo add 할 일 | 완료 기준\n/todo done 번호 · /todo undo 번호 · /todo remove 번호\n/autopilot ask|auto|full — 승인 단계 변경\n/approve · /deny — 대기 작업 결정\n/stop — 현재 실행 중지\n일반 텍스트도 요청으로 전달됩니다. 원격 Build와 권한 변경은 Telegram 설정에서 허용해야 합니다.',
             );
             item.status = 'done';
             await this.save();
@@ -629,6 +649,106 @@ export class Telegram {
               type: 'cancel_run',
               sessionId: session.id,
               runId: session.run.id,
+            });
+          } else if (text.startsWith('/goal ')) {
+            if (!this.state.config.allowBuild && session.permissionMode !== 'full')
+              throw new AppError(
+                'TELEGRAM_BUILD',
+                'Telegram 설정에서 Build 원격 요청을 먼저 허용하세요.',
+              );
+            command = makeCommand({
+              type: 'start_goal',
+              sessionId: session.id,
+              expectedVersion: session.version,
+              goal: text.slice(6).trim(),
+              limits: autopilotLimitsSchema.parse({}),
+            });
+          } else if (text === '/resume') {
+            if (!this.state.config.allowBuild && session.permissionMode !== 'full')
+              throw new AppError(
+                'TELEGRAM_BUILD',
+                'Telegram 설정에서 Build 원격 요청을 먼저 허용하세요.',
+              );
+            command = makeCommand({
+              type: 'resume_goal',
+              sessionId: session.id,
+              expectedVersion: session.version,
+            });
+          } else if (text === '/run') {
+            if (!this.state.config.allowBuild && session.permissionMode !== 'full')
+              throw new AppError(
+                'TELEGRAM_BUILD',
+                'Telegram 설정에서 Build 원격 요청을 먼저 허용하세요.',
+              );
+            command = makeCommand({
+              type: 'start_autopilot',
+              sessionId: session.id,
+              expectedVersion: session.version,
+              taskIds: [],
+              limits: autopilotLimitsSchema.parse({}),
+            });
+          } else if (/^\/autopilot\s+/.test(text)) {
+            if (!this.state.config.allowBuild)
+              throw new AppError(
+                'TELEGRAM_BUILD',
+                'Telegram 설정에서 Build 원격 요청을 먼저 허용하세요.',
+              );
+            const mode = text.slice('/autopilot '.length).trim();
+            if (!['ask', 'auto', 'full'].includes(mode))
+              throw new AppError('TELEGRAM_COMMAND', '사용법: /autopilot ask|auto|full');
+            command = makeCommand({
+              type: 'set_permission_mode',
+              sessionId: session.id,
+              expectedVersion: session.version,
+              mode: mode as 'ask' | 'auto' | 'full',
+            });
+          } else if (/^\/todo\s+/.test(text)) {
+            const [operation, ...argumentParts] = text.slice('/todo '.length).trim().split(/\s+/);
+            const argument = argumentParts.join(' ').trim();
+            let plan = structuredClone(session.plan);
+            if (operation === 'goal') {
+              const [goal, criteria = ''] = argument.split(/\s+\|\s+/, 2);
+              if (!goal?.trim())
+                throw new AppError('TELEGRAM_COMMAND', '사용법: /todo goal 목표 | 완료 기준');
+              plan = {
+                ...plan,
+                goal: goal.trim(),
+                criteria: criteria.trim(),
+                includeInContext: true,
+              };
+            } else if (operation === 'add') {
+              const [title, criteria = ''] = argument.split(/\s+\|\s+/, 2);
+              if (!title?.trim())
+                throw new AppError('TELEGRAM_COMMAND', '사용법: /todo add 할 일 | 완료 기준');
+              plan.tasks.push({
+                id: crypto.randomUUID(),
+                title: title.trim(),
+                done: false,
+                ...(criteria.trim() ? { criteria: criteria.trim() } : {}),
+              });
+            } else if (['done', 'undo', 'remove'].includes(operation ?? '')) {
+              if (!/^\d+$/.test(argument))
+                throw new AppError('TELEGRAM_COMMAND', `사용법: /todo ${operation} 번호`);
+              const index = Number(argument) - 1;
+              const target = plan.tasks[index];
+              if (!target) throw new AppError('TASK_NOT_FOUND', '해당 번호의 할 일이 없습니다.');
+              if (operation === 'remove') {
+                plan.tasks.splice(index, 1);
+                plan.tasks = plan.tasks.map((task) => ({
+                  ...task,
+                  ...(task.dependsOn
+                    ? { dependsOn: task.dependsOn.filter((id) => id !== target.id) }
+                    : {}),
+                }));
+              } else target.done = operation === 'done';
+            } else {
+              throw new AppError('TELEGRAM_COMMAND', '사용법: /todo goal|add|done|undo|remove');
+            }
+            command = makeCommand({
+              type: 'save_plan',
+              sessionId: session.id,
+              expectedVersion: session.version,
+              plan: planSchema.parse(plan),
             });
           } else {
             if (text.startsWith('/') && !text.startsWith('/ask '))
@@ -663,17 +783,34 @@ export class Telegram {
         )
           throw new AppError('TELEGRAM_EXPIRED', '실행 전 요청이 만료되었습니다. 다시 보내세요.');
         const result = await this.options.dispatch(item.command);
-        if (item.command.type === 'send_message' && result.session.run) {
+        if (
+          ['send_message', 'start_goal', 'resume_goal', 'start_autopilot'].includes(
+            item.command.type,
+          ) &&
+          result.session.run
+        ) {
           item.run = {
             id: result.session.run.id,
             messageId: result.session.run.messageId,
             sessionId: result.session.id,
           };
           item.status = 'waiting';
-          this.enqueue('요청을 접수했습니다. /status · /stop');
+          this.enqueue(
+            item.command.type === 'start_goal' || item.command.type === 'resume_goal'
+              ? '목표 실행을 시작했습니다. /status · /stop'
+              : item.command.type === 'start_autopilot'
+                ? '저장 계획 실행을 시작했습니다. /status · /stop'
+                : '요청을 접수했습니다. /status · /stop',
+          );
         } else {
           item.status = 'done';
-          this.enqueue('중지 요청을 처리했습니다.');
+          this.enqueue(
+            item.command.type === 'save_plan'
+              ? '목표와 할 일을 저장했습니다.'
+              : item.command.type === 'set_permission_mode'
+                ? 'Autopilot 권한을 변경했습니다: ' + item.command.mode
+                : '중지 요청을 처리했습니다.',
+          );
         }
         await this.save();
       } catch (error) {

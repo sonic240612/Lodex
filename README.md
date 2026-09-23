@@ -100,7 +100,7 @@ MCP configuration accepts common `mcpServers` JSON. Lodex supports selected tool
 
 Create a bot with [BotFather](https://core.telegram.org/bots/tutorial#obtain-your-bot-token), enter the token in Telegram settings or set `TELEGRAM_BOT_TOKEN` in `.env`, select a conversation, enable transmission, and approve the pairing IDs.
 
-Commands: `/ask`, `/status`, `/plan`, `/approve`, `/deny`, `/stop`. Remote approvals require Build access in Telegram settings. Lodex must remain running. Unknown delivery outcomes are recorded and never retried automatically.
+Commands include `/ask`, `/goal`, `/resume`, `/run`, `/status`, `/plan`, `/todo`, `/autopilot ask|auto|full`, `/approve`, `/deny`, and `/stop`. `/todo` can set the saved goal, add tasks with completion criteria, mark them done, undo them, or remove them by number. Remote Build actions and permission changes require Build access in Telegram settings. Unknown delivery outcomes are recorded and never retried automatically.
 
 Closing the desktop window keeps Lodex running in the system tray. Use **Quit Lodex** from the tray menu to stop the daemon and Telegram connection.
 

@@ -288,6 +288,51 @@ describe('durable Telegram channel', () => {
     expect((await app.store.session(session.id)).run?.actor).toBe('telegram');
   });
 
+  it('edits goals and todos, changes approval mode, and starts a goal remotely', async () => {
+    const app = await fixture();
+    await app.pair();
+    await app.manager.configure({
+      enabled: true,
+      sessionId: app.session.id,
+      allowBuild: true,
+      transmissionConsent: true,
+    });
+    app.bot.push([update(2, '/todo goal Release Lodex | All checks pass')]);
+    await expect
+      .poll(async () => (await app.store.session(app.session.id)).plan.goal)
+      .toBe('Release Lodex');
+    app.bot.push([update(3, '/todo add Run tests | npm test passes')]);
+    await expect
+      .poll(async () => (await app.store.session(app.session.id)).plan.tasks.length)
+      .toBe(1);
+    app.bot.push([update(4, '/todo done 1')]);
+    await expect
+      .poll(async () => (await app.store.session(app.session.id)).plan.tasks[0]?.done)
+      .toBe(true);
+    app.bot.push([update(5, '/autopilot auto')]);
+    await expect
+      .poll(async () => (await app.store.session(app.session.id)).permissionMode)
+      .toBe('auto');
+    app.bot.push([update(6, '/goal Verify the release')]);
+    await expect
+      .poll(async () => (await app.store.session(app.session.id)).run?.actor)
+      .toBe('telegram');
+    const session = await app.store.session(app.session.id);
+    expect(session.mode).toBe('build');
+    expect(session.autopilot).toMatchObject({
+      goalDriven: true,
+      status: 'running',
+      plan: { goal: 'Verify the release' },
+    });
+    expect(app.dispatch.mock.calls.map(([command]) => command.type)).toEqual([
+      'save_plan',
+      'save_plan',
+      'save_plan',
+      'set_permission_mode',
+      'start_goal',
+    ]);
+  });
+
   it('notifies and resolves a pending approval from the paired account', async () => {
     const app = await fixture();
     await app.pair();
