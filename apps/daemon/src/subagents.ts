@@ -11,7 +11,7 @@ import {
   type Usage,
 } from '@lodex/contracts';
 import { measureRequest } from '@lodex/context';
-import { projectTools, runProjectTool } from '@lodex/tools';
+import { isProjectReadTool, projectTools, runProjectTool } from '@lodex/tools';
 import { skillCatalog, type RegisteredSkill, type SkillProvenance } from '@lodex/skills';
 import { ToolCallAssembler, mergeDetails } from './tool-stream';
 import { runSkillTool, skillTools } from './skills';
@@ -110,11 +110,7 @@ export async function runSubagents(tasks: { task: string }[], options: Options):
       const rounds: Partial<Usage>[] = [];
       const projectReadTools =
         options.project && (config.provider !== 'openrouter' || config.projectCloudConsent)
-          ? projectTools.filter((tool) =>
-              ['list_files', 'find_files', 'read_file', 'search_text', 'inspect_path'].includes(
-                tool.function.name,
-              ),
-            )
+          ? projectTools.filter((tool) => isProjectReadTool(tool.function.name))
           : [];
       const catalog = options.skills?.length
         ? skillCatalog(options.skills, { maxBytes: config.eco ? 2000 : 4000 })
@@ -241,7 +237,7 @@ export async function runSubagents(tasks: { task: string }[], options: Options):
               });
               evidence.set(record.id, reads);
               if (data.error) throw new AppError('SUBAGENT_READ', '프로젝트 읽기에 실패했습니다.');
-              if (data.truncated && call.name !== 'read_file')
+              if (data.truncated && !['read_file', 'read_many_files'].includes(call.name))
                 throw new AppError(
                   'SUBAGENT_PARTIAL',
                   '검색·목록 결과의 일부만 확인했습니다. 더 좁은 범위의 작업이 필요합니다.',

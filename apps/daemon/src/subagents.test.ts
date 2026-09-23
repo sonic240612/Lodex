@@ -210,6 +210,7 @@ describe('isolated read-only subagents', () => {
         'list_files',
         'find_files',
         'read_file',
+        'read_many_files',
         'search_text',
       ]);
       expect(requests[0]?.tools?.some((tool) => tool.function.name === 'delete_path')).toBe(false);

@@ -210,6 +210,62 @@ describe('project read tools', () => {
       'export const hello = "안녕";\n// needle\n',
     );
   });
+  it('reads multiple bounded files in one call and reports shared-budget truncation', async () => {
+    const { path, run } = await setup();
+    await writeFile(join(path, 'src', 'second.ts'), 'first\nsecond\nthird\n');
+    const result = await run('read_many_files', {
+      files: [
+        { path: 'src/hello.ts', startLine: 2, maxLines: 1 },
+        { path: 'src/second.ts', startLine: 2, maxLines: 2 },
+      ],
+    });
+    expect(result).toMatchObject({
+      truncated: true,
+      skipped: [],
+      files: [
+        {
+          path: 'src/hello.ts',
+          lines: [{ line: 2, text: '// needle' }],
+          truncated: true,
+        },
+        {
+          path: 'src/second.ts',
+          lines: [
+            { line: 2, text: 'second' },
+            { line: 3, text: 'third' },
+          ],
+          truncated: true,
+        },
+      ],
+    });
+    expect(result.files.every((file: { sha256: string }) => file.sha256.length === 64)).toBe(true);
+
+    await writeFile(join(path, 'src', 'large-line.txt'), 'x'.repeat(3000));
+    const bounded = await run('read_many_files', {
+      files: [{ path: 'src/large-line.txt' }, { path: 'src/hello.ts' }],
+      maxTotalBytes: 1024,
+    });
+    expect(bounded.truncated).toBe(true);
+    expect(bounded.files[0].lines).toEqual([]);
+    expect(Buffer.byteLength(JSON.stringify(bounded))).toBeLessThan(1600);
+  });
+  it('applies project containment and strict validation to batched reads', async () => {
+    const { run } = await setup();
+    expect(
+      (
+        await run('read_many_files', {
+          files: [{ path: 'src/hello.ts' }, { path: '.env' }],
+        })
+      ).error,
+    ).toBe('PATH_DENIED');
+    expect(
+      (
+        await run('read_many_files', {
+          files: [{ path: 'src/hello.ts', extra: true }],
+        })
+      ).error,
+    ).toBe('TOOL_ARGUMENTS');
+  });
   it.each([
     '../outside.txt',
     '/etc/passwd',

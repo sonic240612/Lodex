@@ -19,7 +19,13 @@ import {
   runCommandSchema,
 } from '@lodex/contracts';
 import { measureRequest, type CompiledContext } from '@lodex/context';
-import { runProjectTool, executeCommand, executeHostCommand, runHostFileTool } from '@lodex/tools';
+import {
+  runProjectTool,
+  executeCommand,
+  executeHostCommand,
+  runHostFileTool,
+  isProjectReadTool,
+} from '@lodex/tools';
 import type { Store } from '@lodex/storage';
 import { proposePlan } from './planning';
 import { autopilotVerificationRequest, completeGoal, verifyAutopilot } from './autopilot';
@@ -1023,12 +1029,7 @@ export async function runAgent(options: {
           });
         } else {
           if (!project) throw new AppError('PROJECT_REQUIRED', '프로젝트가 필요합니다.');
-          if (
-            session.mode === 'plan' &&
-            !['list_files', 'find_files', 'read_file', 'search_text', 'inspect_path'].includes(
-              call.name,
-            )
-          )
+          if (session.mode === 'plan' && !isProjectReadTool(call.name))
             throw new AppError('PLAN_READ_ONLY', 'Plan 모드에서는 파일을 변경할 수 없습니다.', 403);
           result = await runProjectTool(
             project,

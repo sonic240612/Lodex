@@ -64,6 +64,7 @@ import {
   inspectDocker,
   cleanupExecution,
   executeCommand,
+  isProjectReadTool,
 } from '@lodex/tools';
 import { runAgent } from './agent-runner';
 import { planningTool } from './planning';
@@ -793,9 +794,7 @@ export async function startServer(options: ServerOptions) {
             activity.execution ||
             activity.edit ||
             activity.changes ||
-            ['read_file', 'list_files', 'find_files', 'search_text', 'inspect_path'].includes(
-              activity.label,
-            ),
+            isProjectReadTool(activity.label),
         ),
       );
       if (
@@ -927,11 +926,7 @@ export async function startServer(options: ServerOptions) {
         session.projectId &&
         (session.config.provider !== 'openrouter' || session.config.projectCloudConsent)
           ? projectTools.filter(
-              (tool) =>
-                session.mode !== 'plan' ||
-                ['list_files', 'find_files', 'read_file', 'search_text', 'inspect_path'].includes(
-                  tool.function.name,
-                ),
+              (tool) => session.mode !== 'plan' || isProjectReadTool(tool.function.name),
             )
           : [];
       tools.push(planningTool);

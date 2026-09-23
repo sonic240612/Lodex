@@ -67,6 +67,19 @@ const schemas = {
     startLine: z.number().int().min(1).default(1),
     maxLines: z.number().int().min(1).max(300).default(150),
   }),
+  read_many_files: z.strictObject({
+    files: z
+      .array(
+        z.strictObject({
+          path: pathSchema,
+          startLine: z.number().int().min(1).default(1),
+          maxLines: z.number().int().min(1).max(300).default(150),
+        }),
+      )
+      .min(1)
+      .max(20),
+    maxTotalBytes: z.number().int().min(1024).max(48000).default(32000),
+  }),
   search_text: z.strictObject({
     path: pathSchema,
     query: z.string().min(1).max(200),
@@ -93,6 +106,8 @@ const descriptions: Record<keyof typeof schemas, string> = {
     'Find project files recursively with a bounded glob such as "**/*.ts", "src/**/test?.tsx", or "README*". Returns at most 500 project-relative paths. Generated, secret, and linked paths are excluded. No file content is read.',
   read_file:
     'Read UTF-8 text from a project-relative file, with line numbers. Use startLine and maxLines for a bounded range. No writes.',
+  read_many_files:
+    'Read bounded line ranges from 1-20 UTF-8 project files in one call. Returns each file SHA-256 and numbered lines, with a shared output budget. Use this instead of repeated read_file calls when the needed paths are already known. Secret, generated, linked, binary, and oversized files remain blocked. No writes.',
   search_text:
     'Search for a literal string in project UTF-8 files. caseSensitive defaults to true. Returns bounded line matches. Not a regex. Generated directories and common secret files are excluded.',
 };
@@ -104,6 +119,17 @@ export const projectTools: ToolDefinition[] = Object.entries(schemas).map(([name
     parameters: z.toJSONSchema(schema),
   },
 }));
+
+export const projectReadToolNames = [
+  'inspect_path',
+  'list_files',
+  'find_files',
+  'read_file',
+  'read_many_files',
+  'search_text',
+] as const;
+export const isProjectReadTool = (name: string) =>
+  (projectReadToolNames as readonly string[]).includes(name);
 
 export async function inspectProject(path: unknown): Promise<Project> {
   if (typeof path !== 'string' || !path.trim() || path.length > 4096 || !isAbsolute(path))
@@ -216,6 +242,24 @@ export async function readText(
   }
 }
 export const digest = (text: string) => createHash('sha256').update(text).digest('hex');
+function selectLineRange(text: string, startLine: number, maxLines: number, maxBytes: number) {
+  const all = text.split(/\r?\n/);
+  const lines: { line: number; text: string }[] = [];
+  let bytes = 0;
+  for (let index = startLine - 1; index < Math.min(all.length, startLine - 1 + maxLines); index++) {
+    const value = all[index]!;
+    const size = Buffer.byteLength(value);
+    if (bytes + size > maxBytes) break;
+    bytes += size;
+    lines.push({ line: index + 1, text: value });
+  }
+  return {
+    totalLines: all.length,
+    lines,
+    bytes,
+    truncated: startLine - 1 + lines.length < all.length,
+  };
+}
 function replaceOnce(text: string, oldText: string, newText: string): string {
   const at = text.indexOf(oldText);
   if (at < 0 || text.indexOf(oldText, at + 1) >= 0)
@@ -539,25 +583,54 @@ export async function runProjectTool(
     if (name === 'read_file') {
       const args = schemas.read_file.parse(value);
       const text = await readText(project, args.path, signal);
-      const lines = text.split(/\r?\n/);
-      const selected: { line: number; text: string }[] = [];
-      let bytes = 0;
-      for (
-        let i = args.startLine - 1;
-        i < Math.min(lines.length, args.startLine - 1 + args.maxLines);
-        i++
-      ) {
-        const line = lines[i]!;
-        if (bytes + Buffer.byteLength(line) > 16000) break;
-        bytes += Buffer.byteLength(line);
-        selected.push({ line: i + 1, text: line });
-      }
+      const selected = selectLineRange(text, args.startLine, args.maxLines, 16000);
       return JSON.stringify({
         path: args.path,
         sha256: createHash('sha256').update(text).digest('hex'),
-        totalLines: lines.length,
-        lines: selected,
-        truncated: args.startLine - 1 + selected.length < lines.length,
+        totalLines: selected.totalLines,
+        lines: selected.lines,
+        truncated: selected.truncated,
+      });
+    }
+    if (name === 'read_many_files') {
+      const args = schemas.read_many_files.parse(value);
+      const files: {
+        path: string;
+        sha256: string;
+        totalLines: number;
+        lines: { line: number; text: string }[];
+        truncated: boolean;
+      }[] = [];
+      let remaining = args.maxTotalBytes;
+      let truncated = false;
+      for (const request of args.files) {
+        signal.throwIfAborted();
+        if (remaining < 512) {
+          truncated = true;
+          break;
+        }
+        const text = await readText(project, request.path, signal);
+        const selected = selectLineRange(
+          text,
+          request.startLine,
+          request.maxLines,
+          Math.max(0, remaining - 384 - Buffer.byteLength(request.path)),
+        );
+        const file = {
+          path: request.path,
+          sha256: createHash('sha256').update(text).digest('hex'),
+          totalLines: selected.totalLines,
+          lines: selected.lines,
+          truncated: selected.truncated,
+        };
+        files.push(file);
+        remaining -= Buffer.byteLength(JSON.stringify(file));
+        truncated ||= selected.truncated;
+      }
+      return JSON.stringify({
+        files,
+        truncated: truncated || files.length < args.files.length,
+        skipped: args.files.slice(files.length).map((request) => request.path),
       });
     }
     const args = schemas.search_text.parse(value);

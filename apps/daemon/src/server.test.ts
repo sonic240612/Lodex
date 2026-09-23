@@ -1662,6 +1662,7 @@ describe('authenticated daemon integration', () => {
       'list_files',
       'find_files',
       'read_file',
+      'read_many_files',
       'search_text',
       'propose_plan',
     ]);

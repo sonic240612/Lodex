@@ -13,7 +13,7 @@ Desktop agent harness for local LLMs and OpenRouter.
 - Use OpenRouter models with catalog defaults, automatic context/output limits, reported cost, and transient request retries.
 - Route Plan, Build, and subagent work to different models. Up to three isolated read-only subagents can run concurrently.
 - Open local project folders, create Git worktrees, and keep conversations scoped to a project.
-- Read project files, find them with recursive globs, and search text with optional case folding; create, move, or delete reviewed paths; apply single or multi-file edits with optional Docker validation; and undo verified text edits.
+- Read one or many project files, find them with recursive globs, and search text with optional case folding; create, move, or delete reviewed paths; apply single or multi-file edits with optional Docker validation; and undo verified text edits.
 - Run Docker commands with saved limits. Full Access enables host files, shell commands, environment variables, network access, and selected MCP calls.
 - Choose **Ask**, **Approve for me**, or **Full Access** per conversation. Plan mode remains read-only.
 - Use `/goal` for goal-driven runs, or run saved plan tasks with dependencies, completion criteria, verification commands, and budgets.
