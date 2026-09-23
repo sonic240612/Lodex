@@ -33,6 +33,8 @@ import {
   type BackupSnapshot,
   type McpContentInput,
   type McpContentPreview,
+  type McpCompletionInput,
+  type McpCompletionResult,
 } from '@lodex/contracts';
 export async function telegramStatus(): Promise<TelegramStatus> {
   if (!nativeDesktop)
@@ -70,6 +72,9 @@ export const nativeDesktop = isTauri();
 export type { McpContentPreview } from '@lodex/contracts';
 export async function previewMcpContent(input: McpContentInput): Promise<McpContentPreview> {
   return invoke('daemon_request', { method: 'POST', path: '/v1/mcp/content', body: input });
+}
+export async function completeMcpArgument(input: McpCompletionInput): Promise<McpCompletionResult> {
+  return invoke('daemon_request', { method: 'POST', path: '/v1/mcp/completion', body: input });
 }
 export async function prepareMcpOAuth(input: {
   resourceUrl: string;

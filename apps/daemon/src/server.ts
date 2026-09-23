@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
   AppError,
   commandSchema,
@@ -30,6 +31,7 @@ import {
   type InferenceProvider,
   type Session,
   mcpContentInputSchema,
+  mcpCompletionInputSchema,
   type McpContextAttachment,
   resolveModelConfig,
   type ModelConfig,
@@ -552,6 +554,9 @@ export async function startServer(options: ServerOptions) {
           supervisorPath: mcpSupervisorPath,
           resolveSecret: resolveMcpSecret,
           resolveOAuthToken,
+          ...(project
+            ? { roots: [{ uri: pathToFileURL(project.path).href, name: project.name }] }
+            : {}),
         }),
         ...(project ? { project } : {}),
         ...(options.commandExecutor ? { commandExecutor: options.commandExecutor } : {}),
@@ -1044,6 +1049,71 @@ export async function startServer(options: ServerOptions) {
                 }),
               signal,
             );
+          }),
+        );
+      } else if (request.method === 'POST' && url.pathname === '/v1/mcp/completion') {
+        const parsed = mcpCompletionInputSchema.safeParse(await readJson(request));
+        if (!parsed.success)
+          throw new AppError('MCP_COMPLETION_INPUT', 'MCP 자동 완성 입력을 확인하세요.');
+        const signal = operationSignal(response, shutdown.signal);
+        json(
+          response,
+          200,
+          await serial(async () => {
+            const registration = (await store.registeredMcp()).find(
+              (server) => server.id === parsed.data.serverId,
+            );
+            if (!registration || registration.revision !== parsed.data.serverRevision)
+              throw new AppError('MCP_CHANGED', 'MCP 서버 정보가 변경되었습니다.', 409);
+            const entry =
+              parsed.data.kind === 'prompt'
+                ? registration.prompts?.find(
+                    (prompt) =>
+                      prompt.name === parsed.data.entryKey &&
+                      prompt.revision === parsed.data.entryRevision,
+                  )
+                : registration.resourceTemplates?.find(
+                    (template) =>
+                      template.uriTemplate === parsed.data.entryKey &&
+                      template.revision === parsed.data.entryRevision,
+                  );
+            if (!registration.supportsCompletions || !entry?.supported)
+              throw new AppError(
+                'MCP_COMPLETION',
+                '검토한 MCP 자료가 아니거나 서버가 자동 완성을 지원하지 않습니다.',
+              );
+            if (
+              (await store.snapshot()).sessions.some(
+                (session) =>
+                  session.mcp?.some((selection) => selection.serverId === registration.id) &&
+                  session.run &&
+                  (session.run.status === 'running' || active.has(session.run.id)),
+              )
+            )
+              throw new AppError('BUSY', '이 MCP 서버의 실행이 끝난 뒤 인자를 추천받으세요.', 409);
+            signal.throwIfAborted();
+            const connection = await McpConnection.connect({
+              config: registration.config,
+              expected: registration,
+              resolveSecret: resolveMcpSecret,
+              supervisorPath: mcpSupervisorPath,
+              signal,
+              oauthToken: await resolveOAuthToken(registration.config, signal),
+            });
+            try {
+              return await connection.complete({
+                serverRevision: parsed.data.serverRevision,
+                kind: parsed.data.kind,
+                entryKey: parsed.data.entryKey,
+                revision: parsed.data.entryRevision,
+                argumentName: parsed.data.argumentName,
+                value: parsed.data.value,
+                ...(parsed.data.arguments ? { arguments: parsed.data.arguments } : {}),
+                signal,
+              });
+            } finally {
+              await connection.close();
+            }
           }),
         );
       } else if (request.method === 'POST' && url.pathname === '/v1/mcp/oauth/prepare') {

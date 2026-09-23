@@ -12,6 +12,7 @@ import {
   type InferenceRequest,
   type McpContentInput,
   type McpContentPreview,
+  type McpCompletionInput,
   type Session,
 } from '@lodex/contracts';
 import type { McpRegistration } from '@lodex/mcp';
@@ -27,7 +28,13 @@ afterEach(async () => {
 interface RpcRequest {
   id?: number;
   method: string;
-  params?: { uri?: string; name?: string; arguments?: Record<string, string> };
+  params?: {
+    uri?: string;
+    name?: string;
+    arguments?: Record<string, string>;
+    ref?: { type?: string; name?: string; uri?: string };
+    argument?: { name?: string; value?: string };
+  };
 }
 
 async function fixture({ cloud = false }: { cloud?: boolean } = {}) {
@@ -53,7 +60,7 @@ async function fixture({ cloud = false }: { cloud?: boolean } = {}) {
     if (message.method === 'initialize')
       result = {
         protocolVersion: '2025-11-25',
-        capabilities: { resources: {}, prompts: {} },
+        capabilities: { resources: {}, prompts: {}, completions: {} },
         serverInfo: { name: 'Content API fixture', version: '1' },
       };
     if (message.method === 'resources/list')
@@ -116,6 +123,14 @@ async function fixture({ cloud = false }: { cloud?: boolean } = {}) {
             },
           },
         ],
+      };
+    if (message.method === 'completion/complete')
+      result = {
+        completion: {
+          values: [`${message.params?.argument?.value ?? ''}-fixture`],
+          total: 1,
+          hasMore: false,
+        },
       };
     response.writeHead(200, { 'Content-Type': 'application/json' });
     response.end(
@@ -278,6 +293,40 @@ async function fixture({ cloud = false }: { cloud?: boolean } = {}) {
 }
 
 describe('MCP reviewed content API', () => {
+  it('serves catalog-pinned argument completions through the daemon API', async () => {
+    const f = await fixture();
+    expect(f.registration.supportsCompletions).toBe(true);
+    const prompt = f.registration.prompts![0]!;
+    const input: McpCompletionInput = {
+      serverId: f.registration.id,
+      serverRevision: f.registration.revision,
+      kind: 'prompt',
+      entryKey: prompt.name,
+      entryRevision: prompt.revision,
+      argumentName: 'topic',
+      value: 'sel',
+      arguments: { topic: 'sel' },
+    };
+    const response = await f.request('/v1/mcp/completion', input);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ values: ['sel-fixture'], total: 1, hasMore: false });
+    expect(f.rpc.find((request) => request.method === 'completion/complete')?.params).toMatchObject(
+      {
+        ref: { type: 'ref/prompt', name: 'review' },
+        argument: { name: 'topic', value: 'sel' },
+      },
+    );
+    const before = f.rpc.filter((request) => request.method === 'completion/complete').length;
+    const rejected = await f.request('/v1/mcp/completion', {
+      ...input,
+      entryRevision: '0'.repeat(64),
+    });
+    expect(rejected.status).toBe(400);
+    expect((await rejected.json()).error.code).toBe('MCP_COMPLETION');
+    expect(f.rpc.filter((request) => request.method === 'completion/complete')).toHaveLength(
+      before,
+    );
+  });
   it('only reads on explicit preview and replays an attachment receipt without reusing the consumed preview', async () => {
     const f = await fixture();
     expect(

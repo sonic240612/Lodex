@@ -2263,6 +2263,34 @@ input[type='checkbox'] {
 .mcp-manager .mcp-content-entry .field {
   margin: 12px 0;
 }
+.mcp-manager .mcp-argument-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+}
+.mcp-manager .mcp-argument-row > button {
+  margin-bottom: 12px;
+  white-space: nowrap;
+}
+.mcp-manager .mcp-completion-values {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: -6px 0 10px;
+}
+.mcp-manager .mcp-completion-values > span {
+  color: var(--muted);
+  font-size: 13px;
+}
+.mcp-manager .mcp-completion-values > button {
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .mcp-manager .mcp-content-entry input {
   min-width: 0;
   width: 100%;

@@ -6,6 +6,7 @@ import {
   type McpRegistration,
   type SecretResolver,
   type McpConfig,
+  type Root,
 } from '@lodex/mcp';
 
 export function selectedMcpTools(session: Session, registrations: McpRegistration[]) {
@@ -36,6 +37,7 @@ export class RunMcp {
       supervisorPath: string;
       resolveSecret: SecretResolver;
       resolveOAuthToken?: (config: McpConfig, signal: AbortSignal) => Promise<string | undefined>;
+      roots?: Root[];
     },
   ) {}
   permission(name: string) {
@@ -93,6 +95,7 @@ export class RunMcp {
         resolveSecret: this.options.resolveSecret,
         signal: options.signal,
         oauthToken,
+        ...(this.options.roots ? { roots: this.options.roots } : {}),
       });
       this.connections.set(selected.server.id, connection);
       this.tokens.set(selected.server.id, oauthToken);

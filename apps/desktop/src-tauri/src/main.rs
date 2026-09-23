@@ -217,6 +217,7 @@ fn route_allowed(method: &str, path: &str) -> bool {
         | ("POST", "/v1/mcp/register")
         | ("POST", "/v1/mcp/remove")
         | ("POST", "/v1/mcp/content")
+        | ("POST", "/v1/mcp/completion")
         | ("POST", "/v1/mcp/oauth/prepare")
         | ("POST", "/v1/mcp/oauth/begin")
         | ("POST", "/v1/mcp/oauth/status")
@@ -377,6 +378,7 @@ async fn daemon_request(
                 200
             } else if path == "/v1/mcp/register"
                 || path == "/v1/mcp/content"
+                || path == "/v1/mcp/completion"
                 || path == "/v1/mcp/oauth/prepare"
             {
                 45
@@ -708,6 +710,7 @@ mod tests {
         assert!(route_allowed("POST", "/v1/runtime/inspect"));
         assert!(route_allowed("GET", "/v1/backups"));
         assert!(route_allowed("POST", "/v1/backups/export"));
+        assert!(route_allowed("POST", "/v1/mcp/completion"));
         assert!(!route_allowed("PUT", "/v1/secret"));
         assert!(!route_allowed("GET", "https://example.com"));
         assert!(!route_allowed("POST", "/v1/models?provider=openrouter"));

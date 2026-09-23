@@ -8,6 +8,7 @@ import {
   type Resource,
   type ResourceTemplateType as ResourceTemplate,
   type Prompt,
+  type Root,
   type Transport,
   type JsonSchemaType,
   type jsonSchemaValidator,
@@ -19,6 +20,7 @@ import { OwnedStdioTransport } from './stdio';
 import { validateConfig, resolveReferences, type McpConfig, type SecretResolver } from './config';
 export { validateConfig, mcpConfigSchema } from './config';
 export type { McpConfig, SecretResolver } from './config';
+export type { Root } from '@modelcontextprotocol/client';
 export { importMcpConfigurations, type McpImport } from './import';
 export * from './oauth';
 
@@ -80,7 +82,13 @@ export interface McpRegistration {
   resources?: McpResource[];
   prompts?: McpPrompt[];
   resourceTemplates?: McpResourceTemplate[];
+  supportsCompletions?: true;
   inspectedAt: string;
+}
+export interface McpCompletion {
+  values: string[];
+  total?: number;
+  hasMore?: boolean;
 }
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 export const mcpToolName = (id: string, name: string) => 'mcp_' + hash([id, name]).slice(0, 40);
@@ -195,6 +203,34 @@ function textMimeType(value?: string) {
 }
 function catalogKey(value: string) {
   return value.length > 0 && value.length <= 4096 && !/[\u0000-\u001f\u007f]/.test(value);
+}
+function safeRoots(input?: Root[]): Root[] {
+  if (!input?.length) return [];
+  boundedShape(input, 16384);
+  if (input.length > 8)
+    throw new AppError('MCP_ROOTS', 'MCP root는 최대 8개까지 제공할 수 있습니다.');
+  const roots = input.map((root) => {
+    let url: URL;
+    try {
+      url = new URL(root.uri);
+    } catch {
+      throw new AppError('MCP_ROOTS', 'MCP root 경로가 올바르지 않습니다.');
+    }
+    if (
+      url.protocol !== 'file:' ||
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash ||
+      (root.name !== undefined &&
+        (root.name.length < 1 || root.name.length > 256 || /[\u0000-\u001f\u007f]/.test(root.name)))
+    )
+      throw new AppError('MCP_ROOTS', '로컬 파일 경로만 MCP root로 제공할 수 있습니다.');
+    return { uri: url.href, ...(root.name ? { name: root.name } : {}) };
+  });
+  if (new Set(roots.map((root) => root.uri)).size !== roots.length)
+    throw new AppError('MCP_ROOTS', '중복된 MCP root 경로입니다.');
+  return roots;
 }
 function resourceCatalog(listed: Resource[], secrets: string[]): McpResource[] {
   checkCatalog(listed, (item) => item.uri);
@@ -359,6 +395,7 @@ export class McpConnection {
     signal: AbortSignal;
     expected?: McpRegistration;
     oauthToken?: string | undefined;
+    roots?: Root[];
   }): Promise<McpConnection> {
     const config = validateConfig(options.config);
     options.signal.throwIfAborted();
@@ -381,10 +418,11 @@ export class McpConnection {
       secrets.push(token);
     }
     options.signal.throwIfAborted();
+    const roots = safeRoots(options.roots);
     const client = new Client(
       { name: 'lodex', version: '0.1.0' },
       {
-        capabilities: {},
+        capabilities: roots.length ? { roots: { listChanged: false } } : {},
         enforceStrictCapabilities: true,
         listMaxPages: 8,
         inputRequired: { autoFulfill: false },
@@ -395,6 +433,7 @@ export class McpConnection {
         },
       },
     );
+    if (roots.length) client.setRequestHandler('roots/list', async () => ({ roots }));
     const transport: Transport =
       config.transport === 'stdio'
         ? new OwnedStdioTransport(config, values, options.supervisorPath)
@@ -465,6 +504,11 @@ export class McpConnection {
         capabilities?.prompts && (!options.expected || options.expected.prompts !== undefined)
           ? promptCatalog((await client.listPrompts(undefined, listOptions)).prompts, secrets)
           : undefined;
+      const supportsCompletions =
+        capabilities?.completions &&
+        (!options.expected || options.expected.supportsCompletions !== undefined)
+          ? true
+          : undefined;
       const catalogRevisions = {
         ...(resources !== undefined
           ? { resources: resources.map((item) => [item.uri, item.revision]) }
@@ -485,6 +529,7 @@ export class McpConnection {
           config,
           identity,
           tools: tools.map((tool) => [tool.name, tool.revision]),
+          ...(supportsCompletions ? { supportsCompletions } : {}),
           ...catalogRevisions,
         }),
         ...(identity ? { executableIdentity: identity } : {}),
@@ -494,6 +539,7 @@ export class McpConnection {
         ...(resources !== undefined ? { resources } : {}),
         ...(resourceTemplates !== undefined ? { resourceTemplates } : {}),
         ...(prompts !== undefined ? { prompts } : {}),
+        ...(supportsCompletions ? { supportsCompletions } : {}),
         inspectedAt: new Date().toISOString(),
       };
       if (options.expected && registration.revision !== options.expected.revision)
@@ -557,6 +603,86 @@ export class McpConnection {
         readAt: new Date().toISOString(),
       },
     };
+  }
+  async complete(options: {
+    serverRevision: string;
+    kind: 'resource_template' | 'prompt';
+    entryKey: string;
+    revision: string;
+    argumentName: string;
+    value: string;
+    arguments?: Record<string, string>;
+    signal: AbortSignal;
+  }): Promise<McpCompletion> {
+    this.checkContent(options.serverRevision, options.signal);
+    if (!this.registration.supportsCompletions)
+      throw new AppError('MCP_COMPLETION', '이 MCP 서버는 인자 자동 완성을 지원하지 않습니다.');
+    const chosen =
+      options.kind === 'prompt'
+        ? this.registration.prompts?.find(
+            (item) => item.name === options.entryKey && item.revision === options.revision,
+          )
+        : this.registration.resourceTemplates?.find(
+            (item) => item.uriTemplate === options.entryKey && item.revision === options.revision,
+          );
+    if (!chosen?.supported)
+      throw new AppError('MCP_COMPLETION', '검토한 MCP 자료와 버전이 아닙니다.');
+    const names =
+      options.kind === 'prompt'
+        ? ((chosen as McpPrompt).definition.arguments ?? []).map((argument) => argument.name)
+        : (chosen as McpResourceTemplate).variables;
+    const context = options.arguments ?? {};
+    boundedShape(context, 16384);
+    if (
+      !names.includes(options.argumentName) ||
+      options.value.length > 4096 ||
+      Object.keys(context).length > 32 ||
+      Object.entries(context).some(
+        ([name, value]) =>
+          !names.includes(name) || typeof value !== 'string' || value.length > 4096,
+      )
+    )
+      throw new AppError('MCP_ARGUMENTS', '자동 완성할 인자와 현재 입력값을 확인하세요.');
+    try {
+      const result = await this.client.complete(
+        {
+          ref:
+            options.kind === 'prompt'
+              ? { type: 'ref/prompt', name: options.entryKey }
+              : { type: 'ref/resource', uri: options.entryKey },
+          argument: { name: options.argumentName, value: options.value },
+          ...(Object.keys(context).length ? { context: { arguments: context } } : {}),
+        },
+        { signal: options.signal, timeout: 15000 },
+      );
+      this.checkContent(options.serverRevision, options.signal);
+      boundedShape(result, 131072);
+      const clean = redact(result.completion, this.secrets);
+      if (
+        !Array.isArray(clean.values) ||
+        clean.values.length > 100 ||
+        new Set(clean.values).size !== clean.values.length ||
+        clean.values.some((value) => typeof value !== 'string' || value.length > 4096) ||
+        (clean.total !== undefined &&
+          (!Number.isInteger(clean.total) ||
+            clean.total < clean.values.length ||
+            clean.total > 1_000_000_000)) ||
+        (clean.hasMore !== undefined && typeof clean.hasMore !== 'boolean')
+      )
+        throw new AppError('MCP_COMPLETION', 'MCP 서버가 잘못된 자동 완성 결과를 반환했습니다.');
+      return {
+        values: clean.values,
+        ...(clean.total !== undefined ? { total: clean.total } : {}),
+        ...(clean.hasMore !== undefined ? { hasMore: clean.hasMore } : {}),
+      };
+    } catch (error) {
+      if (options.signal.aborted) options.signal.throwIfAborted();
+      if (error instanceof AppError) throw error;
+      throw new AppError(
+        'MCP_COMPLETION_FAILED',
+        'MCP 인자 추천을 가져오지 못했습니다. 자동으로 다시 요청하지 않습니다.',
+      );
+    }
   }
   async readResource(options: {
     serverRevision: string;

@@ -227,6 +227,22 @@ export const mcpContentInputSchema = z.strictObject({
   arguments: z.record(z.string().min(1).max(256), z.string().max(4096)).optional(),
 });
 export type McpContentInput = z.infer<typeof mcpContentInputSchema>;
+export const mcpCompletionInputSchema = z.strictObject({
+  serverId: idSchema,
+  serverRevision: z.string().regex(/^[a-f0-9]{64}$/),
+  kind: z.enum(['resource_template', 'prompt']),
+  entryKey: z.string().min(1).max(4096),
+  entryRevision: z.string().regex(/^[a-f0-9]{64}$/),
+  argumentName: z.string().min(1).max(128),
+  value: z.string().max(4096),
+  arguments: z.record(z.string().min(1).max(128), z.string().max(4096)).optional(),
+});
+export type McpCompletionInput = z.infer<typeof mcpCompletionInputSchema>;
+export interface McpCompletionResult {
+  values: string[];
+  total?: number;
+  hasMore?: boolean;
+}
 export const deleteSessionsSchema = z
   .strictObject({
     ...envelope,

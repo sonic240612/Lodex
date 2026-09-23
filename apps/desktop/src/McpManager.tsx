@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import type { McpSelection, Session } from '@lodex/contracts';
 import type { McpImport, McpRegistration } from '@lodex/mcp';
 import {
+  completeMcpArgument,
   importMcp,
   nativeDesktop,
   previewMcpContent,
@@ -43,6 +44,7 @@ function McpContentEntry({
   attachDisabledReason,
   preview,
   onPreview,
+  onComplete,
   onInvalidate,
   onAttach,
 }: {
@@ -56,11 +58,22 @@ function McpContentEntry({
   attachDisabledReason: string | undefined;
   preview: McpContentPreview | undefined;
   onPreview: (arguments_: Record<string, string>) => void;
+  onComplete?:
+    | ((
+        argumentName: string,
+        value: string,
+        arguments_: Record<string, string>,
+      ) => Promise<string[]>)
+    | undefined;
   onInvalidate: () => void;
   onAttach: (preview: McpContentPreview) => void;
 }) {
   const [arguments_, setArguments] = useState<Record<string, string>>({});
   const [expired, setExpired] = useState(false);
+  const [suggestions, setSuggestions] = useState<Record<string, string[]>>({});
+  const [completionBusy, setCompletionBusy] = useState<string>();
+  const [completionError, setCompletionError] = useState('');
+  const completionId = useId().replaceAll(':', '');
   const argumentValue = (name: string) =>
     Object.hasOwn(arguments_, name) ? (arguments_[name] ?? '') : '';
   useEffect(() => {
@@ -83,25 +96,86 @@ function McpContentEntry({
       <p className="skill-source">{source}</p>
       {description && <p>{description}</p>}
       <fieldset disabled={disabled || !supported}>
-        {parameters.map((parameter) => (
-          <label className="field" key={parameter.name}>
-            <span>
-              {parameter.name}
-              {parameter.required ? ' · 필수' : ''}
-            </span>
-            {parameter.description && <small>{parameter.description}</small>}
-            <input
-              type="text"
-              required={parameter.required === true}
-              maxLength={4096}
-              value={argumentValue(parameter.name)}
-              onChange={(event) => {
-                setArguments((current) => ({ ...current, [parameter.name]: event.target.value }));
-                onInvalidate();
-              }}
-            />
-          </label>
-        ))}
+        {parameters.map((parameter) => {
+          const values = suggestions[parameter.name] ?? [];
+          const listId = `mcp-completion-${completionId}-${parameter.name}`;
+          return (
+            <div className="mcp-argument-row" key={parameter.name}>
+              <label className="field">
+                <span>
+                  {parameter.name}
+                  {parameter.required ? ' · 필수' : ''}
+                </span>
+                {parameter.description && <small>{parameter.description}</small>}
+                <input
+                  type="text"
+                  required={parameter.required === true}
+                  maxLength={4096}
+                  list={values.length ? listId : undefined}
+                  value={argumentValue(parameter.name)}
+                  onChange={(event) => {
+                    setArguments((current) => ({
+                      ...current,
+                      [parameter.name]: event.target.value,
+                    }));
+                    setSuggestions((current) => ({ ...current, [parameter.name]: [] }));
+                    setCompletionError('');
+                    onInvalidate();
+                  }}
+                />
+                {!!values.length && (
+                  <datalist id={listId}>
+                    {values.map((value) => (
+                      <option key={value} value={value} />
+                    ))}
+                  </datalist>
+                )}
+              </label>
+              {onComplete && (
+                <button
+                  type="button"
+                  disabled={completionBusy !== undefined}
+                  onClick={() => {
+                    setCompletionBusy(parameter.name);
+                    setCompletionError('');
+                    void onComplete(parameter.name, argumentValue(parameter.name), arguments_)
+                      .then((values) => {
+                        setSuggestions((current) => ({ ...current, [parameter.name]: values }));
+                        if (!values.length) setCompletionError('추천할 값이 없습니다.');
+                      })
+                      .catch((failure: unknown) =>
+                        setCompletionError(
+                          failure instanceof Error ? failure.message : String(failure),
+                        ),
+                      )
+                      .finally(() => setCompletionBusy(undefined));
+                  }}
+                >
+                  {completionBusy === parameter.name ? '불러오는 중…' : '값 추천'}
+                </button>
+              )}
+              {!!values.length && (
+                <div className="mcp-completion-values" aria-label={`${parameter.name} 추천값`}>
+                  <span>추천</span>
+                  {values.map((value) => (
+                    <button
+                      type="button"
+                      key={value}
+                      title={value}
+                      onClick={() => {
+                        setArguments((current) => ({ ...current, [parameter.name]: value }));
+                        onInvalidate();
+                      }}
+                    >
+                      {value}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+        {completionError && <p className="form-error">{completionError}</p>}
         <button
           type="button"
           disabled={missing}
@@ -280,6 +354,29 @@ export function McpManager({
       });
       if (mounted.current) setPreview(value);
     });
+  }
+  async function completeArgument(
+    server: McpRegistration,
+    kind: 'resource_template' | 'prompt',
+    entryKey: string,
+    entryRevision: string,
+    argumentName: string,
+    value: string,
+    arguments_: Record<string, string>,
+  ) {
+    const result = await completeMcpArgument({
+      serverId: server.id,
+      serverRevision: server.revision,
+      kind,
+      entryKey,
+      entryRevision,
+      argumentName,
+      value,
+      arguments: Object.fromEntries(
+        Object.entries(arguments_).filter(([, argument]) => argument.length > 0),
+      ),
+    });
+    return result.values;
   }
   function attachContent(value: McpContentPreview) {
     void operation(async () => {
@@ -460,7 +557,7 @@ export function McpManager({
               <small>
                 {server.config.transport} · {server.protocol ?? '버전 미확인'} · 도구{' '}
                 {server.tools.length}개 · 리소스 {server.resources?.length ?? 0}개 · 프롬프트{' '}
-                {server.prompts?.length ?? 0}개
+                {server.prompts?.length ?? 0}개{server.supportsCompletions ? ' · 인자 추천' : ''}
               </small>
               {server.tools.map((tool) => {
                 const selection = selected.find(
@@ -590,6 +687,20 @@ export function McpManager({
                           onPreview={(arguments_) =>
                             readContent(server, 'prompt', prompt.name, prompt.revision, arguments_)
                           }
+                          onComplete={
+                            server.supportsCompletions
+                              ? (argumentName, value, arguments_) =>
+                                  completeArgument(
+                                    server,
+                                    'prompt',
+                                    prompt.name,
+                                    prompt.revision,
+                                    argumentName,
+                                    value,
+                                    arguments_,
+                                  )
+                              : undefined
+                          }
                           onInvalidate={() => {
                             if (current) setPreview(undefined);
                           }}
@@ -635,6 +746,20 @@ export function McpManager({
                                   template.revision,
                                   arguments_,
                                 )
+                              }
+                              onComplete={
+                                server.supportsCompletions
+                                  ? (argumentName, value, arguments_) =>
+                                      completeArgument(
+                                        server,
+                                        'resource_template',
+                                        template.uriTemplate,
+                                        template.revision,
+                                        argumentName,
+                                        value,
+                                        arguments_,
+                                      )
+                                  : undefined
                               }
                               onInvalidate={() => {
                                 if (current) setPreview(undefined);

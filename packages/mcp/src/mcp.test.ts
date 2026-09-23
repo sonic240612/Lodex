@@ -3,6 +3,7 @@ import { createServer } from 'node:http';
 import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { McpConnection, definitionForModel, validateConfig, type McpConfig } from './index';
 
 const cleanup: (() => Promise<void>)[] = [];
@@ -144,6 +145,44 @@ async function httpFixture(
   };
 }
 describe('MCP protocol boundary', () => {
+  it('advertises and returns only the explicitly selected project root', async () => {
+    const dir = await directory(),
+      script = join(dir, 'roots-server.cjs'),
+      received = join(dir, 'roots.json');
+    await writeFile(
+      script,
+      `const readline=require('node:readline'),fs=require('node:fs');const tool=${JSON.stringify(tool)};let pending;
+const lines=readline.createInterface({input:process.stdin});lines.on('line',line=>{const m=JSON.parse(line);
+if(m.id===77){fs.writeFileSync(${JSON.stringify(received)},JSON.stringify(m.result));process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:pending.id,result:{tools:[tool]}})+'\\n');return;}
+if(m.id===undefined)return;
+if(m.method==='initialize'){process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result:{protocolVersion:'2025-11-25',capabilities:{tools:{}},serverInfo:{name:'roots fixture',version:'1'}}})+'\\n');return;}
+if(m.method==='tools/list'){pending=m;process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:77,method:'roots/list',params:{}})+'\\n');return;}
+});`,
+    );
+    const root = { uri: pathToFileURL(dir).href, name: 'Fixture project' };
+    const connection = await connect(
+      validateConfig({
+        name: 'roots fixture',
+        transport: 'stdio',
+        executable: process.execPath,
+        args: [script],
+        cwd: dir,
+        protocol: 'legacy',
+      }),
+      { roots: [root] },
+    );
+    expect(connection.registration.tools).toHaveLength(1);
+    await expect
+      .poll(async () => JSON.parse(await readFile(received, 'utf8')))
+      .toEqual({ roots: [root] });
+  });
+  it('rejects non-file roots before opening an MCP transport', async () => {
+    const server = await httpFixture();
+    await expect(
+      connect(server.config, { roots: [{ uri: 'https://example.com/project' }] }),
+    ).rejects.toMatchObject({ code: 'MCP_ROOTS' });
+    expect(server.requests).toEqual([]);
+  });
   it.each([false, true])(
     'connects a real stdio child with modern=%s, pins schemas and blocks Plan calls',
     async (modern) => {

@@ -94,7 +94,7 @@ Docker execution is opt-in and uses the configured image, CPU, memory, network, 
 
 Skill imports read metadata first and load instructions or referenced text only when the model requests them. Importing a skill does not execute hooks, scripts, or dependency installers.
 
-MCP configuration accepts common `mcpServers` JSON. Lodex supports selected tools, static and parameterized text resources, prompts, catalog revision checks, secret references, and OAuth for pre-registered public clients. Keep MCP secrets in `.env` with `LODEX_MCP_` names. OAuth tokens are stored in the ignored `.env.mcp` file.
+MCP configuration accepts common `mcpServers` JSON. Lodex supports selected tools, static and parameterized text resources, prompts, argument completion, catalog revision checks, secret references, and OAuth for pre-registered public clients. During an agent run, a server that requests roots receives only the selected project folder. Keep MCP secrets in `.env` with `LODEX_MCP_` names. OAuth tokens are stored in the ignored `.env.mcp` file.
 
 ## Telegram
 

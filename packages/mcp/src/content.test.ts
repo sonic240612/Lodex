@@ -11,7 +11,14 @@ afterEach(async () => {
 interface Request {
   id?: number;
   method: string;
-  params?: { uri?: string; name?: string; arguments?: Record<string, string> };
+  params?: {
+    uri?: string;
+    name?: string;
+    arguments?: Record<string, string>;
+    ref?: { type?: string; name?: string; uri?: string };
+    argument?: { name?: string; value?: string };
+    context?: { arguments?: Record<string, string> };
+  };
 }
 async function fixture(modern = false) {
   const state = {
@@ -93,6 +100,14 @@ async function fixture(modern = false) {
               ],
       };
     if (message.method === 'prompts/get') result = { messages: state.messages };
+    if (message.method === 'completion/complete')
+      result = {
+        completion: {
+          values: [`${message.params?.argument?.value ?? ''}-one`, 'second'],
+          total: 2,
+          hasMore: false,
+        },
+      };
     if (result && modern) {
       result.resultType = 'complete';
       if (message.method.endsWith('/list') || message.method === 'resources/read')
@@ -174,6 +189,71 @@ function templateOptions(connection: McpConnection) {
   };
 }
 describe('MCP explicit content reads', () => {
+  it('requests bounded completions only for reviewed prompt and template arguments', async () => {
+    const server = await fixture();
+    server.state.capabilities.completions = {};
+    const connection = await server.connect();
+    expect(connection.registration.supportsCompletions).toBe(true);
+    const prompt = connection.registration.prompts![0]!;
+    await expect(
+      connection.complete({
+        serverRevision: connection.registration.revision,
+        kind: 'prompt',
+        entryKey: prompt.name,
+        revision: prompt.revision,
+        argumentName: 'code',
+        value: 'rev',
+        arguments: { code: 'rev' },
+        signal: AbortSignal.timeout(2000),
+      }),
+    ).resolves.toEqual({ values: ['rev-one', 'second'], total: 2, hasMore: false });
+    const completion = server.requests.find((request) => request.method === 'completion/complete');
+    expect(completion?.params).toMatchObject({
+      ref: { type: 'ref/prompt', name: 'review' },
+      argument: { name: 'code', value: 'rev' },
+      context: { arguments: { code: 'rev' } },
+    });
+    const template = connection.registration.resourceTemplates![0]!;
+    await expect(
+      connection.complete({
+        serverRevision: connection.registration.revision,
+        kind: 'resource_template',
+        entryKey: template.uriTemplate,
+        revision: template.revision,
+        argumentName: 'name',
+        value: 'set',
+        signal: AbortSignal.timeout(2000),
+      }),
+    ).resolves.toMatchObject({ values: ['set-one', 'second'] });
+    expect(
+      server.requests.filter((request) => request.method === 'completion/complete')[1]?.params,
+    ).toMatchObject({
+      ref: { type: 'ref/resource', uri: 'fixture://guide/{name}' },
+      argument: { name: 'name', value: 'set' },
+    });
+    const count = server.requests.length;
+    await expect(
+      connection.complete({
+        serverRevision: connection.registration.revision,
+        kind: 'prompt',
+        entryKey: prompt.name,
+        revision: prompt.revision,
+        argumentName: 'unknown',
+        value: '',
+        signal: AbortSignal.timeout(2000),
+      }),
+    ).rejects.toMatchObject({ code: 'MCP_ARGUMENTS' });
+    expect(server.requests).toHaveLength(count);
+  });
+  it('pins completion capability changes in the reviewed registration', async () => {
+    const server = await fixture();
+    server.state.capabilities.completions = {};
+    const connection = await server.connect();
+    delete server.state.capabilities.completions;
+    await expect(server.connect({ expected: connection.registration })).rejects.toMatchObject({
+      code: 'MCP_CATALOG_CHANGED',
+    });
+  });
   it.each([false, true])(
     'inspects and reads pinned text resources/prompts with modern=%s',
     async (modern) => {
