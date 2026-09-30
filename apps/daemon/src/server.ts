@@ -65,6 +65,8 @@ import {
   cleanupExecution,
   executeCommand,
   isProjectReadTool,
+  webFetchTool,
+  fetchWebPage,
 } from '@lodex/tools';
 import { runAgent } from './agent-runner';
 import { planningTool } from './planning';
@@ -128,6 +130,7 @@ interface ServerOptions {
   envFilePath?: string;
   providerFactory?: (session: Session, key: string | null) => InferenceProvider;
   commandExecutor?: typeof executeCommand;
+  webFetcher?: Parameters<typeof fetchWebPage>[0]['fetcher'];
   supervisorPath?: string;
   mcpSupervisorPath?: string;
   modelRoot?: string;
@@ -694,6 +697,7 @@ export async function startServer(options: ServerOptions) {
           : {}),
         pricing: (config) => pricing.get(config.provider + '\0' + config.model),
         ...(observations ? { observations } : {}),
+        ...(options.webFetcher ? { webFetcher: options.webFetcher } : {}),
         waitForApproval: (activityId, signal) =>
           waitForApproval(session.run!.id, session.id, activityId, signal),
         waitForElicitation: (activityId, signal) =>
@@ -937,6 +941,7 @@ export async function startServer(options: ServerOptions) {
           : [];
       tools.push(planningTool);
       tools.push(historySearchTool);
+      tools.push(webFetchTool);
       if (
         observations &&
         (session.config.eco ||

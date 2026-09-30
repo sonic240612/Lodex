@@ -23,6 +23,7 @@ export {
   hostExecutionTool,
 } from './execution';
 export { hostFileTools, runHostFileTool } from './host-files';
+export { webFetchTool, fetchWebPage } from './web';
 
 const MAX_FILE = 1024 * 1024;
 const ignored = new Set([

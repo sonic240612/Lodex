@@ -943,6 +943,7 @@ describe('authenticated daemon integration', () => {
         expect(request.tools?.map((t) => t.function.name)).toEqual([
           'propose_plan',
           'search_history',
+          'web_fetch',
         ]);
         if (round++ === 0) {
           yield {
@@ -1669,6 +1670,7 @@ describe('authenticated daemon integration', () => {
       'search_text',
       'propose_plan',
       'search_history',
+      'web_fetch',
     ]);
     expect(requests[1]!.messages.at(-1)).toMatchObject({ role: 'tool', toolCallId: 'read-1' });
     expect(requests[1]!.messages.at(-1)?.content).toContain('안녕 프로젝트');

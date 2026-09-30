@@ -1,6 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import { importMcpConfigurations } from './import';
 describe('passive MCP imports', () => {
+  it('handles many comment lines without recursive parser failure', () => {
+    const source =
+      '# comment\n'.repeat(8000) + '[mcp_servers.docs]\nurl = "https://example.com/mcp"';
+    expect(importMcpConfigurations(source)[0]).toMatchObject({ name: 'docs', issues: [] });
+  });
+
+  it('rejects a final comment inside an unterminated TOML array without hanging', () => {
+    // GHSA-7w5x-hrqm-74c2: older smol-toml loops forever on this input.
+    expect(() => importMcpConfigurations('a=[1 #')).toThrow();
+  });
+
   it('converts common server maps and explicit dotenv references without launching', () => {
     const values = importMcpConfigurations(
       JSON.stringify({

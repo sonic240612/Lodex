@@ -2,6 +2,7 @@ import type { PermissionDecision, PermissionMode } from '@lodex/contracts';
 
 export type PermissionRequest =
   | { kind: 'file'; paths: string[]; destructive?: boolean }
+  | { kind: 'web'; target: string }
   | { kind: 'command'; command: string; network: 'none' | 'bridge'; environment: 'docker' | 'host' }
   | {
       kind: 'fusion';
@@ -157,6 +158,17 @@ export function permissionDecision(
       action: 'prompt',
     };
   }
+
+  if (request.kind === 'web')
+    return {
+      kind: 'web',
+      target: request.target,
+      actor,
+      mode,
+      risk: 'high',
+      reason: '이 공개 URL로 GET 요청을 보냅니다. URL 경로와 쿼리가 해당 웹사이트에 전달됩니다.',
+      action: 'prompt',
+    };
 
   const safeRead = request.readOnly && !request.destructive && !request.openWorld;
   if (safeRead)

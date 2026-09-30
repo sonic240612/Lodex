@@ -999,21 +999,27 @@ button {
   flex-direction: column;
 }
 .permission-banner strong {
-  font-size: 12px;
+  font-size: 14px;
 }
 .permission-banner span {
   color: var(--muted);
-  font-size: 11px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  max-height: 6em;
+  overflow: auto;
+}
+.permission-banner .permission-target {
+  color: var(--text);
+  margin-top: 3px;
 }
 .permission-banner button {
   padding: 7px 12px;
   border: 1px solid var(--border);
   border-radius: 7px;
   background: var(--surface);
-  font-size: 11px;
+  font-size: 13px;
+  flex-shrink: 0;
 }
 .permission-banner .permission-allow {
   background: var(--accent);

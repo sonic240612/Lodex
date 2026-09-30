@@ -547,7 +547,7 @@ export interface McpElicitation {
   elicitationId?: string;
 }
 export interface PermissionDecision {
-  kind: 'file' | 'command' | 'mcp' | 'fusion';
+  kind: 'file' | 'command' | 'mcp' | 'fusion' | 'web';
   target: string;
   actor: 'desktop' | 'telegram';
   mode: PermissionMode;

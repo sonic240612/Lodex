@@ -95,4 +95,19 @@ describe('permission policy', () => {
       }),
     ).toMatchObject({ action: 'allow', mode: 'full', risk: 'high' });
   });
+
+  it.each(['ask', 'auto', 'full'] as const)('reviews a public URL in %s mode', (mode) => {
+    expect(
+      permissionDecision(
+        mode,
+        { kind: 'web', target: 'https://example.com/docs?q=api' },
+        'telegram',
+      ),
+    ).toMatchObject({
+      kind: 'web',
+      target: 'https://example.com/docs?q=api',
+      actor: 'telegram',
+      action: mode === 'full' ? 'allow' : 'prompt',
+    });
+  });
 });

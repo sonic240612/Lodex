@@ -7,6 +7,9 @@
   "dependencies": {
     "@lodex/contracts": "0.1.0",
     "diff": "9.0.0",
+    "html-to-text": "10.0.1",
+    "ipaddr.js": "2.5.0",
+    "undici": "8.10.2",
     "zod": "4.6.2"
   }
 }

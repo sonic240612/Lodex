@@ -15,6 +15,7 @@ Desktop agent harness for local LLMs and OpenRouter.
 - Open local project folders, create Git worktrees, and keep conversations scoped to a project.
 - Read one or many project files, find them with recursive globs, and search text with optional case folding; create, move, or delete reviewed paths; apply single or multi-file edits with optional Docker validation; and undo verified text edits.
 - Run Docker commands with saved limits. Full Access enables host files, shell commands, environment variables, network access, and selected MCP calls.
+- Read known public web URLs with `web_fetch`, including HTML, text, and JSON, with per-URL approval and bounded output.
 - Choose **Ask**, **Approve for me**, or **Full Access** per conversation. Plan mode remains read-only.
 - Use `/goal` for goal-driven runs, or run saved plan tasks with dependencies, completion criteria, verification commands, and budgets.
 - Discover documented user and project skill folders, then import local `SKILL.md` packages using Agent Skills, Codex, Claude Code, pi, OpenCode, OpenClaw, or Hermes metadata, including Hermes operating-system restrictions.
@@ -94,6 +95,8 @@ Path moves and deletions require a fresh content fingerprint. **Approve for me**
 Worktree creation starts from the current commit. Uncommitted changes remain in the original folder; merge and cleanup are manual.
 
 Docker execution is opt-in and uses the configured image, CPU, memory, network, and project access settings. A change proposal can include one validation command so approval, file application, and validation run as one recorded operation. Interactive PTY support is pending.
+
+`web_fetch` works in Plan and Build. Ask and Approve for me review each URL and redirect; Full Access runs directly. It uses public HTTP(S) default ports without cookies, credentials, or JavaScript. Output is capped at 24 KiB, or 8 KiB in Eco mode. Search and interactive browsing use separately configured MCP tools.
 
 ## Skills and MCP
 

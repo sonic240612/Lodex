@@ -25,6 +25,7 @@ import {
   executeHostCommand,
   runHostFileTool,
   isProjectReadTool,
+  fetchWebPage,
 } from '@lodex/tools';
 import type { Store } from '@lodex/storage';
 import { proposePlan } from './planning';
@@ -200,6 +201,7 @@ export async function runAgent(options: {
   waitForElicitation?: (activityId: string, signal: AbortSignal) => Promise<ElicitResult>;
   applyApprovedEdit?: (activityId: string) => Promise<void>;
   observations?: ObservationPack;
+  webFetcher?: Parameters<typeof fetchWebPage>[0]['fetcher'];
 }) {
   const { store, session, provider, context, controller, project } = options;
   const runId = session.run!.id;
@@ -854,6 +856,44 @@ export async function runAgent(options: {
           result = await options.observations.recall(session.id, call.arguments);
         } else if (call.name === 'search_history') {
           result = searchSessionHistory(session, call.arguments);
+        } else if (call.name === 'web_fetch') {
+          try {
+            result = await fetchWebPage({
+              argumentsJson: call.arguments,
+              signal,
+              maxBytes: session.config.eco ? 8192 : 24576,
+              ...(options.webFetcher ? { fetcher: options.webFetcher } : {}),
+              authorize: async (url, redirect) => {
+                const approvalCard: Activity = redirect
+                  ? {
+                      id: randomUUID(),
+                      kind: 'tool',
+                      label: 'web_fetch · redirect',
+                      status: 'running',
+                      text: '',
+                      arguments: JSON.stringify({ url }),
+                    }
+                  : card;
+                if (redirect) activities.push(approvalCard);
+                const allowed = await authorize(approvalCard, { kind: 'web', target: url });
+                if (redirect) {
+                  approvalCard.status = allowed ? 'completed' : 'cancelled';
+                  approvalCard.text = allowed
+                    ? '리디렉션 URL 조회가 승인되었습니다.'
+                    : '리디렉션 URL 조회가 거절되었습니다.';
+                  await save();
+                }
+                return allowed;
+              },
+            });
+          } catch (error) {
+            signal.throwIfAborted();
+            result = JSON.stringify({
+              error: error instanceof AppError ? error.code : 'WEB_INPUT',
+              message:
+                error instanceof AppError ? error.message : '웹 조회 URL과 인자를 확인하세요.',
+            });
+          }
         } else if (call.name.startsWith('mcp_')) {
           if (!options.mcp) throw new AppError('MCP_DISABLED', 'MCP 도구가 연결되지 않았습니다.');
           if (

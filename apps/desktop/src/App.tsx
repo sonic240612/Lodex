@@ -34,6 +34,7 @@ import { ProjectDialog } from './ProjectDialog';
 import { Markdown } from './Markdown';
 import { ConversationHistory } from './ConversationHistory';
 import { McpElicitationBanner } from './McpElicitationBanner';
+import { ApprovalBanner } from './ApprovalBanner';
 import { ExecutionPanel } from './ExecutionPanel';
 import { AutopilotPanel } from './AutopilotPanel';
 import { appendPlanTask, normalizePlanDraft, removePlanTask } from './plan-draft';
@@ -923,31 +924,12 @@ export function App() {
             />
           )}
           {pendingApproval?.approval && (
-            <div className="permission-banner" role="alertdialog" aria-label="작업 권한 요청">
-              <div>
-                <strong>
-                  {pendingApproval.approval.kind === 'file'
-                    ? '파일 변경 권한 요청'
-                    : pendingApproval.approval.kind === 'command'
-                      ? '명령 실행 권한 요청'
-                      : 'MCP 작업 권한 요청'}
-                </strong>
-                <span>
-                  {pendingApproval.approval.reason} ·{' '}
-                  {pendingApproval.arguments || pendingApproval.label}
-                </span>
-              </div>
-              <button disabled={busy} onClick={() => void decideApproval('reject')}>
-                거절
-              </button>
-              <button
-                className="permission-allow"
-                disabled={busy || mode === 'plan'}
-                onClick={() => void decideApproval('approve')}
-              >
-                수락
-              </button>
-            </div>
+            <ApprovalBanner
+              activity={pendingApproval}
+              mode={mode}
+              busy={busy}
+              onDecide={(action) => void decideApproval(action)}
+            />
           )}
           {error && (
             <div className="error-banner" role="alert">
