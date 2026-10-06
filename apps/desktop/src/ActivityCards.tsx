@@ -21,7 +21,11 @@ export function ActivityCards({
         <details className={'activity-card activity-' + activity.kind} key={activity.id}>
           <summary>
             <span className={'activity-dot ' + activity.status} />
-            <span>{activity.mcpCall ? `MCP · ${activity.mcpCall.toolName}` : activity.label}</span>
+            <span>
+              {activity.mcpCall
+                ? `MCP · ${activity.mcpCall.toolName}`
+                : activity.label + (activity.fusion ? ' · Action Fusion' : '')}
+            </span>
             <small>
               {activity.mcpCall?.status === 'unknown'
                 ? '실행 결과 미확인'
@@ -39,6 +43,34 @@ export function ActivityCards({
                     : statusText[activity.status]}
             </small>
           </summary>
+          {activity.fusion && (
+            <div className="activity-section">
+              <span>
+                파일 변경·후속 명령 묶음
+                {activity.fusion.environment
+                  ? ` · ${activity.fusion.environment === 'host' ? '호스트' : 'Docker'}`
+                  : ''}
+              </span>
+              <p>
+                {activity.fusion.status === 'succeeded'
+                  ? '변경 적용 후 명령이 종료 코드 0으로 완료됐습니다.'
+                  : activity.fusion.status === 'failed'
+                    ? '변경은 유지되며 후속 명령은 실패하거나 중단됐습니다.'
+                    : activity.fusion.status === 'skipped'
+                      ? '후속 명령을 실행하지 않았습니다. 권한·변경 상태·충돌 결과를 확인하세요.'
+                      : '변경과 후속 명령을 함께 처리합니다.'}
+              </p>
+            </div>
+          )}
+          {activity.observation && (
+            <div className="activity-section">
+              <span>
+                ObservationPack · 원문 로컬 보관 · {activity.observation.bytes.toLocaleString()}{' '}
+                bytes
+              </span>
+              <code>{activity.observation.id}</code>
+            </div>
+          )}
           {activity.subagents && (
             <div className="subagent-records" aria-label="서브에이전트 작업">
               {activity.subagents.map((child) => (

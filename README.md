@@ -82,7 +82,7 @@ Full Access is stored per conversation. File hashes, path checks, symlink checks
 - **Quick compaction** uses the local deterministic extractor without another model call.
 - The latest four complete messages normally remain verbatim. Original messages are not deleted.
 - Eco mode compacts earlier and asks the model for shorter answers.
-- In Eco mode, ObservationPack stores large tool results locally after two full sends and exposes exact paged recall when needed.
+- In Eco mode, ObservationPack archives successful text results larger than 10 KiB. The first two model requests receive the full result; later requests use a stable handle with a 1 KiB head/tail excerpt and exact paged recall. Original session history stays intact. Archive failures keep the original result, and recall verifies its hash.
 - The agent can search persisted text from the current conversation when compaction omits an older detail; search results are bounded and never cross conversation boundaries.
 - With current llama.cpp servers, the context meter uses the model's applied chat template and tokenizer. Older or remote providers show the conservative estimate or provider-reported usage.
 
@@ -94,7 +94,9 @@ Path moves and deletions require a fresh content fingerprint. **Approve for me**
 
 Worktree creation starts from the current commit. Uncommitted changes remain in the original folder; merge and cleanup are manual.
 
-Docker execution is opt-in and uses the configured image, CPU, memory, network, and project access settings. A change proposal can include one validation command so approval, file application, and validation run as one recorded operation. Interactive PTY support is pending.
+Docker execution is opt-in and uses the configured image, CPU, memory, network, and project access settings. **Action Fusion** accepts `thenRun` or SoL-Pi's `then_run` on a file change, so approval, mutation, and a known follow-up command run in one tool call. It uses Docker when enabled, or the host shell in Full Access. Host writes support the same operation. Conflicts skip the command; failed checks keep the edits. Interactive PTY support is pending.
+
+Action Fusion and ObservationPack adapt [NVIDIA SoL-Pi](https://github.com/NVlabs/SoL-Pi). See [third-party notices](THIRD_PARTY_NOTICES.md). Lodex's permission and execution limits still apply; benchmark savings have not been measured.
 
 `web_fetch` works in Plan and Build. Ask and Approve for me review each URL and redirect; Full Access runs directly. It uses public HTTP(S) default ports without cookies, credentials, or JavaScript. Output is capped at 24 KiB, or 8 KiB in Eco mode. Search and interactive browsing use separately configured MCP tools.
 

@@ -2,6 +2,29 @@ import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { ActivityCards } from './ActivityCards';
 describe('activity disclosure', () => {
+  it('shows fused execution and observation receipts without claiming a skipped check passed', () => {
+    const html = renderToStaticMarkup(
+      <ActivityCards
+        activities={[
+          {
+            id: 'fusion',
+            kind: 'tool',
+            label: 'propose_edit',
+            status: 'failed',
+            text: 'conflict',
+            fusion: { status: 'skipped' },
+            observation: { id: 'obs_0123456789abcdef01234567', bytes: 12345 },
+          },
+        ]}
+      />,
+    );
+    expect(html).toContain('Action Fusion');
+    expect(html).toContain('후속 명령을 실행하지 않았습니다.');
+    expect(html).toContain('ObservationPack');
+    expect(html).toContain('obs_0123456789abcdef01234567');
+    expect(html).not.toContain('종료 코드 0으로 완료');
+    expect(html).not.toMatch(/<details[^>]*\sopen/);
+  });
   it('keeps uncertain MCP outcomes visible in the collapsed summary and escapes server text', () => {
     const html = renderToStaticMarkup(
       <ActivityCards

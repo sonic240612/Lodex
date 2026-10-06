@@ -682,6 +682,16 @@ export class StorageEngine {
             if (message) {
               message.status = 'cancelled';
               for (const activity of message.activities ?? []) {
+                if (activity.fusion?.status === 'pending') {
+                  activity.fusion.status = activity.execution
+                    ? activity.execution.status === 'completed' &&
+                      activity.execution.exitCode === 0 &&
+                      !activity.execution.cleanupPending
+                      ? 'succeeded'
+                      : 'failed'
+                    : 'skipped';
+                  activity.status = 'cancelled';
+                }
                 if (activity.status === 'running') activity.status = 'cancelled';
                 if (activity.approval?.status === 'pending') {
                   activity.approval.status = 'rejected';
@@ -973,6 +983,14 @@ export class StorageEngine {
             update.error ?? '실행이 멈췄습니다. 기록을 확인한 뒤 다시 실행할 수 있습니다.';
         }
         for (const activity of message.activities ?? []) {
+          if (activity.fusion?.status === 'pending')
+            activity.fusion.status = activity.execution
+              ? activity.execution.status === 'completed' &&
+                activity.execution.exitCode === 0 &&
+                !activity.execution.cleanupPending
+                ? 'succeeded'
+                : 'failed'
+              : 'skipped';
           if (activity.approval?.status === 'pending') {
             activity.approval.status = 'rejected';
             activity.approval.decidedBy = 'policy';

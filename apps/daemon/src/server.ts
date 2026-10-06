@@ -64,6 +64,7 @@ import {
   inspectDocker,
   cleanupExecution,
   executeCommand,
+  executeHostCommand,
   isProjectReadTool,
   webFetchTool,
   fetchWebPage,
@@ -130,6 +131,7 @@ interface ServerOptions {
   envFilePath?: string;
   providerFactory?: (session: Session, key: string | null) => InferenceProvider;
   commandExecutor?: typeof executeCommand;
+  hostCommandExecutor?: typeof executeHostCommand;
   webFetcher?: Parameters<typeof fetchWebPage>[0]['fetcher'];
   supervisorPath?: string;
   mcpSupervisorPath?: string;
@@ -698,6 +700,9 @@ export async function startServer(options: ServerOptions) {
         pricing: (config) => pricing.get(config.provider + '\0' + config.model),
         ...(observations ? { observations } : {}),
         ...(options.webFetcher ? { webFetcher: options.webFetcher } : {}),
+        ...(options.hostCommandExecutor
+          ? { hostCommandExecutor: options.hostCommandExecutor }
+          : {}),
         waitForApproval: (activityId, signal) =>
           waitForApproval(session.run!.id, session.id, activityId, signal),
         waitForElicitation: (activityId, signal) =>
@@ -947,7 +952,9 @@ export async function startServer(options: ServerOptions) {
         (session.config.eco ||
           session.messages.some((message) =>
             message.continuation?.some(
-              (entry) => entry.role === 'tool' && isObservationMarker(entry.content),
+              (entry) =>
+                entry.role === 'tool' &&
+                (!!entry.observationId || isObservationMarker(entry.content)),
             ),
           ))
       )
@@ -990,14 +997,26 @@ export async function startServer(options: ServerOptions) {
         tools.push(goalCompletionTool);
         content = goalPrompt(goal);
       } else content = command.content;
+      const observationPreview = observations
+        ? await observations.projectHistory(session)
+        : undefined;
       context = compileContext(
-        session,
+        observationPreview?.session ?? session,
         content,
         tools,
         selectedSkills.length
           ? skillCatalog(selectedSkills, { maxBytes: session.config.eco ? 3000 : 6000 })
           : undefined,
       );
+      // Budget and compaction use the projection; the running agent retains originals
+      // so an archive or ledger failure can still fall back to exact stored evidence.
+      if (observationPreview)
+        context.request.messages = context.request.messages.map((message) => {
+          const original = message.observationId
+            ? observationPreview.originals.get(message.observationId)
+            : undefined;
+          return original ? { ...message, content: original.content } : message;
+        });
     } else if (command.type === 'compact_context' || command.type === 'quick_compact_context') {
       const session = await store.session(command.sessionId);
       if (command.expectedVersion !== session.version)

@@ -1,9 +1,15 @@
 import { constants } from 'node:fs';
-import { lstat, mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises';
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: MIT
+ * Adapted from NVlabs/SoL-Pi e1a586af0ad8956f42ae5b26bba20e48fbf30e00:
+ * observation-pack/observation.ts, index.ts and ledger.ts. See THIRD_PARTY_NOTICES.md.
+ */
+import { lstat, mkdir, open, rename, rm, writeFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { z } from 'zod';
-import type { InferenceMessage, ToolDefinition } from '@lodex/contracts';
+import type { InferenceMessage, Session, ToolDefinition } from '@lodex/contracts';
 
 export const OBSERVATION_THRESHOLD_BYTES = 10 * 1024;
 export const OBSERVATION_FULL_SENDS = 2;
@@ -12,6 +18,22 @@ const RECALL_MAX_BYTES = 16 * 1024 - 512;
 const RECALL_MAX_LINES = 398;
 const MARKER_PREFIX = 'lodex_observation_v1:';
 const ID = /^obs_[a-f0-9]{24}$/;
+const stateSchema = z.strictObject({
+  version: z.literal(1),
+  observations: z.record(
+    z.string().regex(ID),
+    z.strictObject({
+      id: z.string().regex(ID),
+      toolName: z.string(),
+      toolCallId: z.string(),
+      contentHash: z.string().regex(/^[a-f0-9]{64}$/),
+      bytes: z.number().int().nonnegative(),
+      lines: z.number().int().nonnegative(),
+      estimatedTokens: z.number().int().nonnegative(),
+      sends: z.number().int().nonnegative(),
+    }),
+  ),
+});
 
 interface ObservationRecord {
   id: string;
@@ -85,7 +107,8 @@ function placeholderFor(record: ObservationRecord, original: string): string {
     `originalBytes: ${record.bytes}`,
     `originalLines: ${record.lines}`,
     `estimatedTokens: ${record.estimatedTokens}`,
-    `retrieve: call recall_observation with {"id":"${record.id}","offset":0}`,
+    `sha256: ${record.contentHash}`,
+    `retrieve: call recall_observation with {"id":"${record.id}","offset":0}; continue with nextOffset`,
     '[first complete lines]',
     completeLineExcerpt(original, headBudget, false),
     '[middle omitted; last complete lines]',
@@ -107,6 +130,41 @@ function parseMarker(value: string): { id: string; fallback: string } | undefine
 }
 
 export const isObservationMarker = (value: string) => !!parseMarker(value);
+export const observationIdFromMarker = (value: string) => parseMarker(value)?.id;
+
+function eligible(content: string, isError = false): boolean {
+  if (isError || Buffer.byteLength(content) <= OBSERVATION_THRESHOLD_BYTES) return false;
+  const texts = [content];
+  try {
+    const result = JSON.parse(content);
+    if (result && typeof result === 'object') {
+      if (result.isError === true || Object.hasOwn(result, 'error')) return false;
+      if (Array.isArray(result.content)) {
+        if (
+          !result.content.length ||
+          result.content.some(
+            (block: unknown) =>
+              !block ||
+              typeof block !== 'object' ||
+              !('type' in block) ||
+              block.type !== 'text' ||
+              !('text' in block) ||
+              typeof block.text !== 'string',
+          )
+        )
+          return false;
+        texts.push(...result.content.map((block: { text: string }) => block.text));
+      }
+      for (const value of [result.text, result.output, result.content])
+        if (typeof value === 'string') texts.push(value);
+    }
+  } catch {
+    /* Plain text is eligible without a JSON envelope. */
+  }
+  return !texts.some((text) =>
+    text.split('\n').some((line) => line === 'sol_pi_evidence_receipt_v1'),
+  );
+}
 
 export class ObservationPack {
   private states = new Map<string, ObservationState>();
@@ -133,9 +191,19 @@ export class ObservationPack {
     if (cached) return cached;
     let state: ObservationState = { version: 1, observations: {} };
     try {
-      const parsed = JSON.parse(await readFile(this.statePath(key), 'utf8')) as ObservationState;
-      if (parsed.version === 1 && parsed.observations && typeof parsed.observations === 'object')
-        state = parsed;
+      const handle = await open(this.statePath(key), constants.O_RDONLY | constants.O_NOFOLLOW);
+      try {
+        const info = await handle.stat();
+        if (
+          !info.isFile() ||
+          info.size > 16 * 1024 * 1024 ||
+          (await lstat(this.statePath(key))).isSymbolicLink()
+        )
+          throw new Error('Observation state is not a bounded regular file');
+        state = stateSchema.parse(JSON.parse(await handle.readFile('utf8')));
+      } finally {
+        await handle.close();
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
@@ -157,8 +225,79 @@ export class ObservationPack {
     const directory = this.directory(sessionId);
     await mkdir(directory, { recursive: true, mode: 0o700 });
     const temporary = join(directory, '.state-' + randomUUID() + '.tmp');
-    await writeFile(temporary, JSON.stringify(state), { encoding: 'utf8', mode: 0o600 });
-    await rename(temporary, this.statePath(sessionId));
+    try {
+      await writeFile(temporary, JSON.stringify(state), {
+        encoding: 'utf8',
+        mode: 0o600,
+        flag: 'wx',
+      });
+      await rename(temporary, this.statePath(sessionId));
+    } finally {
+      await rm(temporary, { force: true }).catch(() => undefined);
+    }
+  }
+
+  private async storage(sessionId: string) {
+    for (const directory of [
+      this.root,
+      this.directory(sessionId),
+      join(this.directory(sessionId), 'objects'),
+    ]) {
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+      const info = await lstat(directory);
+      if (!info.isDirectory() || info.isSymbolicLink())
+        throw new Error('Observation directory is not a regular directory');
+    }
+  }
+
+  private async readObject(sessionId: string, record: ObservationRecord): Promise<Buffer> {
+    const path = this.objectPath(sessionId, record.id);
+    const before = await lstat(path);
+    if (!before.isFile() || before.isSymbolicLink() || before.size !== record.bytes)
+      throw new Error('Observation object size or type mismatch');
+    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const info = await handle.stat();
+      if (info.dev !== before.dev || info.ino !== before.ino || info.size !== record.bytes)
+        throw new Error('Observation object identity mismatch');
+      const bytes = await handle.readFile();
+      if (hash(bytes) !== record.contentHash) throw new Error('Observation content hash mismatch');
+      return bytes;
+    } finally {
+      await handle.close();
+    }
+  }
+
+  private async ledger(sessionId: string, entry: Record<string, unknown>) {
+    const path = join(this.directory(sessionId), 'ledger.jsonl');
+    const handle = await open(
+      path,
+      constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW,
+      0o600,
+    );
+    try {
+      if (!(await handle.stat()).isFile() || (await lstat(path)).isSymbolicLink())
+        throw new Error('Observation ledger is not a regular file');
+      await handle.writeFile(
+        JSON.stringify({ timestamp: new Date().toISOString(), ...entry }) + '\n',
+      );
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  }
+
+  private async failOpen(sessionId: string, id?: string) {
+    try {
+      await this.storage(sessionId);
+      await this.ledger(sessionId, {
+        event: 'fail_open',
+        id,
+        reason: 'Archive or ledger unavailable; original history retained',
+      });
+    } catch {
+      /* Reporting must not hide the original either. */
+    }
   }
 
   async archive(
@@ -167,8 +306,9 @@ export class ObservationPack {
     toolCallId: string,
     content: string,
   ): Promise<string> {
-    if (Buffer.byteLength(content) <= OBSERVATION_THRESHOLD_BYTES) return content;
+    if (!eligible(content)) return content;
     return this.serialize(sessionId, async () => {
+      await this.storage(sessionId);
       const state = await this.state(sessionId);
       const contentHash = hash(content);
       const id = `obs_${hash(`${toolName}\0${toolCallId}\0${contentHash}`).slice(0, 24)}`;
@@ -188,10 +328,13 @@ export class ObservationPack {
         }
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-        const info = await lstat(path);
-        if (!info.isFile() || info.isSymbolicLink() || hash(await readFile(path)) !== contentHash)
-          throw new Error('Stored observation does not match its content hash');
+        await this.readObject(sessionId, {
+          id,
+          contentHash,
+          bytes: Buffer.byteLength(content),
+        } as ObservationRecord);
       }
+      const existed = !!state.observations[id];
       state.observations[id] ??= {
         id,
         toolName,
@@ -202,7 +345,7 @@ export class ObservationPack {
         estimatedTokens: Math.ceil(content.length / 4),
         sends: 0,
       };
-      await this.save(sessionId, state);
+      if (!existed) await this.save(sessionId, state);
       return marker(id, placeholderFor(state.observations[id]!, content));
     });
   }
@@ -210,44 +353,152 @@ export class ObservationPack {
   async project(
     sessionId: string,
     messages: readonly InferenceMessage[],
+    options: { enabled?: boolean; advance?: boolean; requestId?: string } = {},
   ): Promise<InferenceMessage[]> {
+    const enabled = options.enabled ?? true;
+    // Archive candidates before taking the projection lock. Stored messages are never edited.
+    const prepared: InferenceMessage[] = [];
+    const toolNames = new Map(
+      messages.flatMap((message) =>
+        (message.toolCalls ?? []).map((call) => [call.id, call.name] as const),
+      ),
+    );
+    for (const message of messages) {
+      const name = message.toolName ?? toolNames.get(message.toolCallId ?? '');
+      if (
+        enabled &&
+        message.role === 'tool' &&
+        name &&
+        message.toolCallId &&
+        !parseMarker(message.content) &&
+        eligible(message.content, message.isError)
+      ) {
+        try {
+          const id = observationIdFromMarker(
+            await this.archive(sessionId, name, message.toolCallId, message.content),
+          );
+          prepared.push(id ? { ...message, toolName: name, observationId: id } : message);
+          continue;
+        } catch {
+          await this.failOpen(sessionId, message.observationId);
+        }
+      }
+      prepared.push(message);
+    }
     return this.serialize(sessionId, async () => {
       let state: ObservationState;
       try {
         state = await this.state(sessionId);
       } catch {
-        return messages.map((message) => {
+        return prepared.map((message) => {
           const packed = message.role === 'tool' ? parseMarker(message.content) : undefined;
-          return packed ? { ...message, content: packed.fallback } : message;
+          return packed
+            ? {
+                ...message,
+                content:
+                  '[legacy observation archive unavailable; excerpt only]\n' + packed.fallback,
+              }
+            : message;
         });
       }
-      let changed = false;
       const projected: InferenceMessage[] = [];
-      for (const message of messages) {
+      const seen = new Set<string>();
+      for (const message of prepared) {
         const packed = message.role === 'tool' ? parseMarker(message.content) : undefined;
-        const record = packed ? state.observations[packed.id] : undefined;
+        const id = packed?.id ?? message.observationId;
+        const record = message.role === 'tool' && id ? state.observations[id] : undefined;
         if (!record) {
           projected.push(packed ? { ...message, content: packed.fallback } : message);
           continue;
         }
         let original: string;
         try {
-          original = await readFile(this.objectPath(sessionId, record.id), 'utf8');
-          if (hash(original) !== record.contentHash)
-            throw new Error('Observation content hash mismatch');
+          await this.storage(sessionId);
+          original = (await this.readObject(sessionId, record)).toString('utf8');
+          if (!packed && original !== message.content)
+            throw new Error('Observation history does not match archive');
         } catch {
-          projected.push({ ...message, content: packed!.fallback });
+          await this.failOpen(sessionId, record.id);
+          projected.push(
+            packed
+              ? {
+                  ...message,
+                  content:
+                    '[legacy observation archive unavailable; excerpt only]\n' + packed.fallback,
+                }
+              : message,
+          );
           continue;
         }
         let content = original;
-        if (record.sends >= OBSERVATION_FULL_SENDS) content = placeholderFor(record, original);
-        record.sends += 1;
-        changed = true;
-        projected.push({ ...message, content });
+        const replace =
+          enabled && eligible(original, message.isError) && record.sends >= OBSERVATION_FULL_SENDS;
+        if (replace) content = placeholderFor(record, original);
+        if (options.advance !== false && !seen.has(record.id)) {
+          try {
+            await this.ledger(sessionId, {
+              event: replace ? 'placeholder' : 'full',
+              id: record.id,
+              tool: record.toolName,
+              requestId: options.requestId,
+              sendNumber: record.sends + 1,
+              originalBytes: record.bytes,
+              originalLines: record.lines,
+              originalTokens: record.estimatedTokens,
+              contentHash: record.contentHash,
+              projectedBytes: Buffer.byteLength(content),
+              estimatedTokensAvoided: Math.max(
+                0,
+                record.estimatedTokens - Math.ceil(content.length / 4),
+              ),
+            });
+            const next = structuredClone(state);
+            next.observations[record.id]!.sends++;
+            await this.save(sessionId, next);
+            state = next;
+            this.states.set(sessionName(sessionId), state);
+            seen.add(record.id);
+          } catch {
+            await this.failOpen(sessionId, record.id);
+            content = original;
+          }
+        }
+        projected.push({
+          ...message,
+          toolName: record.toolName,
+          observationId: record.id,
+          content,
+        });
       }
-      if (changed) await this.save(sessionId, state).catch(() => undefined);
       return projected;
     });
+  }
+
+  /** Preview for budget/compaction without consuming either of the two full sends. */
+  async projectHistory(
+    session: Session,
+  ): Promise<{ session: Session; originals: Map<string, InferenceMessage> }> {
+    const originals = new Map<string, InferenceMessage>();
+    const messages = [];
+    for (const message of session.messages) {
+      if (!message.continuation) {
+        messages.push(message);
+        continue;
+      }
+      const projected = await this.project(session.id, message.continuation, {
+        enabled: session.config.eco,
+        advance: false,
+      });
+      projected.forEach((entry, index) => {
+        if (entry.observationId)
+          originals.set(entry.observationId, {
+            ...entry,
+            content: message.continuation![index]!.content,
+          });
+      });
+      messages.push({ ...message, continuation: projected });
+    }
+    return { session: { ...session, messages }, originals };
   }
 
   async recall(sessionId: string, argumentsJson: string): Promise<string> {
@@ -255,40 +506,48 @@ export class ObservationPack {
     const state = await this.state(sessionId);
     const record = state.observations[input.id];
     if (!record) throw new Error(`Unknown observation id: ${input.id}`);
-    const handle = await open(
-      this.objectPath(sessionId, record.id),
-      constants.O_RDONLY | constants.O_NOFOLLOW,
-    );
-    try {
-      const stats = await handle.stat();
-      if (!stats.isFile() || input.offset > stats.size)
-        throw new Error(`Offset ${input.offset} exceeds observation size ${stats.size}`);
-      const available = Math.max(0, stats.size - input.offset);
-      const buffer = Buffer.alloc(Math.min(available, RECALL_MAX_BYTES + 4));
-      const { bytesRead } = await handle.read(buffer, 0, buffer.length, input.offset);
-      let end = Math.min(bytesRead, RECALL_MAX_BYTES);
-      let lines = 0;
-      for (let index = 0; index < end; index++) {
-        if (buffer[index] === 0x0a && ++lines === RECALL_MAX_LINES) {
-          end = index + 1;
-          break;
-        }
+    await this.storage(sessionId);
+    const original = await this.readObject(sessionId, record);
+    if (input.offset > original.length) throw new Error('Offset exceeds observation size');
+    if (input.offset < original.length && (original[input.offset]! & 0xc0) === 0x80)
+      throw new Error('Offset is inside a UTF-8 character; use nextOffset');
+    const buffer = original.subarray(input.offset, input.offset + RECALL_MAX_BYTES + 4);
+    let end = Math.min(buffer.length, RECALL_MAX_BYTES);
+    let lines = 0;
+    for (let index = 0; index < end; index++) {
+      if (buffer[index] === 0x0a && ++lines === RECALL_MAX_LINES) {
+        end = index + 1;
+        break;
       }
-      while (end > 0 && end < bytesRead && ((buffer[end] ?? 0) & 0xc0) === 0x80) end--;
-      const nextOffset = input.offset + end;
-      const text = buffer.subarray(0, end).toString('utf8');
-      return JSON.stringify({
+    }
+    while (end > 0 && end < buffer.length && ((buffer[end] ?? 0) & 0xc0) === 0x80) end--;
+    const serialize = (length: number) =>
+      JSON.stringify({
         id: record.id,
         offset: input.offset,
-        nextOffset,
-        eof: nextOffset >= stats.size,
-        bytes: end,
-        lines: countLines(text),
-        text,
+        nextOffset: input.offset + length,
+        eof: input.offset + length >= original.length,
+        bytes: length,
+        lines: countLines(buffer.subarray(0, length).toString('utf8')),
+        text: buffer.subarray(0, length).toString('utf8'),
       });
-    } finally {
-      await handle.close();
+    let low = 0,
+      high = end;
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      if (Buffer.byteLength(serialize(middle)) <= 16 * 1024) low = middle;
+      else high = middle - 1;
     }
+    end = low;
+    while (end > 0 && end < buffer.length && ((buffer[end] ?? 0) & 0xc0) === 0x80) end--;
+    await this.ledger(sessionId, {
+      event: 'recall',
+      id: record.id,
+      offset: input.offset,
+      nextOffset: input.offset + end,
+      bytes: end,
+    });
+    return serialize(end);
   }
 
   async removeSession(sessionId: string): Promise<void> {

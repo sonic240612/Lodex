@@ -8,7 +8,8 @@ import {
   type ToolDefinition,
   type EditProposal,
   type ChangeSet,
-  runCommandSchema,
+  fusionFields,
+  normalizeFusedCommand,
 } from '@lodex/contracts';
 import { createTwoFilesPatch } from 'diff';
 import { proposeChanges, changeInputSchema } from './changes';
@@ -22,8 +23,15 @@ export {
   executionTool,
   hostExecutionTool,
 } from './execution';
-export { hostFileTools, runHostFileTool } from './host-files';
+export { hostFileTools, runHostFileTool, hostWriteInput } from './host-files';
 export { webFetchTool, fetchWebPage } from './web';
+export {
+  withFusedFileQueue,
+  assertUnchangedBeforeCommand,
+  THEN_RUN_SUCCEEDED,
+  THEN_RUN_FAILED,
+  THEN_RUN_SKIPPED,
+} from './action-fusion';
 
 const MAX_FILE = 1024 * 1024;
 const ignored = new Set([
@@ -55,7 +63,7 @@ const schemas = {
     expectedHash: z.string().regex(/^[a-f0-9]{64}$/),
     oldText: z.string().min(1).max(6000),
     newText: z.string().max(6000),
-    thenRun: runCommandSchema.optional(),
+    ...fusionFields,
   }),
   list_files: z.strictObject({ path: pathSchema }),
   find_files: z.strictObject({
@@ -98,9 +106,9 @@ const descriptions: Record<keyof typeof schemas, string> = {
   delete_path:
     'Delete one reviewed project file or directory. First call inspect_path and pass its exact expectedFingerprint. Non-empty directories require recursive=true. This is destructive and always requires user review unless Full Access is active.',
   propose_changes:
-    'Propose a reviewed set of 1-8 UTF-8 file changes. kind edit requires read_file sha256, one exact oldText and newText. kind create requires a nonexistent path inside an EXISTING directory and content. A missing project-root .env or .env.* file may be created this way, but existing dotenv files cannot be read or edited. Paths must be distinct. Optional thenRun fuses one Docker validation command with the approved change set. Total tool arguments stay under 16 KiB. NEVER writes before approval. No directories or deletion.',
+    'Propose a reviewed set of 1-8 UTF-8 file changes. kind edit requires read_file sha256, one exact oldText and newText. kind create requires a nonexistent path inside an EXISTING directory and content. A missing project-root .env or .env.* file may be created this way, but existing dotenv files cannot be read or edited. Paths must be distinct. Optional thenRun fuses an already-known follow-up command: Docker when enabled, otherwise host shell only in Full Access. Failed checks keep the edits; conflicts skip the command. Total arguments stay under 16 KiB. NEVER writes before approval. No directories or deletion.',
   propose_edit:
-    'Propose one exact text replacement in an existing UTF-8 project file. First read_file for its sha256 as expectedHash; oldText must match exactly once, without line numbers. Preserves CRLF. Optional thenRun fuses one Docker validation command with the approved edit. Produces a diff for review and NEVER writes before approval. No creation or deletion.',
+    'Propose one exact text replacement in an existing UTF-8 project file. First read_file for its sha256 as expectedHash; oldText must match exactly once, without line numbers. Preserves CRLF. Optional thenRun fuses an already-known follow-up command: Docker when enabled, otherwise host shell only in Full Access. Failed checks keep the edit; conflicts skip the command. Produces a diff for review and NEVER writes before approval. No creation or deletion.',
   list_files:
     'List up to 200 files/directories directly inside a project-relative directory. Start with path ".". No file content is read.',
   find_files:
@@ -284,6 +292,7 @@ export async function proposeEdit(
   signal: AbortSignal,
 ): Promise<EditProposal> {
   const args = schemas.propose_edit.parse(input);
+  const thenRun = normalizeFusedCommand(args);
   const text = await readText(project, args.path, signal);
   if (digest(text) !== args.expectedHash)
     throw new AppError(
@@ -312,7 +321,7 @@ export async function proposeEdit(
     diff: patch,
     status: 'proposed',
     offset: text.indexOf(oldText),
-    ...(args.thenRun ? { thenRun: args.thenRun } : {}),
+    ...(thenRun ? { thenRun } : {}),
   };
 }
 export async function checkEdit(

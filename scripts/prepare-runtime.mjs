@@ -5,6 +5,7 @@ if (!process.version.startsWith('v24.')) throw new Error('Node 24 LTS is require
 await mkdir('.runtime', { recursive: true });
 const destination = '.runtime/' + (process.platform === 'win32' ? 'node.exe' : 'node');
 await copyFile(process.execPath, destination);
+await copyFile('THIRD_PARTY_NOTICES.md', '.runtime/THIRD_PARTY_NOTICES.md');
 if (process.platform !== 'win32') await chmod(destination, 0o755);
 await writeFile(
   '.runtime/manifest.json',

@@ -96,6 +96,34 @@ export const runCommandSchema = z.strictObject({
   stdin: z.string().max(8000).default(''),
 });
 export type FusedCommand = z.infer<typeof runCommandSchema>;
+/** Accept SoL-Pi's spelling while preserving Lodex's explicit command limits. */
+export const fusionFields = {
+  thenRun: runCommandSchema.optional(),
+  then_run: z
+    .strictObject({
+      command: runCommandSchema.shape.command,
+      timeout: z.number().finite().min(1).max(120).optional(),
+    })
+    .optional(),
+};
+export function normalizeFusedCommand(input: {
+  thenRun?: z.infer<typeof fusionFields.thenRun>;
+  then_run?: z.infer<typeof fusionFields.then_run>;
+}): FusedCommand | undefined {
+  if (input.thenRun && input.then_run)
+    throw new AppError('FUSION_ARGUMENTS', 'thenRun과 then_run 중 하나만 지정하세요.');
+  return (
+    input.thenRun ??
+    (input.then_run
+      ? runCommandSchema.parse({
+          command: input.then_run.command,
+          ...(input.then_run.timeout !== undefined
+            ? { timeoutMs: Math.round(input.then_run.timeout * 1000) }
+            : {}),
+        })
+      : undefined)
+  );
+}
 export interface CommandExecution {
   id: string;
   containerName: string;
@@ -559,6 +587,11 @@ export interface PermissionDecision {
   decidedAt?: string;
 }
 export interface Activity {
+  fusion?: {
+    status: 'pending' | 'succeeded' | 'failed' | 'skipped';
+    environment?: 'docker' | 'host';
+  };
+  observation?: { id: string; bytes: number };
   subagents?: SubagentRecord[];
   mcpCall?: {
     serverId: string;
@@ -736,6 +769,10 @@ export interface ModelCapabilities {
 export interface InferenceMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
+  /** Local observation metadata; provider adapters never transmit these fields. */
+  toolName?: string;
+  isError?: boolean;
+  observationId?: string;
   toolCalls?: ToolCall[];
   toolCallId?: string;
   reasoningDetails?: Record<string, unknown>[];

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { join } from 'node:path';
 import {
   AppError,
   autopilotLimitsSchema,
@@ -26,6 +27,13 @@ import {
   runHostFileTool,
   isProjectReadTool,
   fetchWebPage,
+  hostWriteInput,
+  withFusedFileQueue,
+  assertUnchangedBeforeCommand,
+  THEN_RUN_SUCCEEDED,
+  THEN_RUN_FAILED,
+  THEN_RUN_SKIPPED,
+  resolveTarget,
 } from '@lodex/tools';
 import type { Store } from '@lodex/storage';
 import { proposePlan } from './planning';
@@ -42,7 +50,7 @@ import type {
 import type { RunMcp } from './mcp';
 import type { RegisteredSkill } from '@lodex/skills';
 import { parseDelegation, runSubagents } from './subagents';
-import type { ObservationPack } from './observations';
+import { observationIdFromMarker, type ObservationPack } from './observations';
 
 import { ToolCallAssembler, mergeDetails } from './tool-stream';
 import {
@@ -193,6 +201,7 @@ export async function runAgent(options: {
   controller: AbortController;
   project?: Project;
   commandExecutor?: typeof executeCommand;
+  hostCommandExecutor?: typeof executeHostCommand;
   skills?: RegisteredSkill[];
   mcp?: RunMcp;
   subagents?: { config: ModelConfig; provider: InferenceProvider };
@@ -291,6 +300,73 @@ export async function runAgent(options: {
     const decided = await approval;
     if (decided.approval) card.approval = decided.approval;
     return decided.approval?.status === 'approved';
+  };
+  const fusedCommand = async (
+    card: Activity,
+    command: Parameters<typeof executeHostCommand>[0]['argumentsJson'],
+    environment: 'docker' | 'host',
+    editStatus: string,
+  ) => {
+    let capturedOutput = '';
+    const shared = {
+      project: project!,
+      argumentsJson: command,
+      signal,
+      captureOutput: (chunk: string) => {
+        capturedOutput += chunk;
+      },
+      record: async (execution: NonNullable<Activity['execution']>) => {
+        card.execution = structuredClone(execution);
+        await store.recordExecution(session.id, card.id, execution);
+      },
+    };
+    card.status = 'running';
+    card.fusion = { status: 'pending', environment };
+    let execution: NonNullable<Activity['execution']>;
+    try {
+      execution =
+        environment === 'host'
+          ? await (options.hostCommandExecutor ?? executeHostCommand)(shared)
+          : await (options.commandExecutor ?? executeCommand)({
+              ...shared,
+              config: session.execution!,
+            });
+    } catch {
+      signal.throwIfAborted();
+      card.status = 'failed';
+      card.fusion.status = 'failed';
+      throw new AppError(
+        'FUSION_OUTCOME_UNKNOWN',
+        '파일 변경 후 명령의 실행 결과를 확인하지 못했습니다. 같은 작업을 자동 재실행하지 않고 중지했습니다. 실행 기록을 확인하세요.',
+      );
+    }
+    const passed =
+      execution.status === 'completed' && execution.exitCode === 0 && !execution.cleanupPending;
+    card.fusion = { status: passed ? 'succeeded' : 'failed', environment };
+    const combined = {
+      ...(!passed ? { error: execution.error ?? 'COMMAND_FAILED' } : {}),
+      status: execution.status,
+      editStatus,
+      validation: {
+        command: execution.command,
+        environment,
+        executionId: execution.id,
+        exitCode: execution.exitCode,
+        output: execution.output,
+        truncated: execution.truncated,
+      },
+      message: passed
+        ? `${THEN_RUN_SUCCEEDED} The approved changes were applied and their fused validation passed.`
+        : `${THEN_RUN_FAILED} The approved changes were applied, but their fused validation failed. Inspect the output; do not revert unless requested.`,
+    };
+    if (execution.cleanupPending) throw new AppError('CLEANUP_REQUIRED', execution.error!);
+    return {
+      result: JSON.stringify(combined),
+      observation: JSON.stringify({
+        ...combined,
+        validation: { ...combined.validation, output: capturedOutput || execution.output },
+      }),
+    };
   };
   const reserveModelCall = async (config: ModelConfig, inputEstimateTokens: number) => {
     signal.throwIfAborted();
@@ -576,10 +652,11 @@ export async function runAgent(options: {
       const request = {
         ...context.request,
         messages: options.observations
-          ? await options.observations.project(session.id, [
-              ...context.request.messages,
-              ...continuation,
-            ])
+          ? await options.observations.project(
+              session.id,
+              [...context.request.messages, ...continuation],
+              { enabled: session.config.eco, requestId: `${runId}:${modelCount + 1}` },
+            )
           : [...context.request.messages, ...continuation],
       };
       const manifest: ContextManifest = {
@@ -754,6 +831,15 @@ export async function runAgent(options: {
             '이 요청에 제공되지 않은 도구라 실행하지 않았습니다.',
           );
         const card = cards.get(index)!;
+        if (['propose_edit', 'propose_changes', 'host_write_file'].includes(call.name)) {
+          try {
+            const input = JSON.parse(call.arguments);
+            if (input.thenRun || input.then_run) card.fusion = { status: 'pending' };
+          } catch {
+            /* Dispatcher reports invalid input. */
+          }
+          if (card.fusion) await save();
+        }
         const skipRemaining = () => {
           for (let rest = index + 1; rest < calls.length; rest++) {
             const skipped = cards.get(rest)!;
@@ -853,7 +939,18 @@ export async function runAgent(options: {
         } else if (call.name === 'recall_observation') {
           if (!options.observations)
             throw new AppError('OBSERVATION_UNAVAILABLE', '보관된 도구 결과를 읽을 수 없습니다.');
-          result = await options.observations.recall(session.id, call.arguments);
+          try {
+            result = await options.observations.recall(session.id, call.arguments);
+          } catch (error) {
+            signal.throwIfAborted();
+            result = JSON.stringify({
+              error: 'OBSERVATION_RECALL',
+              message:
+                error instanceof Error ? error.message : 'Stored observation could not be read',
+              instruction:
+                'Use an observation id from this conversation and offset 0 or a returned nextOffset. Do not treat omitted or corrupted content as evidence.',
+            });
+          }
         } else if (call.name === 'search_history') {
           result = searchSessionHistory(session, call.arguments);
         } else if (call.name === 'web_fetch') {
@@ -958,8 +1055,60 @@ export async function runAgent(options: {
             );
           const parsed = JSON.parse(call.arguments) as { path?: unknown };
           const path = typeof parsed.path === 'string' ? parsed.path : '';
-          await authorize(card, { kind: 'file', paths: [path] });
-          result = await runHostFileTool(call.name, call.arguments, session.mode ?? 'build');
+          if (call.name !== 'host_write_file') {
+            await authorize(card, { kind: 'file', paths: [path] });
+            result = await runHostFileTool(call.name, call.arguments, session.mode ?? 'build');
+          } else {
+            try {
+              const input = hostWriteInput(call.arguments);
+              result = await withFusedFileQueue([input.path], signal, async () => {
+                await authorize(
+                  card,
+                  input.thenRun
+                    ? {
+                        kind: 'fusion',
+                        paths: [input.path],
+                        command: input.thenRun.command,
+                        network: 'bridge',
+                        environment: 'host',
+                      }
+                    : { kind: 'file', paths: [input.path] },
+                );
+                const written = await runHostFileTool(
+                  call.name,
+                  call.arguments,
+                  session.mode ?? 'build',
+                );
+                if (!input.thenRun) return written;
+                const target = JSON.parse(written) as { path: string; sha256: string };
+                await assertUnchangedBeforeCommand(
+                  [{ path: input.path, expectedPath: target.path, expectedHash: target.sha256 }],
+                  signal,
+                );
+                const combined = await fusedCommand(
+                  card,
+                  JSON.stringify(input.thenRun),
+                  'host',
+                  'written',
+                );
+                observationResult = combined.observation;
+                return combined.result;
+              });
+            } catch (error) {
+              signal.throwIfAborted();
+              if (
+                !card.fusion ||
+                card.execution ||
+                (error instanceof AppError &&
+                  ['CLEANUP_REQUIRED', 'FUSION_OUTCOME_UNKNOWN'].includes(error.code))
+              )
+                throw error;
+              result = JSON.stringify({
+                error: error instanceof AppError ? error.code : 'FUSION_FAILED',
+                message: `${THEN_RUN_SKIPPED} ${error instanceof Error ? error.message : 'Mutation failed'}; do not claim the command ran.`,
+              });
+            }
+          }
         } else if (call.name === 'run_command') {
           if (!project || session.mode === 'plan' || session.execution?.backend !== 'docker')
             throw new AppError(
@@ -1038,7 +1187,7 @@ export async function runAgent(options: {
             environment: 'host',
           });
           let capturedOutput = '';
-          const execution = await executeHostCommand({
+          const execution = await (options.hostCommandExecutor ?? executeHostCommand)({
             project,
             argumentsJson: call.arguments,
             signal,
@@ -1074,19 +1223,45 @@ export async function runAgent(options: {
           if (!project) throw new AppError('PROJECT_REQUIRED', '프로젝트가 필요합니다.');
           if (session.mode === 'plan' && !isProjectReadTool(call.name))
             throw new AppError('PLAN_READ_ONLY', 'Plan 모드에서는 파일을 변경할 수 없습니다.', 403);
-          result = await runProjectTool(
-            project,
-            call.name,
-            call.arguments,
-            signal,
-            (edit) => {
-              card.edit = edit;
-            },
-            (changes) => {
-              card.changes = changes;
-            },
-            (paths, destructive) => authorize(card, { kind: 'file', paths, destructive }),
-          );
+          try {
+            result = await runProjectTool(
+              project,
+              call.name,
+              call.arguments,
+              signal,
+              (edit) => {
+                card.edit = edit;
+              },
+              (changes) => {
+                card.changes = changes;
+              },
+              (paths, destructive) => authorize(card, { kind: 'file', paths, destructive }),
+            );
+          } catch (error) {
+            signal.throwIfAborted();
+            if (
+              !['propose_edit', 'propose_changes'].includes(call.name) ||
+              !(JSON.parse(call.arguments).thenRun || JSON.parse(call.arguments).then_run)
+            )
+              throw error;
+            result = JSON.stringify({
+              error: error instanceof AppError ? error.code : 'FUSION_FAILED',
+              message: `${THEN_RUN_SKIPPED} The file mutation failed; the command was not run. ${error instanceof Error ? error.message : ''}`,
+            });
+          }
+        }
+        if (
+          ['propose_edit', 'propose_changes'].includes(call.name) &&
+          !activityProposal(card) &&
+          (JSON.parse(call.arguments).thenRun || JSON.parse(call.arguments).then_run)
+        ) {
+          const failure = JSON.parse(result);
+          if (failure.error)
+            result = JSON.stringify({
+              ...failure,
+              validationStatus: 'skipped',
+              message: `${THEN_RUN_SKIPPED} ${failure.message ?? 'Mutation failed'}; the command was not run.`,
+            });
         }
         if (activityProposal(card) && options.waitForApproval) {
           card.text = result;
@@ -1095,103 +1270,127 @@ export async function runAgent(options: {
           const paths =
             'files' in proposal ? proposal.files.map((file) => file.path) : [proposal.path];
           const thenRun = proposal.thenRun;
-          if (thenRun && (!project || session.execution?.backend !== 'docker'))
-            throw new AppError(
-              'EXECUTION_DISABLED',
-              '수정 후 검증을 함께 실행하려면 이 대화의 Docker 명령 실행을 켜야 합니다.',
-              403,
-            );
-          const permission = permissionDecision(
-            session.permissionMode ?? defaultPermissionMode(),
-            thenRun
-              ? {
-                  kind: 'fusion',
-                  paths,
-                  command: thenRun.command,
-                  network: session.execution!.network,
-                  environment: 'docker',
-                }
-              : { kind: 'file', paths },
-            session.run?.actor ?? 'desktop',
-          );
-          const approval = options.waitForApproval(card.id, signal);
+          const environment = session.execution?.backend === 'docker' ? 'docker' : 'host';
           try {
-            card.approval =
-              permission.action === 'allow'
-                ? approvedDecision(permission)
-                : pendingDecision(permission);
-            await save();
-            if (permission.action === 'allow') {
-              if (!options.applyApprovedEdit)
-                throw new AppError('APPROVAL_UNAVAILABLE', '파일 변경을 적용할 수 없습니다.');
-              await options.applyApprovedEdit(card.id);
-            }
-          } catch (error) {
-            controller.abort(error);
-            await approval.catch(() => undefined);
-            throw error;
-          }
-          const decided = await approval;
-          if (decided.approval) card.approval = decided.approval;
-          if (decided.edit) card.edit = decided.edit;
-          if (decided.changes) card.changes = decided.changes;
-          const decision = activityProposal(decided);
-          if (!decision)
-            throw new AppError('EDIT_NOT_FOUND', '검토 중인 수정안을 찾을 수 없습니다.');
-          if (decision.status === 'applied' && thenRun) {
-            let capturedOutput = '';
-            const execution = await (options.commandExecutor ?? executeCommand)({
-              project: project!,
-              config: session.execution!,
-              argumentsJson: JSON.stringify(thenRun),
+            await withFusedFileQueue(
+              paths.map((path) => join(project!.path, path)),
               signal,
-              captureOutput: (chunk) => {
-                if (chunk) capturedOutput += chunk;
+              async () => {
+                if (
+                  thenRun &&
+                  (!project || (environment === 'host' && session.permissionMode !== 'full'))
+                )
+                  throw new AppError(
+                    'EXECUTION_DISABLED',
+                    '수정 후 명령에는 Docker 실행 허용 또는 전체 접근이 필요합니다.',
+                    403,
+                  );
+                const permission = permissionDecision(
+                  session.permissionMode ?? defaultPermissionMode(),
+                  thenRun
+                    ? {
+                        kind: 'fusion',
+                        paths,
+                        command: thenRun.command,
+                        network: environment === 'host' ? 'bridge' : session.execution!.network,
+                        environment,
+                      }
+                    : { kind: 'file', paths },
+                  session.run?.actor ?? 'desktop',
+                );
+                const approval = options.waitForApproval!(card.id, signal);
+                try {
+                  card.approval =
+                    permission.action === 'allow'
+                      ? approvedDecision(permission)
+                      : pendingDecision(permission);
+                  await save();
+                  if (permission.action === 'allow') {
+                    if (!options.applyApprovedEdit)
+                      throw new AppError('APPROVAL_UNAVAILABLE', '파일 변경을 적용할 수 없습니다.');
+                    await options.applyApprovedEdit(card.id);
+                  }
+                } catch (error) {
+                  controller.abort(error);
+                  await approval.catch(() => undefined);
+                  throw error;
+                }
+                const decided = await approval;
+                if (decided.approval) card.approval = decided.approval;
+                if (decided.edit) card.edit = decided.edit;
+                if (decided.changes) card.changes = decided.changes;
+                const decision = activityProposal(decided);
+                if (!decision)
+                  throw new AppError('EDIT_NOT_FOUND', '검토 중인 수정안을 찾을 수 없습니다.');
+                if (decision.status === 'applied' && thenRun) {
+                  const files = 'files' in decision ? decision.files : [decision];
+                  const targets = await Promise.all(
+                    files.map(async (file) => ({
+                      path: (
+                        await resolveTarget(
+                          project!,
+                          file.path,
+                          'kind' in file &&
+                            file.kind === 'create' &&
+                            /^\.env(?:\.|$)/i.test(file.path),
+                        )
+                      ).path,
+                      expectedHash: file.afterHash,
+                    })),
+                  );
+                  await assertUnchangedBeforeCommand(targets, signal);
+                  // Re-check literal project paths after yielding; links and moved roots remain blocked.
+                  await Promise.all(
+                    files.map((file) =>
+                      resolveTarget(
+                        project!,
+                        file.path,
+                        'kind' in file &&
+                          file.kind === 'create' &&
+                          /^\.env(?:\.|$)/i.test(file.path),
+                      ),
+                    ),
+                  );
+                  const combined = await fusedCommand(
+                    card,
+                    JSON.stringify(thenRun),
+                    environment,
+                    decision.status,
+                  );
+                  result = combined.result;
+                  observationResult = combined.observation;
+                } else {
+                  result = JSON.stringify({
+                    status: decision.status,
+                    editStatus: decision.status,
+                    ...(thenRun ? { validationStatus: 'skipped' } : {}),
+                    message:
+                      decision.status === 'applied'
+                        ? 'The user approved and applied the proposed changes. Continue from the updated project.'
+                        : decision.status === 'rejected'
+                          ? 'The user rejected the proposed changes. Do not assume they were applied.'
+                          : (thenRun ? THEN_RUN_SKIPPED + ' ' : '') +
+                            'The review finished with status ' +
+                            decision.status +
+                            '. Inspect before continuing.',
+                  });
+                }
               },
-              record: async (execution) => {
-                card.execution = structuredClone(execution);
-                await store.recordExecution(session.id, card.id, execution);
-              },
-            });
-            const combined = {
-              ...(execution.status !== 'completed'
-                ? { error: execution.error ?? 'COMMAND_FAILED' }
-                : {}),
-              status: execution.status,
-              editStatus: decision.status,
-              validation: {
-                command: thenRun.command,
-                executionId: execution.id,
-                exitCode: execution.exitCode,
-                output: execution.output,
-                truncated: execution.truncated,
-              },
-              message:
-                execution.status === 'completed'
-                  ? 'The approved changes were applied and their fused validation passed.'
-                  : 'The approved changes were applied, but their fused validation failed. Inspect the output; do not revert unless requested.',
-            };
-            result = JSON.stringify(combined);
-            observationResult = JSON.stringify({
-              ...combined,
-              validation: {
-                ...combined.validation,
-                output: capturedOutput || execution.output,
-              },
-            });
-            if (execution.cleanupPending) throw new AppError('CLEANUP_REQUIRED', execution.error!);
-          } else {
+            );
+          } catch (error) {
+            signal.throwIfAborted();
+            if (
+              !thenRun ||
+              card.execution ||
+              (error instanceof AppError &&
+                ['CLEANUP_REQUIRED', 'FUSION_OUTCOME_UNKNOWN'].includes(error.code))
+            )
+              throw error;
             result = JSON.stringify({
-              status: decision.status,
-              editStatus: decision.status,
-              message:
-                decision.status === 'applied'
-                  ? 'The user approved and applied the proposed changes. Continue from the updated project.'
-                  : decision.status === 'rejected'
-                    ? 'The user rejected the proposed changes. Do not assume they were applied.'
-                    : 'The review finished with status ' +
-                      decision.status +
-                      '. Inspect before continuing.',
+              error: error instanceof AppError ? error.code : 'FUSION_FAILED',
+              editStatus: activityProposal(card)?.status,
+              validationStatus: 'skipped',
+              message: `${THEN_RUN_SKIPPED} ${error instanceof Error ? error.message : 'Mutation failed'}; the command was not run.`,
             });
           }
         }
@@ -1203,10 +1402,29 @@ export async function runAgent(options: {
               executionId: card.execution.id,
             })
           : result;
+        if (Buffer.byteLength(card.text) > 24000)
+          card.text = JSON.stringify({
+            preview:
+              card.text.slice(0, 4000) +
+              '\n[activity preview; original tool result remains in session history]\n' +
+              card.text.slice(-4000),
+            truncated: true,
+          });
         card.status =
           'error' in JSON.parse(result) || JSON.parse(result).isError === true
             ? 'failed'
             : 'completed';
+        if (card.fusion)
+          card.fusion = {
+            status: card.execution
+              ? card.execution.status === 'completed' &&
+                card.execution.exitCode === 0 &&
+                !card.execution.cleanupPending
+                ? 'succeeded'
+                : 'failed'
+              : 'skipped',
+            ...(card.execution?.environment ? { environment: card.execution.environment } : {}),
+          };
         let contextResult = result;
         if (card.execution) {
           const data = JSON.parse(result) as {
@@ -1231,19 +1449,31 @@ export async function runAgent(options: {
             contextResult = JSON.stringify(data);
           }
         }
+        let observationId: string | undefined;
+        // Keep the full captured tool result in the session. Packing only changes
+        // provider projections, including on failure or when Eco is later disabled.
         if (options.observations && session.config.eco) {
+          contextResult = observationResult ?? result;
+        }
+        if (options.observations && session.config.eco && card.status !== 'failed') {
           try {
-            contextResult = await options.observations.archive(
-              session.id,
-              call.name,
-              call.id,
-              observationResult ?? contextResult,
+            observationId = observationIdFromMarker(
+              await options.observations.archive(session.id, call.name, call.id, contextResult),
             );
+            if (observationId)
+              card.observation = { id: observationId, bytes: Buffer.byteLength(contextResult) };
           } catch {
             // Fail open: archival must never hide a tool result or stop the active run.
           }
         }
-        continuation.push({ role: 'tool', content: contextResult, toolCallId: call.id });
+        continuation.push({
+          role: 'tool',
+          content: contextResult,
+          toolCallId: call.id,
+          toolName: call.name,
+          isError: card.status === 'failed',
+          ...(observationId ? { observationId } : {}),
+        });
         await save();
         if (autopilot) {
           emptyRounds = 0;

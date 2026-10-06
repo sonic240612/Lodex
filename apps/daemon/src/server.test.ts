@@ -153,10 +153,9 @@ describe('authenticated daemon integration', () => {
     expect(round).toBe(4);
     const stored = await app.store.session(session.id);
     const continuation = stored.messages.at(-1)?.continuation ?? [];
-    expect(continuation.find((message) => message.toolCallId === 'large-read')?.content).toMatch(
-      /^lodex_observation_v1:/,
-    );
-    expect(JSON.stringify(continuation)).not.toContain('OBSERVATION_PAYLOAD_LINE 150');
+    const retained = continuation.find((message) => message.toolCallId === 'large-read');
+    expect(retained?.observationId).toMatch(/^obs_[a-f0-9]{24}$/);
+    expect(retained?.content).toContain('OBSERVATION_PAYLOAD_LINE 150');
   });
   it('persists manual checkpoints and automatically compacts a request that would overflow', async () => {
     const requests: InferenceRequest[] = [];

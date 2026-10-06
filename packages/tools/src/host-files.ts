@@ -11,7 +11,12 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join } from 'node:path';
-import { AppError, type ToolDefinition } from '@lodex/contracts';
+import {
+  AppError,
+  fusionFields,
+  normalizeFusedCommand,
+  type ToolDefinition,
+} from '@lodex/contracts';
 import { z } from 'zod';
 
 const absolutePath = z.string().min(1).max(4096).refine(isAbsolute, '절대 경로가 필요합니다.');
@@ -21,7 +26,14 @@ const writeSchema = z.strictObject({
   path: absolutePath,
   expectedHash: z.union([z.string().regex(/^[a-f0-9]{64}$/), z.null()]),
   content: z.string().max(1_048_576),
+  ...fusionFields,
 });
+
+export function hostWriteInput(argumentsJson: string) {
+  const input = writeSchema.parse(JSON.parse(argumentsJson));
+  const thenRun = normalizeFusedCommand(input);
+  return { ...input, ...(thenRun ? { thenRun } : {}) };
+}
 
 export const hostFileTools: ToolDefinition[] = [
   {
@@ -47,7 +59,7 @@ export const hostFileTools: ToolDefinition[] = [
     function: {
       name: 'host_write_file',
       description:
-        'FULL ACCESS BUILD ONLY. Atomically create or replace a UTF-8 host file by absolute path. Pass the SHA-256 returned by host_read_file for an existing file, or null only when creating a new file. Concurrent changes are rejected.',
+        'FULL ACCESS BUILD ONLY. Atomically create or replace a UTF-8 host file by absolute path. Pass the SHA-256 returned by host_read_file for an existing file, or null only when creating a new file. Optional thenRun fuses an already-known host command with the write, without another model turn. Concurrent changes skip the command; a failed command keeps the file.',
       parameters: z.toJSONSchema(writeSchema),
     },
   },
@@ -100,7 +112,7 @@ export async function runHostFileTool(
     throw new AppError('HOST_TOOL', '알 수 없는 호스트 파일 도구입니다.');
   if (mode !== 'build')
     throw new AppError('PLAN_READ_ONLY', 'Plan 모드에서는 파일을 변경할 수 없습니다.', 403);
-  const input = writeSchema.parse(JSON.parse(argumentsJson));
+  const input = hostWriteInput(argumentsJson);
   await mkdir(dirname(input.path), { recursive: true });
   const parent = await realpath(dirname(input.path));
   const requested = join(parent, basename(input.path));
