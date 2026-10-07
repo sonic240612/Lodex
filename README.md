@@ -27,6 +27,7 @@ Desktop agent harness for local LLMs and OpenRouter.
 - Use Eco mode, automatic fast compaction, bounded current-conversation history search, local ObservationPack archives, and on-demand recall for large tool results.
 - Choose LLM-based **Context compaction** or deterministic **Quick compaction**. Full transcripts stay in SQLite.
 - View Markdown/GFM messages, collapsible thinking and tool activity, active context usage, generation metrics, and a jump-to-latest button.
+- Manage models, skills, MCP, Telegram, worktrees, and backups in **Settings**. Type `/` in chat for commands; use arrow keys and Tab to select, or type a command directly.
 - Create daily or manual secret-free JSON backups, apply count/age retention, and export them through the native save dialog.
 
 ## Quick start
@@ -75,6 +76,8 @@ The desktop app can also store the key in the operating system keychain. `.env`,
 | Full Access    | Host paths, shell, network, secrets, and selected MCP actions run without another prompt after the warning |
 
 Full Access is stored per conversation. File hashes, path checks, symlink checks, cancellation, process cleanup, and audit records still apply.
+
+Chat commands: `/plan [request]`, `/build [request]`, `/goal <goal>`, `/resume`, `/stop`, `/compact`, `/quick`, `/new`, `/settings`, and `/help`. Korean aliases include `/계획`, `/빌드`, `/목표`, and `/설정`. Selecting a suggestion fills the input; sending it runs the command.
 
 `/goal <goal>` continues until completion, a blocker, or a budget limit. Completion checks successful current-run commands or exact artifact hashes; evidence alone requires user confirmation. Saved plans can use verification commands, file content/hash checks, or user confirmation. Later changes invalidate earlier checks. Manual task checkboxes remain separate.
 

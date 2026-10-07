@@ -1,13 +1,16 @@
+import { SettingsSurface } from './SettingsSurface';
 import { useEffect, useRef, useState } from 'react';
 import type { Project, WorktreeRecord } from '@lodex/contracts';
 import { createWorktree, nativeDesktop, worktreeList } from './bridge';
 import { Icon } from './icons';
 export function WorktreeManager({
+  embedded = false,
   projects,
   selectedId,
   onOpen,
   onClose,
 }: {
+  embedded?: boolean;
   projects: Project[];
   selectedId: string | null;
   onOpen: (project: Project) => void;
@@ -51,7 +54,9 @@ export function WorktreeManager({
     }
   }
   return (
-    <dialog
+    <SettingsSurface
+      embedded={embedded}
+      aria-busy={busy}
       ref={dialog}
       className="settings-dialog integration-dialog"
       onCancel={(event) => {
@@ -125,6 +130,6 @@ export function WorktreeManager({
           </section>
         ))}
       </div>
-    </dialog>
+    </SettingsSurface>
   );
 }

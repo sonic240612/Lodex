@@ -1,3 +1,4 @@
+import { SettingsSurface } from './SettingsSurface';
 import { useEffect, useRef, useState } from 'react';
 import type { Session } from '@lodex/contracts';
 import type { DiscoveredSkill, RegisteredSkill, SkillDialect, SkillPlatform } from '@lodex/skills';
@@ -47,6 +48,7 @@ const samePath = (left: string, right: string) =>
     : left === right;
 
 export function SkillManager({
+  embedded = false,
   session,
   projectId,
   provider,
@@ -54,6 +56,7 @@ export function SkillManager({
   onClose,
   onSave,
 }: {
+  embedded?: boolean;
   session: Session | undefined;
   projectId: string | undefined;
   provider: string;
@@ -174,7 +177,8 @@ export function SkillManager({
     setStatus('');
   }
   return (
-    <dialog
+    <SettingsSurface
+      embedded={embedded}
       className="settings-dialog skill-manager"
       ref={dialog}
       onCancel={onClose}
@@ -631,6 +635,6 @@ export function SkillManager({
           </p>
         )}
       </div>
-    </dialog>
+    </SettingsSurface>
   );
 }

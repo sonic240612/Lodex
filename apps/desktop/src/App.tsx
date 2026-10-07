@@ -33,6 +33,16 @@ import { loadLastModelConfig } from './model-preference';
 import { ProjectDialog } from './ProjectDialog';
 import { Markdown } from './Markdown';
 import { ConversationHistory } from './ConversationHistory';
+import { SettingsScreen, type SettingsSectionId } from './SettingsScreen';
+import { SettingsSurface } from './SettingsSurface';
+import { SlashMenu } from './SlashMenu';
+import {
+  availableSlashCommands,
+  suggestSlashCommands,
+  moveSlashSelection,
+  parseComposerInput,
+  type SlashCommand,
+} from './slash-commands';
 import { McpElicitationBanner } from './McpElicitationBanner';
 import { ApprovalBanner } from './ApprovalBanner';
 import { ExecutionPanel } from './ExecutionPanel';
@@ -100,13 +110,8 @@ export function App() {
   const workspace = useWorkspace();
   const session = workspace.sessions.find((s) => s.id === workspace.selectedId);
   const [settings, setSettings] = useState(false);
-  const [modelManager, setModelManager] = useState(false);
-  const [routingSettings, setRoutingSettings] = useState(false);
-  const [telegramSettings, setTelegramSettings] = useState(false);
-  const [worktreeManager, setWorktreeManager] = useState(false);
-  const [skillManager, setSkillManager] = useState(false);
-  const [mcpManager, setMcpManager] = useState(false);
-  const [dataManager, setDataManager] = useState(false);
+  const [settingsSection, setSettingsSection] = useState<SettingsSectionId | null>(null);
+  const [settingsRevision, setSettingsRevision] = useState(0);
   const [projectDialog, setProjectDialog] = useState(false);
   const [permissionMenu, setPermissionMenu] = useState(false);
   const [confirmFullAccess, setConfirmFullAccess] = useState(false);
@@ -128,6 +133,8 @@ export function App() {
   const [sidebarOpen, setSidebarOpen] = useState(window.innerWidth > 760);
   const [error, setError] = useState('');
   const [text, setText] = useState('');
+  const [slashIndex, setSlashIndex] = useState(0);
+  const [slashDismissed, setSlashDismissed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [newMode, setNewMode] = useState<AgentMode>('plan');
   const mode = session?.mode ?? newMode;
@@ -145,6 +152,23 @@ export function App() {
       ? 'openrouter'
       : config.provider;
   const running = session?.run?.status === 'running';
+  const slashSuggestions = suggestSlashCommands(
+    text,
+    availableSlashCommands(session, workspace.connected),
+  );
+  const localComposerCommand = ['new', 'settings', 'help'].includes(
+    parseComposerInput(text).command,
+  );
+  const activeSlash = Math.min(slashIndex, Math.max(0, slashSuggestions.length - 1));
+  const slashOpen = !slashDismissed && slashSuggestions.length > 0;
+  useEffect(() => {
+    setSlashIndex(0);
+    setSlashDismissed(false);
+  }, [text, session?.id]);
+  function chooseSlash(command: SlashCommand) {
+    setText(`/${command.id} `);
+    requestAnimationFrame(() => composer.current?.focus());
+  }
   const permissionMode = session?.permissionMode ?? defaultPermissionMode();
   const pendingApproval = session?.messages
     .flatMap((message) => message.activities ?? [])
@@ -174,6 +198,7 @@ export function App() {
 
   useEffect(() => {
     const shortcut = (event: KeyboardEvent) => {
+      if (document.querySelector('dialog[open]')) return;
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'n') {
         event.preventDefault();
         useWorkspace.getState().select(null);
@@ -187,6 +212,7 @@ export function App() {
 
   useEffect(() => {
     const shortcut = (event: KeyboardEvent) => {
+      if (document.querySelector('dialog[open]')) return;
       if (event.ctrlKey && !event.altKey && !event.shiftKey && event.code === 'Period') {
         event.preventDefault();
         if (!busy && !running && workspace.connected)
@@ -267,6 +293,7 @@ export function App() {
   async function createSession(
     modelConfig = workspace.config,
     routing = session?.routing,
+    agentMode = mode,
   ): Promise<Session> {
     const result = await sendCommand({
       type: 'create_session',
@@ -275,7 +302,7 @@ export function App() {
       config: modelConfig,
       ...(routing ? { routing } : {}),
       projectId: workspace.selectedProjectId,
-      mode,
+      mode: agentMode,
     });
     workspace.upsert(result.session);
     workspace.setConfig(modelConfig);
@@ -284,40 +311,131 @@ export function App() {
   }
   async function submit(event?: FormEvent) {
     event?.preventDefault();
-    if (!text.trim() || busy || running || !workspace.connected) return;
-    if (config.provider !== 'demo' && !config.model) {
+    if (!text.trim() || busy) return;
+    const { command, argument } = parseComposerInput(text);
+    setError('');
+    if (command === 'unknown') {
+      setError('알 수 없는 명령입니다. /help로 사용 가능한 명령을 확인하세요.');
+      return;
+    }
+    if (!['message', 'plan', 'build', 'goal'].includes(command) && argument) {
+      setError(`/${command} 명령에는 추가 내용을 입력하지 마세요.`);
+      return;
+    }
+    if (command === 'settings' || command === 'new' || command === 'help') {
+      if (command === 'settings') setSettingsSection('connection');
+      if (command === 'new') workspace.select(null);
+      setText(command === 'help' ? '/' : '');
+      setSlashDismissed(false);
+      requestAnimationFrame(() => composer.current?.focus());
+      return;
+    }
+    if (!workspace.connected) {
+      setError('워크스페이스 연결을 기다려 주세요.');
+      return;
+    }
+    if (running && command !== 'stop') {
+      setError('현재 실행이 끝난 뒤 명령을 실행하세요.');
+      return;
+    }
+    if (command === 'goal' && (!argument || argument.length > 4000)) {
+      setError('사용법: /goal 달성할 목표 (최대 4,000자)');
+      return;
+    }
+    if (command === 'stop' && !running) {
+      setError('진행 중인 실행이 없습니다.');
+      return;
+    }
+    if (
+      ['compact', 'quick', 'resume'].includes(command) &&
+      !availableSlashCommands(session, true).some((item) => item.id === command)
+    ) {
+      setError(command === 'resume' ? '계속할 목표가 없습니다.' : '압축할 대화가 없습니다.');
+      return;
+    }
+    const nextMode =
+      command === 'plan' ? 'plan' : command === 'build' || command === 'goal' ? 'build' : mode;
+    const requestConfig = session ? resolveModelConfig({ ...session, mode: nextMode }) : config;
+    const needsModel =
+      command === 'message' ||
+      command === 'goal' ||
+      command === 'compact' ||
+      command === 'resume' ||
+      (['plan', 'build'].includes(command) && !!argument);
+    if (needsModel && requestConfig.provider !== 'demo' && !requestConfig.model) {
       setSettings(true);
       return;
     }
-    const content = text.trim();
-    const goal = content.match(/^\/goal(?:\s+([\s\S]+))?$/i);
-    if (goal && !goal[1]?.trim()) {
-      setError('사용법: /goal 달성할 목표');
-      return;
-    }
     setBusy(true);
-    setError('');
-    followLatest.current = true;
-    setShowScrollToBottom(false);
     try {
-      const target = session ?? (await createSession());
-      const result = await sendCommand(
-        goal
-          ? {
-              type: 'start_goal',
+      let target = session;
+      if (command === 'plan' || command === 'build') {
+        if (target && target.mode !== nextMode) {
+          target = (
+            await sendCommand({
+              type: 'set_mode',
               sessionId: target.id,
               expectedVersion: target.version,
-              goal: goal[1]!.trim(),
-              limits: autopilotLimitsSchema.parse({}),
-            }
-          : {
-              type: 'send_message',
-              sessionId: target.id,
-              expectedVersion: target.version,
-              content,
-            },
-      );
-      workspace.upsert(result.session);
+              mode: nextMode,
+            })
+          ).session;
+          workspace.upsert(target);
+        } else if (!target) setNewMode(nextMode);
+        if (!argument) {
+          setText('');
+          return;
+        }
+      }
+      if (command === 'stop') {
+        workspace.upsert(
+          (await sendCommand({ type: 'cancel_run', sessionId: target!.id, runId: target!.run!.id }))
+            .session,
+        );
+      } else if (command === 'compact' || command === 'quick') {
+        workspace.upsert(
+          (
+            await sendCommand({
+              type: command === 'quick' ? 'quick_compact_context' : 'compact_context',
+              sessionId: target!.id,
+              expectedVersion: target!.version,
+            })
+          ).session,
+        );
+      } else if (command === 'resume') {
+        workspace.upsert(
+          (
+            await sendCommand({
+              type: 'resume_goal',
+              sessionId: target!.id,
+              expectedVersion: target!.version,
+            })
+          ).session,
+        );
+      } else {
+        followLatest.current = true;
+        setShowScrollToBottom(false);
+        target ??= await createSession(workspace.config, undefined, nextMode);
+        workspace.upsert(
+          (
+            await sendCommand(
+              command === 'goal'
+                ? {
+                    type: 'start_goal',
+                    sessionId: target.id,
+                    expectedVersion: target.version,
+                    goal: argument,
+                    limits: autopilotLimitsSchema.parse({}),
+                  }
+                : {
+                    type: 'send_message',
+                    sessionId: target.id,
+                    expectedVersion: target.version,
+                    content: argument,
+                  },
+            )
+          ).session,
+        );
+      }
       setText('');
     } catch (failure) {
       setError(messageError(failure));
@@ -456,6 +574,7 @@ export function App() {
     }
     workspace.setConfig(value);
     setSettings(false);
+    setSettingsRevision((value) => value + 1);
   }
   async function applyRouting(routing: AgentRoutingConfig) {
     if (!session) await createSession(workspace.config, routing);
@@ -468,7 +587,7 @@ export function App() {
       });
       workspace.upsert(result.session);
     }
-    setRoutingSettings(false);
+    setSettingsRevision((value) => value + 1);
   }
   async function chooseLocalModel(profile: LocalProfile) {
     const modelConfig: ModelConfig = {
@@ -485,7 +604,6 @@ export function App() {
       projectCloudConsent: false,
     };
     await applyConfig(modelConfig);
-    setModelManager(false);
   }
   async function applySkills(value: SkillSelectionSave) {
     const target = session ?? (await createSession());
@@ -497,7 +615,7 @@ export function App() {
       skillCloudConsent: value.skillCloudConsent,
     });
     workspace.upsert(result.session);
-    setSkillManager(false);
+    setSettingsRevision((value) => value + 1);
   }
   async function applyMcp(value: McpSelectionSave) {
     const target = session ?? (await createSession());
@@ -509,7 +627,7 @@ export function App() {
       mcpCloudConsent: value.mcpCloudConsent,
     });
     workspace.upsert(result.session);
-    setMcpManager(false);
+    setSettingsRevision((value) => value + 1);
   }
   async function attachMcp(
     preview: McpContentPreview,
@@ -525,7 +643,7 @@ export function App() {
       mcpCloudConsent: consent,
     });
     workspace.upsert(result.session);
-    setMcpManager(false);
+    setSettingsRevision((value) => value + 1);
   }
   async function removeMcpAttachment(id: string, expectedVersion: number | undefined) {
     if (!session) return;
@@ -536,7 +654,7 @@ export function App() {
       attachmentId: id,
     });
     workspace.upsert(result.session);
-    setMcpManager(false);
+    setSettingsRevision((value) => value + 1);
   }
   async function changeMode(value: AgentMode) {
     if (!session) {
@@ -627,34 +745,6 @@ export function App() {
             <Icon name="goal" size={18} />
             작업 계획
           </button>
-          <button className="nav-item" onClick={() => setModelManager(true)}>
-            <Icon name="chip" size={18} />
-            로컬 모델 관리
-          </button>
-          <button className="nav-item" onClick={() => setRoutingSettings(true)}>
-            <Icon name="bolt" size={18} />
-            역할별 모델{session?.routing?.subagentsEnabled ? ' · 서브에이전트' : ''}
-          </button>
-          <button className="nav-item" onClick={() => setSkillManager(true)}>
-            <Icon name="bolt" size={18} />
-            스킬{session?.skills?.length ? ` · ${session.skills.length}` : ''}
-          </button>
-          <button className="nav-item" onClick={() => setMcpManager(true)}>
-            <Icon name="bolt" />
-            MCP{session?.mcp?.length ? ` · ${session.mcp.length}` : ''}
-          </button>
-          <button className="nav-item" onClick={() => setTelegramSettings(true)}>
-            <Icon name="chat" size={18} />
-            Telegram
-          </button>
-          <button className="nav-item" onClick={() => setWorktreeManager(true)}>
-            <Icon name="folder" size={18} />
-            Worktree
-          </button>
-          <button className="nav-item" onClick={() => setDataManager(true)}>
-            <Icon name="settings" size={18} />
-            데이터와 백업
-          </button>
           <div className="history-caption">
             <span>프로젝트</span>
             <button
@@ -699,24 +789,12 @@ export function App() {
           />
         </div>
         <div className="sidebar-bottom">
-          <div className="local-card">
-            <span className={`status-dot ${workspace.connected ? 'online' : ''}`} />
-            <div>
-              <strong>{workspace.connected ? '워크스페이스 준비됨' : '데몬에 연결하는 중'}</strong>
-              <small>
-                {nativeDesktop
-                  ? '대화는 이 기기에 저장됩니다'
-                  : '브라우저 UI 미리보기 · 임시 데이터'}
-              </small>
-            </div>
-          </div>
-          <button className="profile-button" onClick={() => setSettings(true)}>
-            <span className="avatar">L</span>
-            <span>
-              <strong>내 워크스페이스</strong>
-              <small>로컬 우선 · 개인 설정</small>
-            </span>
+          <button
+            className="nav-item sidebar-settings"
+            onClick={() => setSettingsSection('connection')}
+          >
             <Icon name="settings" size={18} />
+            설정
           </button>
         </div>
       </aside>
@@ -955,21 +1033,57 @@ export function App() {
               void submit(event);
             }}
           >
+            {slashOpen && (
+              <SlashMenu commands={slashSuggestions} active={activeSlash} onSelect={chooseSlash} />
+            )}
             <textarea
               ref={composer}
+              role="combobox"
               aria-label="메시지"
-              placeholder={project ? project.name + '에서 작업 요청하기' : '메시지 보내기'}
+              aria-haspopup="listbox"
+              aria-autocomplete="list"
+              aria-expanded={slashOpen}
+              aria-controls={slashOpen ? 'composer-slash-menu' : undefined}
+              aria-activedescendant={
+                slashOpen ? `slash-command-${slashSuggestions[activeSlash]!.id}` : undefined
+              }
+              placeholder={
+                project ? project.name + '에서 작업 요청하기 · / 명령' : '메시지 보내기 · / 명령'
+              }
               value={text}
               rows={2}
               maxLength={64000}
               onChange={(event) => setText(event.target.value)}
               onKeyDown={(event) => {
-                if (
-                  event.key === 'Enter' &&
-                  !event.shiftKey &&
-                  !event.nativeEvent.isComposing &&
-                  event.keyCode !== 229
-                ) {
+                if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+                if (slashOpen) {
+                  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                    event.preventDefault();
+                    setSlashIndex(
+                      moveSlashSelection(
+                        activeSlash,
+                        event.key === 'ArrowDown' ? 1 : -1,
+                        slashSuggestions.length,
+                      ),
+                    );
+                    return;
+                  }
+                  if (
+                    !event.shiftKey &&
+                    (event.key === 'Tab' ||
+                      (event.key === 'Enter' && parseComposerInput(text).command === 'unknown'))
+                  ) {
+                    event.preventDefault();
+                    chooseSlash(slashSuggestions[activeSlash]!);
+                    return;
+                  }
+                  if (event.key === 'Escape') {
+                    event.preventDefault();
+                    setSlashDismissed(true);
+                    return;
+                  }
+                }
+                if (event.key === 'Enter' && !event.shiftKey) {
                   event.preventDefault();
                   void submit();
                 }
@@ -1061,7 +1175,7 @@ export function App() {
                   type="submit"
                   className="send-button"
                   aria-label="메시지 보내기"
-                  disabled={!text.trim() || busy || !workspace.connected}
+                  disabled={!text.trim() || busy || (!workspace.connected && !localComposerCommand)}
                 >
                   <Icon name="arrow" size={20} />
                 </button>
@@ -1304,47 +1418,6 @@ export function App() {
           }}
         />
       )}
-      {modelManager && (
-        <Suspense fallback={<div role="status">모델 관리 화면을 여는 중…</div>}>
-          <ModelManager
-            hasSession={!!session}
-            running={!!running}
-            onClose={() => setModelManager(false)}
-            onChoose={chooseLocalModel}
-          />
-        </Suspense>
-      )}
-      {skillManager && (
-        <Suspense fallback={<div role="status">스킬 관리 화면을 여는 중…</div>}>
-          <SkillManager
-            key={session?.id ?? 'new'}
-            session={session}
-            projectId={session?.projectId ?? workspace.selectedProjectId ?? undefined}
-            provider={contextProvider}
-            connected={workspace.connected}
-            onClose={() => setSkillManager(false)}
-            onSave={applySkills}
-          />
-        </Suspense>
-      )}
-      {mcpManager && (
-        <Suspense fallback={null}>
-          <McpManager
-            session={session}
-            projectPath={
-              workspace.projects.find(
-                (project) => project.id === (session?.projectId ?? workspace.selectedProjectId),
-              )?.path
-            }
-            provider={contextProvider}
-            connected={workspace.connected}
-            onClose={() => setMcpManager(false)}
-            onSave={applyMcp}
-            onAttach={attachMcp}
-            onRemoveAttachment={removeMcpAttachment}
-          />
-        </Suspense>
-      )}
       {projectDialog && (
         <ProjectDialog
           onClose={() => setProjectDialog(false)}
@@ -1365,46 +1438,107 @@ export function App() {
           onSave={applyConfig}
         />
       )}
-      {routingSettings && (
-        <Suspense fallback={null}>
-          <RoutingSettings
-            base={session?.config ?? workspace.config}
-            routing={session?.routing}
-            hasMessages={!!session?.messages.length}
-            running={!!running}
-            onClose={() => setRoutingSettings(false)}
-            onSave={applyRouting}
-          />
-        </Suspense>
-      )}
-      {telegramSettings && (
-        <Suspense fallback={null}>
-          <TelegramSettings
-            sessions={workspace.sessions}
-            selectedId={session?.id ?? null}
-            onClose={() => setTelegramSettings(false)}
-          />
-        </Suspense>
-      )}
-      {dataManager && (
-        <Suspense fallback={null}>
-          <DataManager onClose={() => setDataManager(false)} />
-        </Suspense>
-      )}
-      {worktreeManager && (
-        <Suspense fallback={null}>
-          <WorktreeManager
-            projects={workspace.projects}
-            selectedId={workspace.selectedProjectId}
-            onClose={() => setWorktreeManager(false)}
-            onOpen={(project) => {
-              workspace.upsertProject(project);
-              workspace.selectProject(project.id);
-              setText('');
-              setWorktreeManager(false);
-            }}
-          />
-        </Suspense>
+      {settingsSection && (
+        <SettingsScreen
+          selected={settingsSection}
+          onSelect={setSettingsSection}
+          onClose={() => setSettingsSection(null)}
+        >
+          <Suspense
+            fallback={
+              <div className="settings-loading" role="status">
+                설정을 불러오는 중…
+              </div>
+            }
+          >
+            <div key={`${settingsSection}-${settingsRevision}`}>
+              {settingsSection === 'connection' && (
+                <Settings
+                  embedded
+                  config={config}
+                  hasMessages={!!session?.messages.length}
+                  running={!!running}
+                  onClose={() => setSettingsSection(null)}
+                  onSave={applyConfig}
+                />
+              )}
+              {settingsSection === 'local' && (
+                <ModelManager
+                  embedded
+                  hasSession={!!session}
+                  running={!!running}
+                  onClose={() => setSettingsSection(null)}
+                  onChoose={chooseLocalModel}
+                />
+              )}
+              {settingsSection === 'routing' && (
+                <RoutingSettings
+                  embedded
+                  base={session?.config ?? workspace.config}
+                  routing={session?.routing}
+                  hasMessages={!!session?.messages.length}
+                  running={!!running}
+                  onClose={() => setSettingsSection(null)}
+                  onSave={applyRouting}
+                />
+              )}
+              {settingsSection === 'skills' && (
+                <SkillManager
+                  embedded
+                  session={session}
+                  projectId={session?.projectId ?? workspace.selectedProjectId ?? undefined}
+                  provider={contextProvider}
+                  connected={workspace.connected}
+                  onClose={() => setSettingsSection(null)}
+                  onSave={applySkills}
+                />
+              )}
+              {settingsSection === 'mcp' && (
+                <McpManager
+                  embedded
+                  session={session}
+                  projectPath={
+                    workspace.projects.find(
+                      (project) =>
+                        project.id === (session?.projectId ?? workspace.selectedProjectId),
+                    )?.path
+                  }
+                  provider={contextProvider}
+                  connected={workspace.connected}
+                  onClose={() => setSettingsSection(null)}
+                  onSave={applyMcp}
+                  onAttach={attachMcp}
+                  onRemoveAttachment={removeMcpAttachment}
+                />
+              )}
+              {settingsSection === 'telegram' && (
+                <TelegramSettings
+                  embedded
+                  sessions={workspace.sessions}
+                  selectedId={session?.id ?? null}
+                  onClose={() => setSettingsSection(null)}
+                />
+              )}
+              {settingsSection === 'data' && (
+                <DataManager embedded onClose={() => setSettingsSection(null)} />
+              )}
+              {settingsSection === 'worktree' && (
+                <WorktreeManager
+                  embedded
+                  projects={workspace.projects}
+                  selectedId={workspace.selectedProjectId}
+                  onClose={() => setSettingsSection(null)}
+                  onOpen={(project) => {
+                    workspace.upsertProject(project);
+                    workspace.selectProject(project.id);
+                    setText('');
+                    setSettingsSection(null);
+                  }}
+                />
+              )}
+            </div>
+          </Suspense>
+        </SettingsScreen>
       )}
     </div>
   );
@@ -1889,12 +2023,14 @@ export function PlanEditor({
 }
 
 function Settings({
+  embedded = false,
   config,
   hasMessages,
   running,
   onClose,
   onSave,
 }: {
+  embedded?: boolean;
   config: ModelConfig;
   hasMessages: boolean;
   running: boolean;
@@ -1978,12 +2114,17 @@ function Settings({
       });
   }, [catalogProvider, configured, draft.provider]);
   return (
-    <dialog
+    <SettingsSurface
+      embedded={embedded}
+      aria-busy={busy}
       className="settings-dialog"
       ref={dialog}
-      onCancel={onClose}
+      onCancel={(event) => {
+        if (busy) event.preventDefault();
+        else onClose();
+      }}
       onClick={(event) => {
-        if (event.target === dialog.current) onClose();
+        if (!busy && event.target === dialog.current) onClose();
       }}
     >
       <div className="dialog-inner">
@@ -2403,6 +2544,6 @@ function Settings({
           </div>
         </form>
       </div>
-    </dialog>
+    </SettingsSurface>
   );
 }

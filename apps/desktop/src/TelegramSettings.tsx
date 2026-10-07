@@ -1,13 +1,16 @@
+import { SettingsSurface } from './SettingsSurface';
 import { useEffect, useRef, useState } from 'react';
 import type { TelegramStatus, TelegramConfig, Session } from '@lodex/contracts';
 import { nativeDesktop, telegramStatus, telegramAction, saveTelegramToken } from './bridge';
 import { Icon } from './icons';
 
 export function TelegramSettings({
+  embedded = false,
   sessions,
   selectedId,
   onClose,
 }: {
+  embedded?: boolean;
   sessions: Session[];
   selectedId: string | null;
   onClose: () => void;
@@ -91,7 +94,9 @@ export function TelegramSettings({
     }
   }
   return (
-    <dialog
+    <SettingsSurface
+      embedded={embedded}
+      aria-busy={busy}
       ref={dialog}
       className="settings-dialog integration-dialog"
       onCancel={(event) => {
@@ -280,6 +285,6 @@ export function TelegramSettings({
           </p>
         )}
       </div>
-    </dialog>
+    </SettingsSurface>
   );
 }

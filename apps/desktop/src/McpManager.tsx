@@ -1,3 +1,4 @@
+import { SettingsSurface } from './SettingsSurface';
 import { useEffect, useId, useRef, useState } from 'react';
 import type { McpSelection, Session } from '@lodex/contracts';
 import type { McpImport, McpRegistration } from '@lodex/mcp';
@@ -225,6 +226,7 @@ function McpContentEntry({
 }
 
 export function McpManager({
+  embedded = false,
   session,
   projectPath,
   provider,
@@ -234,6 +236,7 @@ export function McpManager({
   onAttach,
   onRemoveAttachment,
 }: {
+  embedded?: boolean;
   session: Session | undefined;
   projectPath?: string | undefined;
   provider: string;
@@ -393,7 +396,8 @@ export function McpManager({
     });
   }
   return (
-    <dialog
+    <SettingsSurface
+      embedded={embedded}
       className="settings-dialog skill-manager mcp-manager"
       ref={dialog}
       onCancel={onClose}
@@ -929,6 +933,6 @@ export function McpManager({
         )}
         {status && <p role="status">{status}</p>}
       </div>
-    </dialog>
+    </SettingsSurface>
   );
 }

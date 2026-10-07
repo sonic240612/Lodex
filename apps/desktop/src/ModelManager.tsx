@@ -1,3 +1,4 @@
+import { SettingsSurface } from './SettingsSurface';
 import { useEffect, useRef, useState } from 'react';
 import {
   engineSettingsSchema,
@@ -29,11 +30,13 @@ const blank = (): LocalProfileInput => ({
   vramReservationMb: 22528,
 });
 export function ModelManager({
+  embedded = false,
   hasSession,
   running,
   onClose,
   onChoose,
 }: {
+  embedded?: boolean;
   hasSession: boolean;
   running: boolean;
   onClose: () => void;
@@ -180,7 +183,8 @@ export function ModelManager({
     setTrusted(false);
   }
   return (
-    <dialog
+    <SettingsSurface
+      embedded={embedded}
       className="settings-dialog model-manager"
       ref={dialog}
       onCancel={onClose}
@@ -830,6 +834,6 @@ export function ModelManager({
           </p>
         )}
       </div>
-    </dialog>
+    </SettingsSurface>
   );
 }

@@ -1,3 +1,4 @@
+import { SettingsSurface } from './SettingsSurface';
 import { useEffect, useRef, useState } from 'react';
 import {
   agentRoutingConfigSchema,
@@ -35,6 +36,7 @@ function applyModelDefaults(config: ModelConfig, descriptor: ModelDescriptor): M
 }
 
 export function RoutingSettings({
+  embedded = false,
   base,
   routing,
   hasMessages,
@@ -42,6 +44,7 @@ export function RoutingSettings({
   onClose,
   onSave,
 }: {
+  embedded?: boolean;
   base: ModelConfig;
   routing?: AgentRoutingConfig | undefined;
   hasMessages: boolean;
@@ -105,7 +108,9 @@ export function RoutingSettings({
     };
   }, [catalog.length, draft.build?.provider, draft.plan?.provider, draft.subagent?.provider]);
   return (
-    <dialog
+    <SettingsSurface
+      embedded={embedded}
+      aria-busy={saving}
       ref={dialog}
       className="settings-dialog routing-modal"
       aria-labelledby="routing-title"
@@ -420,6 +425,6 @@ export function RoutingSettings({
           </button>
         </footer>
       </form>
-    </dialog>
+    </SettingsSurface>
   );
 }

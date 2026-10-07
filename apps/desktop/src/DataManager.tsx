@@ -1,3 +1,4 @@
+import { SettingsSurface } from './SettingsSurface';
 import { useEffect, useRef, useState } from 'react';
 import { backupSettingsSchema, type BackupSnapshot } from '@lodex/contracts';
 import {
@@ -10,7 +11,13 @@ import {
 } from './bridge';
 import { Icon } from './icons';
 
-export function DataManager({ onClose }: { onClose: () => void }) {
+export function DataManager({
+  embedded = false,
+  onClose,
+}: {
+  embedded?: boolean;
+  onClose: () => void;
+}) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [state, setState] = useState<BackupSnapshot>({
     settings: backupSettingsSchema.parse({}),
@@ -53,7 +60,8 @@ export function DataManager({ onClose }: { onClose: () => void }) {
     }
   }
   return (
-    <dialog
+    <SettingsSurface
+      embedded={embedded}
       className="settings-dialog"
       ref={dialog}
       onCancel={onClose}
@@ -194,6 +202,6 @@ export function DataManager({ onClose }: { onClose: () => void }) {
           </p>
         )}
       </div>
-    </dialog>
+    </SettingsSurface>
   );
 }
