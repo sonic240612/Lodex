@@ -20,6 +20,13 @@ const dataDir = await mkdtemp(join(tmpdir(), 'lodex-런타임 검증 '));
 const token = randomBytes(32).toString('hex');
 const children = new Set();
 const dotenvFixture = 'fixture-only-no-real-provider-call';
+function startupDiagnostics(child) {
+  let stderr = '';
+  child.stderr.on('data', (chunk) => {
+    stderr = (stderr + chunk.toString()).slice(-4096);
+  });
+  return () => stderr.replaceAll(token, '[redacted]').replaceAll(dotenvFixture, '[fixture-key]');
+}
 await writeFile(join(dataDir, '.env'), 'OPENROUTER_API_KEY=' + dotenvFixture + '\n', {
   mode: 0o600,
 });
@@ -45,10 +52,13 @@ async function boot() {
     child.once('exit', finish);
     child.once('error', () => finish(null, 'spawn-error'));
   });
-  child.stderr.resume();
+  const diagnostics = startupDiagnostics(child);
   const lines = createInterface({ input: child.stdout });
   const ready = new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('Daemon startup timed out')), 10000);
+    const timer = setTimeout(
+      () => reject(new Error('Daemon startup timed out\n' + diagnostics())),
+      10000,
+    );
     lines.once('line', (line) => {
       clearTimeout(timer);
       try {
@@ -63,7 +73,7 @@ async function boot() {
     });
     child.once('exit', (code) => {
       clearTimeout(timer);
-      reject(new Error('Daemon exited before ready: ' + code));
+      reject(new Error('Daemon exited before ready: ' + code + '\n' + diagnostics()));
     });
   });
   child.stdin.write(JSON.stringify({ token, dataDir, parentPid: process.pid }) + '\n');

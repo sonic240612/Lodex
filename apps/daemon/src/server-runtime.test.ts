@@ -187,7 +187,7 @@ describe('managed model daemon integration', () => {
     });
     expect(response.status).toBe(200);
     expect((await response.json()).inspection).toMatchObject({
-      modelPath: app.profile.modelPath,
+      modelPath: await realpath(app.profile.modelPath),
       ggufVersion: 3,
       embeddedChatTemplate: false,
       recommendedSettings: {

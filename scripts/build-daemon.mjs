@@ -8,6 +8,9 @@ await build({
   },
   bundle: true,
   platform: 'node',
+  // jsonc-parser's UMD entry passes require through a factory, hiding relative
+  // imports from the bundler. Its ESM entry keeps packaged daemons self-contained.
+  alias: { 'jsonc-parser': 'jsonc-parser/lib/esm/main.js' },
   target: 'node24',
   format: 'cjs',
   outdir: 'apps/daemon/dist',

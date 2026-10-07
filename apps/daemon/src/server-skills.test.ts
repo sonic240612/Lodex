@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -169,7 +169,7 @@ describe('skills daemon integration', () => {
     expect((await discovered.json()).skills).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          path: skillRoot,
+          path: await realpath(skillRoot),
           dialect: 'claude',
           scope: 'project',
           source: 'Claude Code',

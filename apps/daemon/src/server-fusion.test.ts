@@ -182,8 +182,16 @@ async function setup(
     });
   };
   const finish = async (status = 'completed') => {
-    await vi.waitFor(async () =>
-      expect((await store.session(session.id)).run?.status).not.toBe('running'),
+    // A real PowerShell process has a cold-start cost; Vitest's default 1s
+    // assertion window is shorter than the command's allowed execution time.
+    await vi.waitFor(
+      async () => {
+        const current = await store.session(session.id);
+        expect(current.run?.status, JSON.stringify(current.messages.at(-1)?.activities)).not.toBe(
+          'running',
+        );
+      },
+      { timeout: options.realHost ? 10000 : 2000 },
     );
     const current = await store.session(session.id);
     expect(current.run?.status, current.messages.at(-1)?.error ?? undefined).toBe(status);
@@ -372,6 +380,7 @@ describe('SoL-Pi Action Fusion daemon adaptation', () => {
         thenRun: {
           command:
             process.platform === 'win32' ? "Get-Content '../outside.txt'" : "cat '../outside.txt'",
+          timeoutMs: 5000,
         },
       }),
       (result) => {

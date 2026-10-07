@@ -6,6 +6,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rename,
   rm,
   symlink,
@@ -72,9 +73,13 @@ describe('passive skill registration', () => {
     const found = await discoverSkillDirectories({ home, projectPath: project });
     expect(found).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ path: codex, dialect: 'codex', scope: 'user' }),
-        expect.objectContaining({ path: hermes, dialect: 'hermes', scope: 'user' }),
-        expect.objectContaining({ path: claude, dialect: 'claude', scope: 'project' }),
+        expect.objectContaining({ path: await realpath(codex), dialect: 'codex', scope: 'user' }),
+        expect.objectContaining({ path: await realpath(hermes), dialect: 'hermes', scope: 'user' }),
+        expect.objectContaining({
+          path: await realpath(claude),
+          dialect: 'claude',
+          scope: 'project',
+        }),
       ]),
     );
     expect(found.some((entry) => entry.path === unrelated)).toBe(false);
