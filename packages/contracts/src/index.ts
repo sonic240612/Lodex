@@ -186,6 +186,7 @@ export const autopilotLimitsSchema = z.strictObject({
   costUsd: z.number().min(0.01).max(1000).default(1),
 });
 export interface AutopilotState {
+  messageId?: string;
   costBudgetId?: string;
   costBaseline?: { spent: number; reserved: number; unconfirmed: boolean };
   workspaceRevision?: number;

@@ -1327,8 +1327,21 @@ describe('authenticated daemon integration', () => {
         lookups++;
         return lookups === 1 ? null : { generationId: id, costUsd: 0.002, billing: 'reported' };
       },
-      async *generate() {
+      async *generate(request) {
         calls++;
+        if (calls > 1) {
+          expect(JSON.stringify(request.messages)).toContain('persisted partial response');
+          yield { type: 'usage', usage: { generationId: 'gen-resumed', costUsd: 0.001 } };
+          yield {
+            type: 'tool_call_delta',
+            index: 0,
+            id: 'resume-done',
+            name: 'complete_goal',
+            arguments: '{"evidence":"resumed with previous evidence"}',
+          };
+          yield { type: 'finished', reason: 'tool_calls' };
+          return;
+        }
         yield { type: 'usage', usage: { generationId: 'gen-reconcile' } };
         yield { type: 'text_delta', text: 'persisted partial response' };
         yield { type: 'finished', reason: 'stop' };
@@ -1405,6 +1418,31 @@ describe('authenticated daemon integration', () => {
     expect(await again.json()).toMatchObject({ reconciled: 0, remaining: 0 });
     expect(calls).toBe(1);
     expect(lookups).toBe(2);
+    expect(
+      (
+        await app.command(
+          makeCommand({
+            type: 'resume_goal',
+            sessionId: session.id,
+            expectedVersion: result.session.version,
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    await confirmPending(app, session.id);
+    await vi.waitFor(async () =>
+      expect((await app.store.session(session.id)).autopilot?.status).toBe('completed'),
+    );
+    const resumed = await app.store.session(session.id);
+    expect(resumed.autopilot).toMatchObject({
+      spentCostUsd: 0.003,
+      status: 'completed',
+      costBudgetId: result.session.autopilot!.costBudgetId,
+    });
+    expect(
+      resumed.messages.find((message) => message.id === result.session.run!.messageId)?.status,
+    ).toBe('failed');
+    expect(calls).toBe(2);
   });
   it('keeps the reservation and pauses when OpenRouter omits actual cost', async () => {
     const provider: InferenceProvider = {

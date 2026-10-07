@@ -988,6 +988,7 @@ export class StorageEngine {
               actor: command.actor,
               ...(context ? { context } : {}),
             };
+            if (session.autopilot?.runId === runId) session.autopilot.messageId = messageId;
             if (session.messages.length === 2)
               session.title =
                 command.type === 'start_goal'

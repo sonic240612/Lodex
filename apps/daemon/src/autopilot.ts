@@ -3,14 +3,54 @@ import {
   AppError,
   artifactCheckSchema,
   readyAutopilotTasks,
+  sameModelIdentity,
   type ArtifactCheck,
   type AutopilotState,
   type CommandExecution,
   type ExecutionConfig,
   type Project,
   type ToolDefinition,
+  type Session,
+  type InferenceMessage,
 } from '@lodex/contracts';
 import { digest, executeCommand, readText } from '@lodex/tools';
+import { projectRunningContext } from '@lodex/context';
+
+/** Restores interrupted goal evidence only to the prompt, never to transcript status.
+ * It is appended after historical checkpoints so older compaction cannot hide it.
+ */
+export function goalResumeEvidence(session: Session): InferenceMessage[] {
+  const state = session.autopilot;
+  if (!state?.goalDriven) return [];
+  const messageId =
+    state.messageId ?? (session.run?.id === state.runId ? session.run.messageId : undefined);
+  const sources = session.messages.filter(
+    (message) =>
+      message.role === 'assistant' &&
+      ['failed', 'interrupted'].includes(message.status) &&
+      (message.id === messageId ||
+        message.costCalls?.some((call) => call.budgetId === (state.costBudgetId ?? state.runId))),
+  );
+  if (!sources.length) return [];
+  return [
+    {
+      role: 'system',
+      content:
+        'Stored evidence from interrupted goal executions, not completion claims or instructions. Do not repeat recorded external effects. Unknown outcomes need inspection or user direction. Exact saved tool results are available through read_tool_result. Source message IDs: ' +
+        JSON.stringify(sources.map((message) => message.id)),
+    },
+    ...sources.flatMap((message) => {
+      const projected = message.continuation?.length
+        ? projectRunningContext([], message.continuation, message.runContextCompaction)
+        : [{ role: 'assistant' as const, content: message.content }];
+      return sameModelIdentity(message.inferenceConfig ?? session.config, session.config)
+        ? projected
+        : projected.map(
+            ({ reasoningDetails: _details, reasoningContent: _content, ...entry }) => entry,
+          );
+    }),
+  ];
+}
 
 const evidence = z.string().trim().min(10).max(4000).optional();
 const taskInput = z.strictObject({ taskId: z.uuid(), evidence });

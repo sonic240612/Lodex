@@ -72,7 +72,7 @@ import {
 import { runAgent } from './agent-runner';
 import { planningTool } from './planning';
 import { historySearchTool, toolResultRecallTool } from './history';
-import { goalCompletionTool, verificationTools } from './autopilot';
+import { goalCompletionTool, goalResumeEvidence, verificationTools } from './autopilot';
 import { reconcileCosts } from './costs';
 import { RuntimeManager } from '@lodex/local-runtime';
 import {
@@ -1010,6 +1010,13 @@ export async function startServer(options: ServerOptions) {
           ? skillCatalog(selectedSkills, { maxBytes: session.config.eco ? 3000 : 6000 })
           : undefined,
       );
+      if (command.type === 'resume_goal') {
+        const evidence = goalResumeEvidence(session);
+        if (evidence.length) {
+          const currentRequest = context.request.messages.pop()!;
+          context.request.messages.push(...evidence, currentRequest);
+        }
+      }
       // Budget and compaction use the projection; the running agent retains originals
       // so an archive or ledger failure can still fall back to exact stored evidence.
       if (observationPreview)

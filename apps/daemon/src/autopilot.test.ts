@@ -12,7 +12,12 @@ import {
   readyAutopilotTasks,
   type Session,
 } from '@lodex/contracts';
-import { completeGoal, invalidateVerification, verifyAutopilot } from './autopilot';
+import {
+  completeGoal,
+  goalResumeEvidence,
+  invalidateVerification,
+  verifyAutopilot,
+} from './autopilot';
 import { digest, inspectProject } from '@lodex/tools';
 import type { executeCommand } from '@lodex/tools';
 function source(): Session {
@@ -57,6 +62,61 @@ function source(): Session {
   };
 }
 describe('goal verification and scheduling', () => {
+  it('restores only the interrupted goal evidence and strips a previous model reasoning state', () => {
+    const session = source();
+    const state = prepareGoal(
+      session,
+      'continue',
+      autopilotLimitsSchema.parse({}),
+      crypto.randomUUID(),
+    );
+    const id = crypto.randomUUID();
+    state.messageId = id;
+    session.autopilot = state;
+    session.messages = [
+      {
+        id,
+        role: 'assistant',
+        content: 'partial',
+        createdAt: new Date().toISOString(),
+        status: 'failed',
+        error: 'interrupted',
+        usage: null,
+        inferenceConfig: session.config,
+        continuation: [
+          {
+            role: 'assistant',
+            content: '',
+            reasoningContent: 'opaque prior reasoning',
+            toolCalls: [{ id: 'old-call', name: 'mcp_notify', arguments: '{}' }],
+          },
+          {
+            role: 'tool',
+            content: 'notification already sent',
+            toolCallId: 'old-call',
+            toolName: 'mcp_notify',
+          },
+        ],
+      },
+      {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        content: 'unrelated failed conversation',
+        createdAt: new Date().toISOString(),
+        status: 'failed',
+        error: 'other',
+        usage: null,
+      },
+    ];
+    const original = JSON.stringify(session.messages);
+    expect(JSON.stringify(goalResumeEvidence(session))).toContain('opaque prior reasoning');
+    session.config = { ...session.config, model: 'another-model' };
+    const evidence = JSON.stringify(goalResumeEvidence(session));
+    expect(evidence).toContain('notification already sent');
+    expect(evidence).not.toContain('opaque prior reasoning');
+    expect(evidence).not.toContain('unrelated failed conversation');
+    expect(JSON.stringify(session.messages)).toBe(original);
+  });
   const roots: string[] = [];
   afterEach(async () => {
     for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
