@@ -26,5 +26,8 @@ export default defineConfig({
     ],
     testTimeout: 15000,
     hookTimeout: 20000,
+    // Integration files each spawn SQLite workers, MCP peers and real processes.
+    // Bound CI concurrency instead of treating runner throughput as app behavior.
+    ...(process.env.CI ? { maxWorkers: 2, expect: { poll: { timeout: 5000 } } } : {}),
   },
 });

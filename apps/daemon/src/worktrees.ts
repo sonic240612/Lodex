@@ -80,10 +80,13 @@ export class Worktrees {
       if (signal.aborted) throw signal.reason;
       // Config probes return 1 when no matching settings exist.
       if (args[0] === 'config' && (error as { code?: number }).code === 1) return '';
-      throw new AppError(
+      const failure = new AppError(
         'WORKTREE_GIT',
         'Git 작업에 실패했습니다. 저장소·Git 설치·경로·잠금 상태를 확인하세요. 생성 중인 폴더는 자동 삭제하지 않았습니다.',
       );
+      // Preserve diagnostic causes internally; the API returns only code/message.
+      Object.defineProperty(failure, 'cause', { value: error, enumerable: false });
+      throw failure;
     }
   }
   create(
