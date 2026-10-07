@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   defaultModelConfig,
   defaultPlan,
+  RUN_INPUT_PREFIX,
   type InferenceMessage,
   type InferenceRequest,
   type Session,
@@ -45,6 +46,23 @@ function exchanges(count: number, bytes = 1300): InferenceMessage[] {
 }
 
 describe('running context checkpoints', () => {
+  it('keeps the latest live instruction verbatim through automatic compaction', () => {
+    const base = request(),
+      content = RUN_INPUT_PREFIX + 'Do not change public API. '.repeat(40);
+    const continuation: InferenceMessage[] = [...exchanges(8), { role: 'user', content }];
+    const compacted = compactRunningContext({ request: base, continuation });
+    expect(compacted.request.messages.at(-1)?.content).toBe(content);
+    expect(compacted.checkpoint.throughContinuationCount).toBeLessThan(continuation.length);
+    expect(() =>
+      compactRunningContext({
+        request: base,
+        continuation: [
+          ...exchanges(8),
+          { role: 'user', content: RUN_INPUT_PREFIX + 'x'.repeat(8000) },
+        ],
+      }),
+    ).toThrow('현재 요청');
+  });
   it('can reduce a Korean checkpoint even when the excerpt increases JavaScript character count', () => {
     const base = request(),
       continuation = exchanges(1, 1);

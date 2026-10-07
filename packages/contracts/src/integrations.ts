@@ -31,6 +31,16 @@ export interface TelegramStatus {
   unknownDeliveries: number;
 }
 export interface WorktreeRecord {
+  merge?: {
+    status: 'applying' | 'applied' | 'partial' | 'interrupted';
+    previewId: string;
+    files: {
+      path: string;
+      beforeHash: string | null;
+      afterHash: string | null;
+      applied: boolean;
+    }[];
+  };
   id: string;
   sourceProjectId: string;
   baseCommit: string;
@@ -40,4 +50,20 @@ export interface WorktreeRecord {
   createdAt: string;
   status: 'creating' | 'ready' | 'interrupted';
   error?: string;
+}
+export interface WorktreePreview {
+  id: string;
+  worktreeId: string;
+  sourceProjectId: string;
+  createdAt: string;
+  files: {
+    path: string;
+    before: string | null;
+    theirs: string | null;
+    merged: string | null;
+    beforeHash: string | null;
+    theirsHash: string | null;
+    conflict: boolean;
+    diff: string;
+  }[];
 }

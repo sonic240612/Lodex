@@ -16,6 +16,7 @@ import { proposeChanges, changeInputSchema } from './changes';
 import { pathOperationSchemas, runPathOperation } from './path-operations';
 export { proposeChanges, checkChanges, writeChanges } from './changes';
 export {
+  type InputControl,
   executeCommand,
   executeHostCommand,
   cleanupExecution,
@@ -25,6 +26,8 @@ export {
 } from './execution';
 export { hostFileTools, runHostFileTool, hostWriteInput } from './host-files';
 export { webFetchTool, fetchWebPage } from './web';
+export { webSearchTool, searchWeb } from './web-search';
+export { readProjectInstructions, type ProjectInstructions } from './instructions';
 export {
   withFusedFileQueue,
   assertUnchangedBeforeCommand,
@@ -271,7 +274,7 @@ function selectLineRange(text: string, startLine: number, maxLines: number, maxB
 }
 function replaceOnce(text: string, oldText: string, newText: string): string {
   const at = text.indexOf(oldText);
-  if (at < 0 || text.indexOf(oldText, at + 1) >= 0)
+  if (at < 0 || (oldText ? text.indexOf(oldText, at + 1) >= 0 : text.length > 0))
     throw new AppError(
       'EDIT_MATCH',
       '수정할 텍스트는 파일에서 정확히 한 번 일치해야 합니다. 다시 읽고 범위를 지정해 주세요.',

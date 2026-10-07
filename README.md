@@ -11,12 +11,15 @@ Desktop agent harness for local LLMs and OpenRouter.
 - Connect to an external llama-server through localhost, a private LAN, or Tailscale.
 - Download public Hugging Face GGUF files with restart-persistent history, verify their hash and metadata, and apply VRAM-aware context, GPU, KV cache, thread, and reservation recommendations.
 - Use OpenRouter models with catalog defaults, automatic context/output limits, reported cost, and transient request retries.
-- Route Plan, Build, and subagent work to different models. Up to three isolated read-only subagents can run concurrently.
+- Route Plan, Build, and subagent work to different models. Up to three isolated subagents can run concurrently; Build tasks edit and validate in separate Git worktrees.
 - Switch models and generation settings in the same conversation between requests, keeping history and the saved plan.
 - Open local project folders, create Git worktrees, and keep conversations scoped to a project.
+- Automatically apply scoped `AGENTS.md`, `AGENTS.override.md`, and `CLAUDE.md` project instructions.
 - Read one or many project files, find them with recursive globs, and search text with optional case folding; create, move, or delete reviewed paths; apply single or multi-file edits with optional Docker validation; and undo verified text edits.
 - Run Docker commands with saved limits. Full Access enables host files, shell commands, environment variables, network access, and selected MCP calls.
-- Read known public web URLs with `web_fetch`, including HTML, text, and JSON, with per-URL approval and bounded output.
+- Search the public web with `web_search` and verify sources with `web_fetch`; both use the selected permission policy and bounded output.
+- Send extra instructions during an active run; they are saved and included at the next safe model step.
+- Send live stdin/EOF to interactive commands, monitor background jobs, and stop owned processes from chat.
 - Choose **Ask**, **Approve for me**, or **Full Access** per conversation. Plan mode remains read-only.
 - Use `/goal` for goal-driven runs, or run saved plan tasks with dependencies, completion criteria, verification commands, and budgets.
 - Choose **Simple** in the goal panel to run from a goal alone, or **Advanced** to edit and execute a detailed plan.
@@ -25,7 +28,7 @@ Desktop agent harness for local LLMs and OpenRouter.
 - Pair a Telegram bot for remote messages, status, plan inspection, cancellation, and approved Build access.
 - Keep the daemon, Telegram, and active agent runs alive when the window is closed; reopen or quit Lodex from the system tray.
 - Use Eco mode, automatic fast compaction, bounded current-conversation history search, local ObservationPack archives, and on-demand recall for large tool results.
-- Choose LLM-based **Context compaction** or deterministic **Quick compaction**. Full transcripts stay in SQLite.
+- Choose LLM-based **Context compaction** or deterministic **Quick compaction**. Automatic compaction displays before/after token estimates and the reduction percentage. Full transcripts stay in SQLite.
 - View Markdown/GFM messages, collapsible thinking and tool activity, active context usage, generation metrics, and a jump-to-latest button.
 - Manage models, skills, MCP, Telegram, worktrees, and backups in **Settings**. Type `/` in chat for commands; use arrow keys and Tab to select, or type a command directly.
 - Create daily or manual secret-free JSON backups, apply count/age retention, and export them through the native save dialog.
@@ -100,13 +103,19 @@ Connect a local folder to create a project conversation. File tools stay inside 
 
 Path moves and deletions require a fresh content fingerprint. **Approve for me** handles ordinary folder creation and moves, while deletion still waits for review. Path operations never overwrite a destination, and deleted paths do not have automatic undo.
 
-Worktree creation starts from the current commit. Uncommitted changes remain in the original folder; merge and cleanup are manual.
+Worktrees start from the current commit; uncommitted source changes remain in the original folder. Build subagents use separate worktrees and the parent conversation’s permissions and budgets. **Settings → Worktree → Review changes** compares against the current source and the base commit, merges disjoint text edits, and lets you resolve conflicts before applying. Apply changes from an idle source Build conversation. Stale files are rejected; the Git index and commits stay untouched. Reviews support up to eight UTF-8 files of 32 KiB each. Commit and cleanup remain manual.
 
-Docker execution is opt-in and uses the configured image, CPU, memory, network, and project access settings. **Action Fusion** accepts `thenRun` or SoL-Pi's `then_run` on a file change, so approval, mutation, and a known follow-up command run in one tool call. It uses Docker when enabled, or the host shell in Full Access. Host writes support the same operation. Conflicts skip the command; failed checks keep the edits. Interactive PTY support is pending.
+Project instructions load before model requests with directory scopes and content hashes. Deeper rules override parent rules within their directory. Collection is limited to 32 files / 32 KiB; skipped scopes are reported to the model for explicit reading. Cloud transmission requires project consent.
+
+Commands accept `interactive` and `background`. The chat job panel provides live output, stdin, EOF, and cancellation. Background jobs remain active after a model response, stop on app exit, and are recorded as interrupted after a restart rather than relaunched. Stdin text is not stored in the job journal. Extra chat instructions use a separate durable run queue; cancellation marks unconsumed input and retains it for the next request. Interactive input uses pipes; PTY terminal emulation is pending.
+
+Docker execution is opt-in and uses the configured image, CPU, memory, network, and project access settings. **Action Fusion** accepts `thenRun` or SoL-Pi's `then_run` on a file change, so approval, mutation, and a known follow-up command run in one tool call. It uses Docker when enabled, or the host shell in Full Access. Host writes support the same operation. Conflicts skip the command; failed checks keep the edits. Command cancellation and output limits also apply to background jobs.
 
 Action Fusion and ObservationPack adapt [NVIDIA SoL-Pi](https://github.com/NVlabs/SoL-Pi). See [third-party notices](THIRD_PARTY_NOTICES.md). Lodex's permission and execution limits still apply; benchmark savings have not been measured.
 
-`web_fetch` works in Plan and Build. Ask and Approve for me review each URL and redirect; Full Access runs directly. It uses public HTTP(S) default ports without cookies, credentials, or JavaScript. Output is capped at 24 KiB, or 8 KiB in Eco mode. Search and interactive browsing use separately configured MCP tools.
+`web_search` uses public DuckDuckGo HTML search without an API key and returns titles, URLs, and snippets. Search service challenges are reported without bypassing them; full pages require `web_fetch`.
+
+`web_fetch` works in Plan and Build. Ask and Approve for me review each URL and redirect; Full Access runs directly. It uses public HTTP(S) default ports without cookies, credentials, or JavaScript. Output is capped at 24 KiB, or 8 KiB in Eco mode. Interactive browsing can use separately configured MCP tools.
 
 ## Skills and MCP
 
@@ -118,7 +127,7 @@ MCP configuration imports Codex TOML, Claude/pi-style `mcpServers` JSON, OpenCod
 
 Create a bot with [BotFather](https://core.telegram.org/bots/tutorial#obtain-your-bot-token), enter the token in Telegram settings or set `TELEGRAM_BOT_TOKEN` in `.env`, select a conversation, enable transmission, and approve the pairing IDs.
 
-Commands include `/ask`, `/goal`, `/resume`, `/run`, `/status`, `/plan`, `/todo`, `/autopilot ask|auto|full`, `/approve`, `/deny`, `/answer`, `/decline`, `/cancel-input`, and `/stop`. `/todo` can set the saved goal, add tasks with completion criteria, mark them done, undo them, or remove them by number. Remote Build actions and permission changes require Build access in Telegram settings. Unknown delivery outcomes are recorded and never retried automatically.
+Commands include `/ask`, `/goal`, `/resume`, `/run`, `/status`, `/plan`, `/todo`, `/autopilot ask|auto|full`, `/approve`, `/deny`, `/answer`, `/decline`, `/cancel-input`, and `/stop`. `/todo` can set the saved goal, add tasks with completion criteria, mark them done, undo them, or remove them by number. Remote Build actions and permission changes require Build access in Telegram settings. Text sent during an active run becomes additional input to that run. Unknown delivery outcomes are recorded and never retried automatically.
 
 Closing the desktop window keeps Lodex running in the system tray. Use **Quit Lodex** from the tray menu to stop the daemon and Telegram connection.
 

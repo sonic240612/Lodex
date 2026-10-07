@@ -32,6 +32,11 @@ export class Worktrees {
       throw new AppError('WORKTREE_STATE', 'worktree 기록 형식이 올바르지 않습니다.');
     let changed = false;
     for (const record of manager.records)
+      if (record.merge?.status === 'applying') {
+        record.merge.status = 'interrupted';
+        changed = true;
+      }
+    for (const record of manager.records)
       if (record.status === 'creating') {
         record.status = 'interrupted';
         record.error = '생성 중 앱이 종료되었습니다. 자동 삭제·재실행하지 않았습니다.';
@@ -42,6 +47,19 @@ export class Worktrees {
   }
   list() {
     return structuredClone(this.records);
+  }
+  readGit(cwd: string, args: string[], signal: AbortSignal) {
+    return this.git(cwd, args, signal);
+  }
+  async markMerge(id: string, merge: NonNullable<WorktreeRecord['merge']>) {
+    const work = this.queue.then(async () => {
+      const record = this.records.find((record) => record.id === id);
+      if (!record) throw new AppError('WORKTREE_NOT_FOUND', 'Worktree를 찾을 수 없습니다.');
+      record.merge = structuredClone(merge);
+      await this.save();
+    });
+    this.queue = work.catch(() => undefined);
+    await work;
   }
   private async save() {
     this.version = await this.store.saveIntegration('worktrees', this.version, this.records);

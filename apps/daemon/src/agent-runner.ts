@@ -20,7 +20,7 @@ import {
   readyAutopilotTasks,
   activityProposal,
   defaultPermissionMode,
-  runCommandSchema,
+  jobCommandSchema,
 } from '@lodex/contracts';
 import {
   compactRunningContext,
@@ -30,11 +30,15 @@ import {
 } from '@lodex/context';
 import {
   runProjectTool,
+  applyEdit,
+  writeChanges,
+  readProjectInstructions,
   executeCommand,
   executeHostCommand,
   runHostFileTool,
   isProjectReadTool,
   fetchWebPage,
+  searchWeb,
   hostWriteInput,
   withFusedFileQueue,
   assertUnchangedBeforeCommand,
@@ -58,6 +62,9 @@ import type {
 import type { RunMcp } from './mcp';
 import type { RegisteredSkill } from '@lodex/skills';
 import { parseDelegation, runSubagents } from './subagents';
+import type { Worktrees } from './worktrees';
+import { WorktreeReviews, worktreeReviewSchema, worktreeMergeSchema } from './worktree-reviews';
+import { CommandJobs, commandJobIdSchema, commandJobInputSchema } from './jobs';
 import { observationIdFromMarker, type ObservationPack } from './observations';
 
 import { ToolCallAssembler, mergeDetails } from './tool-stream';
@@ -218,6 +225,9 @@ export async function runAgent(options: {
   waitForElicitation?: (activityId: string, signal: AbortSignal) => Promise<ElicitResult>;
   applyApprovedEdit?: (activityId: string) => Promise<void>;
   observations?: ObservationPack;
+  jobs?: CommandJobs;
+  worktrees?: Worktrees;
+  worktreeReviews?: WorktreeReviews;
   webFetcher?: Parameters<typeof fetchWebPage>[0]['fetcher'];
 }) {
   const { store, session, provider, context, controller, project } = options;
@@ -255,6 +265,7 @@ export async function runAgent(options: {
   let emptyRounds = 0,
     repeatedResults = 0,
     previousResult = '';
+  let queuedInput = false;
   const usage = () => ({
     ...aggregate(
       [
@@ -301,6 +312,25 @@ export async function runAgent(options: {
       if (autopilot.status === 'completed') autopilot.status = updated.autopilot.status;
     }
     lastSave = performance.now();
+    queuedInput = updated.messages.some(
+      (input) => input.runInput?.runId === runId && input.runInput.status === 'queued',
+    );
+    return !terminal || updated.run?.status !== 'running';
+  };
+  const includeInputs = async () => {
+    const included = await store.includeRunInputs(session.id, runId, continuation);
+    if (!included.messages.length) return false;
+    continuation.splice(0, continuation.length, ...included.continuation);
+    if (content && !content.endsWith('\n\n')) content += '\n\n';
+    emptyRounds = 0;
+    repeatedResults = 0;
+    if (autopilot) {
+      invalidateVerification(autopilot);
+      autopilot.status = 'running';
+      autopilot.reason = '사용자의 추가 지시를 반영하여 작업을 계속합니다.';
+    }
+    await save();
+    return true;
   };
   const authorize = async (card: Activity, request: PermissionRequest): Promise<boolean> => {
     const decision = permissionDecision(
@@ -752,8 +782,9 @@ export async function runAgent(options: {
     }
   };
   try {
-    for (;;) {
+    modelLoop: for (;;) {
       signal.throwIfAborted();
+      await includeInputs();
       let request = {
         ...context.request,
         messages: options.observations
@@ -959,6 +990,7 @@ export async function runAgent(options: {
       if (finished === 'stop' && calls.length === 0) {
         continuation.push(assistant);
         signal.throwIfAborted();
+        if (await includeInputs()) continue;
         if (autopilot) {
           if (++emptyRounds >= 2)
             throw new AppError(
@@ -976,8 +1008,7 @@ export async function runAgent(options: {
           await save();
           continue;
         }
-        await options.mcp?.close();
-        await save('completed');
+        if (!(await save('completed'))) continue;
         return;
       }
       if (finished !== 'tool_calls' || calls.length === 0)
@@ -1019,14 +1050,18 @@ export async function runAgent(options: {
           }
           if (card.fusion) await save();
         }
-        const skipRemaining = () => {
+        const skipRemaining = (
+          reason = 'Autopilot이 끝나거나 검토 대기 상태가 되어 실행하지 않았습니다.',
+        ) => {
           for (let rest = index + 1; rest < calls.length; rest++) {
             const skipped = cards.get(rest)!;
             skipped.status = 'cancelled';
-            skipped.text = 'Autopilot이 끝나거나 검토 대기 상태가 되어 실행하지 않았습니다.';
+            skipped.text = reason;
             continuation.push({
               role: 'tool',
               toolCallId: calls[rest]!.id,
+              toolName: calls[rest]!.name,
+              isError: true,
               content: JSON.stringify({ skipped: true, reason: skipped.text }),
             });
           }
@@ -1039,6 +1074,184 @@ export async function runAgent(options: {
             throw new AppError('SUBAGENTS_DISABLED', '서브에이전트가 활성화되지 않았습니다.');
           result = await runSubagents(parseDelegation(call.arguments), {
             ...options.subagents,
+            ...(project &&
+            (options.subagents.config.provider !== 'openrouter' ||
+              options.subagents.config.projectCloudConsent)
+              ? { instructions: (await readProjectInstructions(project, signal)).text }
+              : {}),
+            ...(project &&
+            session.mode !== 'plan' &&
+            options.worktrees &&
+            (options.subagents.config.provider !== 'openrouter' ||
+              options.subagents.config.projectCloudConsent)
+              ? {
+                  build: {
+                    tools: (context.request.tools ?? []).filter(
+                      (tool) =>
+                        isProjectReadTool(tool.function.name) ||
+                        [
+                          'propose_edit',
+                          'propose_changes',
+                          'inspect_path',
+                          'make_directory',
+                          'move_path',
+                          'delete_path',
+                          'run_command',
+                          'run_host_command',
+                        ].includes(tool.function.name),
+                    ),
+                    prepare: async (record, childSignal) => {
+                      const created = await options.worktrees!.create(project, childSignal);
+                      record.worktreeId = created.record.id;
+                      return created.project;
+                    },
+                    execute: async (record, childProject, call, childSignal) => {
+                      const childCard: Activity = {
+                        id: randomUUID(),
+                        kind: 'tool',
+                        label: `서브에이전트 · ${call.name}`,
+                        status: 'running',
+                        text: `Worktree: ${childProject.path}`,
+                        arguments: call.arguments,
+                      };
+                      activities.push(childCard);
+                      await save();
+                      try {
+                        const args = JSON.parse(call.arguments);
+                        if (args.thenRun || args.then_run || args.background)
+                          throw new AppError(
+                            'SUBAGENT_COMMAND_MODE',
+                            '하위 작업에서는 별도 전경 명령으로 검증하세요.',
+                          );
+                        let childResult: string;
+                        const authorizeChild = async (request: PermissionRequest) => {
+                          const allowed = await authorize(childCard, request);
+                          if (!allowed) {
+                            childCard.status = 'cancelled';
+                            childCard.text = '사용자가 하위 작업을 거절했습니다.';
+                            await save();
+                          }
+                          return allowed;
+                        };
+                        if (call.name === 'run_command' || call.name === 'run_host_command') {
+                          const host = call.name === 'run_host_command';
+                          if (host && session.permissionMode !== 'full')
+                            throw new AppError(
+                              'FULL_ACCESS_REQUIRED',
+                              '호스트 명령에는 전체 접근이 필요합니다.',
+                            );
+                          if (!host && session.execution?.backend !== 'docker')
+                            throw new AppError(
+                              'EXECUTION_DISABLED',
+                              'Docker 명령 실행이 꺼져 있습니다.',
+                            );
+                          if (
+                            !(await authorizeChild({
+                              kind: 'command',
+                              command: `Worktree ${record.worktreeId} (${childProject.path})\n${jobCommandSchema.parse(args).command}`,
+                              network: host ? 'bridge' : session.execution!.network,
+                              environment: host ? 'host' : 'docker',
+                            }))
+                          )
+                            return JSON.stringify({
+                              status: 'rejected',
+                              message: 'The user rejected the subagent command.',
+                            });
+                          const shared = {
+                            project: childProject,
+                            argumentsJson: call.arguments,
+                            signal: childSignal,
+                            record: async (
+                              execution: import('@lodex/contracts').CommandExecution,
+                            ) => {
+                              childCard.execution = structuredClone(execution);
+                              await store.recordExecution(session.id, childCard.id, execution);
+                            },
+                          };
+                          const execution = host
+                            ? await (options.hostCommandExecutor ?? executeHostCommand)(shared)
+                            : await (options.commandExecutor ?? executeCommand)({
+                                ...shared,
+                                config: session.execution!,
+                              });
+                          childResult = JSON.stringify({
+                            executionId: execution.id,
+                            status: execution.status,
+                            exitCode: execution.exitCode,
+                            output: execution.output,
+                          });
+                        } else {
+                          let edit: import('@lodex/contracts').EditProposal | undefined,
+                            changes: import('@lodex/contracts').ChangeSet | undefined;
+                          childResult = await runProjectTool(
+                            childProject,
+                            call.name,
+                            call.arguments,
+                            childSignal,
+                            (value) => {
+                              edit = value;
+                            },
+                            (value) => {
+                              changes = value;
+                            },
+                            (paths, destructive) =>
+                              authorizeChild({
+                                kind: 'file',
+                                paths: paths.map((path) => childProject.path + '/' + path),
+                                destructive,
+                              }),
+                          );
+                          if (edit || changes) {
+                            const paths = changes
+                              ? changes.files.map((file) => file.path)
+                              : [edit!.path];
+                            childCard.text = changes
+                              ? changes.files.map((file) => file.diff).join('\n')
+                              : edit!.diff;
+                            await save();
+                            if (
+                              !(await authorizeChild({
+                                kind: 'file',
+                                paths: paths.map((path) => childProject.path + '/' + path),
+                              }))
+                            )
+                              return JSON.stringify({
+                                status: 'rejected',
+                                message: 'The user rejected the subagent edit.',
+                              });
+                            if (changes)
+                              await writeChanges(childProject, changes, 'apply', childSignal);
+                            else await applyEdit(childProject, edit!, childSignal);
+                            childResult = JSON.stringify({
+                              status: 'applied',
+                              worktreeId: record.worktreeId,
+                              paths,
+                              sourceProjectUnchanged: true,
+                            });
+                          }
+                        }
+                        childCard.status =
+                          JSON.parse(childResult).error || childCard.execution?.status === 'failed'
+                            ? 'failed'
+                            : 'completed';
+                        childCard.text = childResult;
+                        await save();
+                        return childResult;
+                      } catch (error) {
+                        childSignal.throwIfAborted();
+                        childCard.status = 'failed';
+                        childCard.text =
+                          error instanceof AppError ? error.message : '하위 작업 도구 실패';
+                        await save();
+                        return JSON.stringify({
+                          error: error instanceof AppError ? error.code : 'SUBAGENT_TOOL',
+                          message: childCard.text,
+                        });
+                      }
+                    },
+                  },
+                }
+              : {}),
             ...(project ? { project } : {}),
             ...(options.skills?.length ? { skills: options.skills } : {}),
             signal,
@@ -1059,6 +1272,99 @@ export async function runAgent(options: {
               await save();
             },
           });
+        } else if (call.name === 'review_worktree' || call.name === 'merge_worktree') {
+          if (!project || !options.worktrees || !options.worktreeReviews)
+            throw new AppError('WORKTREE_DISABLED', 'Worktree 관리자가 연결되지 않았습니다.');
+          if (call.name === 'review_worktree') {
+            const input = worktreeReviewSchema.parse(JSON.parse(call.arguments)),
+              record = options.worktrees.list().find((record) => record.id === input.worktreeId);
+            if (record?.sourceProjectId !== project.id)
+              throw new AppError(
+                'WORKTREE_SCOPE',
+                '선택 프로젝트의 Worktree만 검토할 수 있습니다.',
+                403,
+              );
+            if (record.projectId && options.jobs?.hasActiveProject(record.projectId))
+              throw new AppError('WORKTREE_BUSY', '하위 명령이 끝난 뒤 검토하세요.');
+            result = JSON.stringify(
+              await options.worktreeReviews.preview(input.worktreeId, signal),
+            );
+          } else {
+            if (session.mode === 'plan')
+              throw new AppError('READ_ONLY', 'Plan 모드에서는 변경을 적용하지 않습니다.');
+            const input = worktreeMergeSchema.parse(JSON.parse(call.arguments)),
+              preview = options.worktreeReviews.get(input.previewId);
+            if (preview.sourceProjectId !== project.id)
+              throw new AppError(
+                'WORKTREE_SCOPE',
+                '다른 프로젝트의 변경을 적용할 수 없습니다.',
+                403,
+              );
+            const record = options.worktrees
+              .list()
+              .find((record) => record.id === preview.worktreeId);
+            if (record?.projectId && options.jobs?.hasActiveProject(record.projectId))
+              throw new AppError('WORKTREE_BUSY', '하위 명령이 끝난 뒤 적용하세요.');
+            if (options.jobs?.hasActiveProject(project.id))
+              throw new AppError('PROJECT_BUSY', '원본의 명령이 끝난 뒤 적용하세요.');
+            if (
+              !(await authorize(card, {
+                kind: 'file',
+                paths: preview.files.map((file) => file.path),
+                destructive: preview.files.some(
+                  (file) => (file.conflict ? input.resolutions[file.path] : file.merged) === null,
+                ),
+              }))
+            )
+              result = JSON.stringify({
+                status: 'rejected',
+                message: 'The user rejected the worktree merge.',
+              });
+            else {
+              if (autopilot) {
+                invalidateVerification(autopilot);
+                await save();
+              } else await store.invalidateWorkspace(session.id);
+              result = JSON.stringify(
+                await options.worktreeReviews.apply(input.previewId, input.resolutions, signal),
+              );
+              await save();
+            }
+          }
+        } else if (
+          ['read_command_job', 'write_command_input', 'stop_command_job'].includes(call.name)
+        ) {
+          if (!options.jobs)
+            throw new AppError('COMMAND_JOBS_DISABLED', '작업 관리자가 연결되지 않았습니다.');
+          const input = (
+            call.name === 'write_command_input' ? commandJobInputSchema : commandJobIdSchema
+          ).parse(JSON.parse(call.arguments));
+          const job = options.jobs.get(session.id, input.jobId);
+          if (call.name === 'read_command_job') result = JSON.stringify(job);
+          else if (call.name === 'stop_command_job') {
+            if (session.mode === 'plan')
+              throw new AppError(
+                'READ_ONLY',
+                'Plan 모드에서는 작업을 중지하는 도구를 제공하지 않습니다.',
+              );
+            result = JSON.stringify(await options.jobs.stop(session.id, input.jobId));
+          } else {
+            if (session.mode === 'plan')
+              throw new AppError('READ_ONLY', 'Plan 모드에서는 명령 입력을 전달하지 않습니다.');
+            const value = commandJobInputSchema.parse(input);
+            const allowed = await authorize(card, {
+              kind: 'command',
+              command: job.execution?.command ?? job.id,
+              network: 'none',
+              environment: job.execution?.environment ?? 'docker',
+              interactiveInput: true,
+            });
+            result = JSON.stringify(
+              allowed
+                ? await options.jobs.input(session.id, input.jobId, value.input, value.eof)
+                : { status: 'rejected', message: 'Command input was rejected; nothing was sent.' },
+            );
+          }
         } else if (call.name === 'complete_goal') {
           if (!autopilot) throw new AppError('GOAL_REQUIRED', '실행 중인 /goal이 없습니다.');
           try {
@@ -1189,9 +1495,9 @@ export async function runAgent(options: {
               message: error instanceof Error ? error.message : '도구 결과 인자를 확인하세요.',
             });
           }
-        } else if (call.name === 'web_fetch') {
+        } else if (call.name === 'web_fetch' || call.name === 'web_search') {
           try {
-            result = await fetchWebPage({
+            result = await (call.name === 'web_search' ? searchWeb : fetchWebPage)({
               argumentsJson: call.arguments,
               signal,
               maxBytes: session.config.eco ? 8192 : 24576,
@@ -1356,7 +1662,7 @@ export async function runAgent(options: {
               '이 대화의 명령 실행이 허용되지 않았습니다.',
               403,
             );
-          const command = runCommandSchema.parse(JSON.parse(call.arguments)).command;
+          const command = jobCommandSchema.parse(JSON.parse(call.arguments)).command;
           if (
             !(await authorize(card, {
               kind: 'command',
@@ -1385,9 +1691,12 @@ export async function runAgent(options: {
               },
             });
             result = JSON.stringify({
-              ...(execution.status !== 'completed'
+              ...(execution.status !== 'completed' &&
+              !(execution.background && ['starting', 'running'].includes(execution.status))
                 ? { error: execution.error ?? 'COMMAND_FAILED' }
                 : {}),
+              jobId: execution.jobId,
+              background: execution.background,
               executionId: execution.id,
               exitCode: execution.exitCode,
               status: execution.status,
@@ -1396,9 +1705,12 @@ export async function runAgent(options: {
               cleanupPending: execution.cleanupPending,
             });
             observationResult = JSON.stringify({
-              ...(execution.status !== 'completed'
+              ...(execution.status !== 'completed' &&
+              !(execution.background && ['starting', 'running'].includes(execution.status))
                 ? { error: execution.error ?? 'COMMAND_FAILED' }
                 : {}),
+              jobId: execution.jobId,
+              background: execution.background,
               executionId: execution.id,
               exitCode: execution.exitCode,
               status: execution.status,
@@ -1419,7 +1731,7 @@ export async function runAgent(options: {
               '호스트 명령에는 Build 모드와 전체 접근 권한이 필요합니다.',
               403,
             );
-          const hostCommand = runCommandSchema.parse(JSON.parse(call.arguments)).command;
+          const hostCommand = jobCommandSchema.parse(JSON.parse(call.arguments)).command;
           await authorize(card, {
             kind: 'command',
             command: hostCommand,
@@ -1440,9 +1752,12 @@ export async function runAgent(options: {
             },
           });
           result = JSON.stringify({
-            ...(execution.status !== 'completed'
+            ...(execution.status !== 'completed' &&
+            !(execution.background && ['starting', 'running'].includes(execution.status))
               ? { error: execution.error ?? 'COMMAND_FAILED' }
               : {}),
+            jobId: execution.jobId,
+            background: execution.background,
             executionId: execution.id,
             exitCode: execution.exitCode,
             status: execution.status,
@@ -1450,9 +1765,12 @@ export async function runAgent(options: {
             truncated: execution.truncated,
           });
           observationResult = JSON.stringify({
-            ...(execution.status !== 'completed'
+            ...(execution.status !== 'completed' &&
+            !(execution.background && ['starting', 'running'].includes(execution.status))
               ? { error: execution.error ?? 'COMMAND_FAILED' }
               : {}),
+            jobId: execution.jobId,
+            background: execution.background,
             executionId: execution.id,
             exitCode: execution.exitCode,
             status: execution.status,
@@ -1736,6 +2054,11 @@ export async function runAgent(options: {
           ...(observationId ? { observationId } : {}),
         });
         await save();
+        if (queuedInput) {
+          skipRemaining('사용자의 추가 지시를 먼저 반영하기 위해 실행하지 않았습니다.');
+          await includeInputs();
+          continue modelLoop;
+        }
         if (autopilot) {
           checkSharedCost();
           emptyRounds = 0;
@@ -1743,7 +2066,7 @@ export async function runAgent(options: {
             // Remaining calls in the same model response are never executed after completion.
             skipRemaining();
             content += '\n\n' + autopilot.reason;
-            await save('completed');
+            if (!(await save('completed'))) continue modelLoop;
             return;
           }
           if (activityProposal(card)?.status === 'proposed' || card.planProposal) {
@@ -1752,7 +2075,7 @@ export async function runAgent(options: {
             autopilot.reason = card.planProposal
               ? '계획 제안을 검토한 뒤 다시 실행하세요.'
               : '파일 수정안을 검토하고 적용한 뒤 다시 실행하세요.';
-            await save('completed');
+            if (!(await save('completed'))) continue modelLoop;
             return;
           }
           const signature =

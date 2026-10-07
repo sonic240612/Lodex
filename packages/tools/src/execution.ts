@@ -7,6 +7,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import {
   AppError,
   executionConfigSchema,
+  jobCommandSchema,
   runCommandSchema,
   type CommandExecution,
   type ExecutionConfig,
@@ -21,8 +22,8 @@ export const executionTool: ToolDefinition = {
   function: {
     name: 'run_command',
     description:
-      'Execute a shell command in the user-enabled Linux Docker container with the selected project mounted at /workspace. cwd is project-relative. Receives bounded output and an exit code; nonzero means failure. Files in the mounted project can be changed by commands. The image, network and resource limits are fixed by the user. stdin is written once then closed. No interactive terminal or background services. Never assume a proposed edit has been applied; inspect current files before testing.',
-    parameters: z.toJSONSchema(runCommandSchema),
+      'Execute a shell command in the user-enabled Linux Docker container with the selected project mounted at /workspace. cwd is project-relative. Receives bounded output and an exit code; nonzero means failure. Files in the mounted project can be changed by commands. The image, network and resource limits are fixed by the user. Set interactive=true to keep stdin open for further user/tool input. Set background=true to return a job ID immediately; poll it and stop it when finished. This is a pipe, not a PTY. Background jobs still have timeout and output limits. Never assume a proposed edit has been applied; inspect current files before testing.',
+    parameters: z.toJSONSchema(jobCommandSchema),
   },
 };
 export const hostExecutionTool: ToolDefinition = {
@@ -30,8 +31,8 @@ export const hostExecutionTool: ToolDefinition = {
   function: {
     name: 'run_host_command',
     description:
-      'FULL ACCESS ONLY. Execute a command directly on the user host with the user account, inherited environment, unrestricted filesystem and network. Windows uses PowerShell; macOS and Linux use /bin/sh. cwd may be project-relative or absolute. Output and duration remain bounded and cancellation terminates the owned process tree.',
-    parameters: z.toJSONSchema(runCommandSchema),
+      'FULL ACCESS ONLY. Execute a command directly on the user host with the user account, inherited environment, unrestricted filesystem and network. Windows uses PowerShell; macOS and Linux use /bin/sh. cwd may be project-relative or absolute. Use interactive=true for live stdin and background=true for an immediately returned job ID. Poll job status; never claim it completed before the exit code is known. Output and duration remain bounded and cancellation terminates the owned process tree.',
+    parameters: z.toJSONSchema(jobCommandSchema),
   },
 };
 
@@ -55,6 +56,8 @@ export function dockerEnvironment(source: NodeJS.ProcessEnv = process.env): Node
     Object.entries(source).filter(([key]) => allowed.has(key.toLowerCase())),
   );
 }
+export type InputControl = (write: (text: string, eof: boolean) => void) => () => void;
+
 export interface CliResult {
   code: number | null;
   output: string;
@@ -65,6 +68,7 @@ export type DockerCli = (
   signal: AbortSignal,
   input?: string,
   progress?: (output: string, chunk?: string) => void,
+  inputControl?: InputControl,
 ) => Promise<CliResult>;
 
 export function runCli(
@@ -73,6 +77,7 @@ export function runCli(
   signal: AbortSignal,
   input = '',
   progress?: (output: string, chunk?: string) => void,
+  inputControl?: InputControl,
 ): Promise<CliResult> {
   return new Promise((resolve, reject) => {
     signal.throwIfAborted();
@@ -82,6 +87,7 @@ export function runCli(
       env: dockerEnvironment(),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
+    let detachInput: (() => void) | undefined;
     let output = '',
       total = 0,
       truncated = false,
@@ -108,8 +114,10 @@ export function runCli(
     const abort = () => child.kill();
     signal.addEventListener('abort', abort, { once: true });
     if (signal.aborted) abort();
+    child.stdin.once('close', () => detachInput?.());
     child.on('error', () => {
       settled = true;
+      detachInput?.();
       signal.removeEventListener('abort', abort);
       reject(
         new AppError(
@@ -119,12 +127,21 @@ export function runCli(
       );
     });
     child.on('close', (code) => {
+      detachInput?.();
       signal.removeEventListener('abort', abort);
       if (settled) return;
       append(decoders[0]!.end() + decoders[1]!.end());
       resolve({ code: signal.aborted || total > 1048576 ? null : code, output, truncated });
     });
-    child.stdin.end(input);
+    if (inputControl) {
+      if (input) child.stdin.write(input);
+      detachInput = inputControl((text, eof) => {
+        if (child.stdin.destroyed || child.stdin.writableEnded)
+          throw new AppError('COMMAND_INPUT_CLOSED', '명령의 입력이 닫혔습니다.');
+        if (eof) child.stdin.end(text);
+        else child.stdin.write(text);
+      });
+    } else child.stdin.end(input);
   });
 }
 export const dockerCli: DockerCli = (...args) => runCli('docker', ...args);
@@ -135,9 +152,17 @@ export type HostCommandRunner = (
   signal: AbortSignal,
   input?: string,
   progress?: (output: string, chunk?: string) => void,
+  inputControl?: InputControl,
 ) => Promise<CliResult>;
 
-export const hostCommandRunner: HostCommandRunner = (command, cwd, signal, input = '', progress) =>
+export const hostCommandRunner: HostCommandRunner = (
+  command,
+  cwd,
+  signal,
+  input = '',
+  progress,
+  inputControl,
+) =>
   new Promise((resolveResult, reject) => {
     signal.throwIfAborted();
     const windows = process.platform === 'win32';
@@ -154,6 +179,7 @@ export const hostCommandRunner: HostCommandRunner = (command, cwd, signal, input
         stdio: ['pipe', 'pipe', 'pipe'],
       },
     );
+    let detachInput: (() => void) | undefined;
     let output = '',
       total = 0,
       truncated = false,
@@ -198,9 +224,11 @@ export const hostCommandRunner: HostCommandRunner = (command, cwd, signal, input
     child.stdout.on('data', (chunk: Buffer) => append(decoders[0]!.write(chunk)));
     child.stderr.on('data', (chunk: Buffer) => append(decoders[1]!.write(chunk)));
     child.stdin.on('error', () => undefined);
+    child.stdin.once('close', () => detachInput?.());
     child.on('error', (error) => {
       if (settled) return;
       settled = true;
+      detachInput?.();
       clearTimeout(forceKill);
       signal.removeEventListener('abort', abort);
       reject(error);
@@ -208,6 +236,7 @@ export const hostCommandRunner: HostCommandRunner = (command, cwd, signal, input
     child.on('close', (code) => {
       if (settled) return;
       settled = true;
+      detachInput?.();
       clearTimeout(forceKill);
       signal.removeEventListener('abort', abort);
       append(decoders[0]!.end() + decoders[1]!.end());
@@ -217,7 +246,15 @@ export const hostCommandRunner: HostCommandRunner = (command, cwd, signal, input
         truncated: truncated || total > 1048576,
       });
     });
-    child.stdin.end(input);
+    if (inputControl) {
+      if (input) child.stdin.write(input);
+      detachInput = inputControl((text, eof) => {
+        if (child.stdin.destroyed || child.stdin.writableEnded)
+          throw new AppError('COMMAND_INPUT_CLOSED', '명령의 입력이 닫혔습니다.');
+        if (eof) child.stdin.end(text);
+        else child.stdin.write(text);
+      });
+    } else child.stdin.end(input);
     if (signal.aborted) terminate();
   });
 
@@ -403,13 +440,14 @@ export async function executeCommand(options: {
   signal: AbortSignal;
   record: (execution: CommandExecution) => Promise<void>;
   captureOutput?: (chunk: string) => void;
+  inputControl?: InputControl;
   cli?: DockerCli;
 }): Promise<CommandExecution> {
   const { project, signal: parent, record, cli = dockerCli } = options;
   const config = executionConfigSchema.parse(options.config);
   if (config.backend !== 'docker')
     throw new AppError('EXECUTION_DISABLED', '명령 실행이 꺼져 있습니다.', 403);
-  const input = runCommandSchema.parse(JSON.parse(options.argumentsJson));
+  const input = jobCommandSchema.parse(JSON.parse(options.argumentsJson));
   const root = await resolveTarget(project, '.');
   const cwd = await resolveTarget(project, input.cwd);
   if (!cwd.info.isDirectory())
@@ -419,6 +457,7 @@ export async function executeCommand(options: {
     id,
     environment: 'docker',
     containerName: 'lodex-' + id,
+    projectId: project.id,
     command: input.command,
     cwd: relative(root.path, cwd.path).replaceAll('\\', '/') || '.',
     status: 'starting',
@@ -473,6 +512,7 @@ export async function executeCommand(options: {
           void pending.catch(() => undefined);
         }
       },
+      options.inputControl,
     );
     execution.output = result.output;
     execution.truncated = result.truncated;
@@ -545,10 +585,11 @@ export async function executeHostCommand(options: {
   signal: AbortSignal;
   record: (execution: CommandExecution) => Promise<void>;
   captureOutput?: (chunk: string) => void;
+  inputControl?: InputControl;
   runner?: HostCommandRunner;
 }): Promise<CommandExecution> {
   const { project, signal: parent, record, runner = hostCommandRunner } = options;
-  const input = runCommandSchema.parse(JSON.parse(options.argumentsJson));
+  const input = jobCommandSchema.parse(JSON.parse(options.argumentsJson));
   const requestedCwd = isAbsolute(input.cwd) ? input.cwd : resolve(project.path, input.cwd);
   const cwd = await realpath(requestedCwd);
   if (!(await lstat(cwd)).isDirectory())
@@ -557,6 +598,7 @@ export async function executeHostCommand(options: {
   const execution: CommandExecution = {
     id,
     containerName: 'host-' + id,
+    projectId: project.id,
     environment: 'host',
     command: input.command,
     cwd,
@@ -574,16 +616,23 @@ export async function executeHostCommand(options: {
   try {
     execution.status = 'running';
     await record(execution);
-    const result = await runner(input.command, cwd, signal, input.stdin, (output, chunk) => {
-      if (chunk) options.captureOutput?.(chunk);
-      execution.output = output;
-      if (performance.now() - lastSave > 250) {
-        lastSave = performance.now();
-        const copy = structuredClone(execution);
-        pending = pending.then(() => record(copy));
-        void pending.catch(() => undefined);
-      }
-    });
+    const result = await runner(
+      input.command,
+      cwd,
+      signal,
+      input.stdin,
+      (output, chunk) => {
+        if (chunk) options.captureOutput?.(chunk);
+        execution.output = output;
+        if (performance.now() - lastSave > 250) {
+          lastSave = performance.now();
+          const copy = structuredClone(execution);
+          pending = pending.then(() => record(copy));
+          void pending.catch(() => undefined);
+        }
+      },
+      options.inputControl,
+    );
     execution.output = result.output;
     execution.truncated = result.truncated;
     execution.exitCode = result.code;

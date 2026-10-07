@@ -1692,6 +1692,7 @@ describe('authenticated daemon integration', () => {
           'search_history',
           'read_tool_result',
           'web_fetch',
+          'web_search',
         ]);
         if (round++ === 0) {
           yield {
@@ -2420,6 +2421,7 @@ describe('authenticated daemon integration', () => {
       'search_history',
       'read_tool_result',
       'web_fetch',
+      'web_search',
     ]);
     expect(requests[1]!.messages.at(-1)).toMatchObject({ role: 'tool', toolCallId: 'read-1' });
     expect(requests[1]!.messages.at(-1)?.content).toContain('안녕 프로젝트');

@@ -4,7 +4,13 @@ export type PermissionRequest =
   | { kind: 'verification'; target: string }
   | { kind: 'file'; paths: string[]; destructive?: boolean }
   | { kind: 'web'; target: string }
-  | { kind: 'command'; command: string; network: 'none' | 'bridge'; environment: 'docker' | 'host' }
+  | {
+      kind: 'command';
+      command: string;
+      network: 'none' | 'bridge';
+      environment: 'docker' | 'host';
+      interactiveInput?: boolean;
+    }
   | {
       kind: 'fusion';
       paths: string[];
@@ -140,6 +146,7 @@ export function permissionDecision(
 
   if (request.kind === 'command') {
     const high =
+      request.interactiveInput === true ||
       request.environment === 'host' ||
       request.network === 'bridge' ||
       dangerousCommand(request.command);
@@ -159,8 +166,9 @@ export function permissionDecision(
       actor,
       mode,
       risk: high ? 'high' : 'low',
-      reason:
-        request.environment === 'host'
+      reason: request.interactiveInput
+        ? '실행 중인 명령의 입력으로 추가 작업이 실행될 수 있습니다.'
+        : request.environment === 'host'
           ? '사용자 계정 권한으로 호스트 명령을 실행합니다.'
           : request.network === 'bridge'
             ? 'Docker 명령이 외부 네트워크에 접근할 수 있습니다.'

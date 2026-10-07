@@ -70,6 +70,53 @@ export async function createWorktree(
   return invoke('daemon_request', { method: 'POST', path: '/v1/worktrees', body: { projectId } });
 }
 export const nativeDesktop = isTauri();
+export async function reviewWorktree(
+  worktreeId: string,
+): Promise<import('@lodex/contracts').WorktreePreview> {
+  if (!nativeDesktop) throw new Error('Worktree 검토는 데스크톱 앱에서 사용할 수 있습니다.');
+  return (
+    await invoke<{ preview: import('@lodex/contracts').WorktreePreview }>('daemon_request', {
+      method: 'POST',
+      path: '/v1/worktrees/review',
+      body: { worktreeId },
+    })
+  ).preview;
+}
+export async function mergeWorktree(
+  sessionId: string,
+  previewId: string,
+  resolutions: Record<string, string | null>,
+): Promise<{ record: WorktreeRecord; session: Session }> {
+  return invoke('daemon_request', {
+    method: 'POST',
+    path: '/v1/worktrees/merge',
+    body: { sessionId, previewId, resolutions },
+  });
+}
+export async function commandJobs(
+  sessionId: string,
+): Promise<import('@lodex/contracts').CommandJob[]> {
+  if (!nativeDesktop) return [];
+  const result = await invoke<{ jobs: import('@lodex/contracts').CommandJob[] }>('daemon_request', {
+    method: 'GET',
+    path: '/v1/command-jobs?sessionId=' + encodeURIComponent(sessionId),
+    body: null,
+  });
+  return result.jobs;
+}
+export async function commandJobAction(
+  action: 'input' | 'stop',
+  body: { sessionId: string; jobId: string; input: string; eof: boolean },
+): Promise<import('@lodex/contracts').CommandJob> {
+  if (!nativeDesktop) throw new Error('실행 작업 관리는 데스크톱 앱에서 사용할 수 있습니다.');
+  return (
+    await invoke<{ job: import('@lodex/contracts').CommandJob }>('daemon_request', {
+      method: 'POST',
+      path: '/v1/command-jobs/' + action,
+      body,
+    })
+  ).job;
+}
 export type { McpContentPreview } from '@lodex/contracts';
 export async function previewMcpContent(input: McpContentInput): Promise<McpContentPreview> {
   return invoke('daemon_request', { method: 'POST', path: '/v1/mcp/content', body: input });
@@ -241,6 +288,8 @@ async function previewCommand(command: Command): Promise<CommandResult> {
       session.config = { ...command.config, provider: 'demo', model: 'demo' };
       const role = session.mode ?? 'build';
       if (session.routing?.[role]) session.routing = { ...session.routing, [role]: session.config };
+    } else if (command.type === 'steer_run') {
+      throw new Error('실행 중 추가 지시는 데스크톱 앱에서 사용할 수 있습니다.');
     } else if (command.type === 'send_message') {
       const now = new Date().toISOString();
       session.title = command.content.slice(0, 60);

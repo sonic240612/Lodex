@@ -87,12 +87,12 @@ export class Store {
     return this.call('snapshot');
   }
   integration(
-    name: 'telegram' | 'worktrees',
+    name: 'telegram' | 'worktrees' | 'command_jobs',
   ): Promise<{ version: number; document: unknown } | null> {
     return this.call('integration', name);
   }
   saveIntegration(
-    name: 'telegram' | 'worktrees',
+    name: 'telegram' | 'worktrees' | 'command_jobs',
     expectedVersion: number,
     document: unknown,
   ): Promise<number> {
@@ -141,6 +141,16 @@ export class Store {
   session(id: string): Promise<Session> {
     return this.call('session', id);
   }
+  includeRunInputs(
+    sessionId: string,
+    runId: string,
+    continuation: import('@lodex/contracts').InferenceMessage[],
+  ): Promise<{
+    messages: import('@lodex/contracts').Message[];
+    continuation: import('@lodex/contracts').InferenceMessage[];
+  }> {
+    return this.call('includeRunInputs', sessionId, runId, continuation);
+  }
   recordModelCall(sessionId: string, call: ModelCallRecord): Promise<Session> {
     return this.call('recordModelCall', sessionId, call);
   }
@@ -165,6 +175,12 @@ export class Store {
     execution: CommandExecution,
   ): Promise<Session> {
     return this.call('recordExecution', sessionId, activityId, execution);
+  }
+  recordWorkspaceChange(sessionId: string, label: string, text: string): Promise<Session> {
+    return this.call('recordWorkspaceChange', sessionId, label, text);
+  }
+  invalidateWorkspace(sessionId: string): Promise<Session> {
+    return this.call('invalidateWorkspace', sessionId);
   }
   decideApproval(action: ApprovalAction): Promise<Session> {
     return this.call('decideApproval', action);

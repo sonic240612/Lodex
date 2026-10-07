@@ -1,21 +1,32 @@
 import { SettingsSurface } from './SettingsSurface';
 import { useEffect, useRef, useState } from 'react';
-import type { Project, WorktreeRecord } from '@lodex/contracts';
-import { createWorktree, nativeDesktop, worktreeList } from './bridge';
+import type { Project, WorktreeRecord, WorktreePreview, Session } from '@lodex/contracts';
+import {
+  createWorktree,
+  nativeDesktop,
+  worktreeList,
+  reviewWorktree,
+  mergeWorktree,
+} from './bridge';
+import { WorktreeReviewPanel } from './WorktreeReviewPanel';
+import { useWorkspace } from './state';
 import { Icon } from './icons';
 export function WorktreeManager({
   embedded = false,
   projects,
   selectedId,
+  session,
   onOpen,
   onClose,
 }: {
   embedded?: boolean;
   projects: Project[];
   selectedId: string | null;
+  session?: Session | undefined;
   onOpen: (project: Project) => void;
   onClose: () => void;
 }) {
+  const [preview, setPreview] = useState<WorktreePreview>();
   const dialog = useRef<HTMLDialogElement>(null);
   const [source, setSource] = useState(selectedId ?? ''),
     [records, setRecords] = useState<WorktreeRecord[]>([]),
@@ -53,6 +64,39 @@ export function WorktreeManager({
       setBusy(false);
     }
   }
+  async function review(id: string) {
+    setBusy(true);
+    setError('');
+    try {
+      setPreview(await reviewWorktree(id));
+    } catch (error) {
+      setError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function apply(resolutions: Record<string, string | null>) {
+    if (!preview || !session) return;
+    setBusy(true);
+    setError('');
+    try {
+      const result = await mergeWorktree(session.id, preview.id, resolutions);
+      useWorkspace.getState().upsert(result.session);
+      setRecords((current) =>
+        current.map((record) => (record.id === result.record.id ? result.record : record)),
+      );
+      setPreview(undefined);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : String(error));
+      try {
+        setRecords((await worktreeList()).records);
+      } catch {
+        /* Reopen refreshes. */
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
   return (
     <SettingsSurface
       embedded={embedded}
@@ -76,8 +120,8 @@ export function WorktreeManager({
           않습니다.
         </p>
         <p>
-          새 프로젝트에서 Build 모드로 수정·검토하세요. 원본으로 병합하거나 worktree를 삭제하는
-          작업은 아직 Git에서 직접 진행해야 합니다.
+          새 프로젝트에서 Build 모드로 수정하고, 변경 검토에서 원본과 비교·충돌 해결·적용할 수
+          있습니다. 파일 적용 뒤 Git 커밋과 Worktree 삭제는 직접 진행하세요.
         </p>
         <p>Git 필터·훅 실행과 하위 모듈 초기화는 지원하지 않습니다.</p>
         <label>
@@ -120,6 +164,19 @@ export function WorktreeManager({
               · {record.baseCommit.slice(0, 12)}
             </small>
             {record.error && <p>{record.error}</p>}
+            {record.merge && (
+              <p>
+                최근 적용: {record.merge.status} ·{' '}
+                {record.merge.files.filter((file) => file.applied).length}/
+                {record.merge.files.length}개 파일
+              </p>
+            )}
+            <button
+              disabled={busy || record.status !== 'ready' || !nativeDesktop}
+              onClick={() => void review(record.id)}
+            >
+              변경 검토
+            </button>
             {record.projectId && projects.find((project) => project.id === record.projectId) && (
               <button
                 onClick={() => onOpen(projects.find((project) => project.id === record.projectId)!)}
@@ -129,6 +186,20 @@ export function WorktreeManager({
             )}
           </section>
         ))}
+        {preview && (
+          <WorktreeReviewPanel
+            key={preview.id}
+            preview={preview}
+            busy={busy}
+            canApply={
+              !!session &&
+              session.projectId === preview.sourceProjectId &&
+              session.mode !== 'plan' &&
+              session.run?.status !== 'running'
+            }
+            onApply={(resolutions) => void apply(resolutions)}
+          />
+        )}
       </div>
     </SettingsSurface>
   );

@@ -159,6 +159,28 @@ async function fixture(
 }
 
 describe('durable Telegram channel', () => {
+  it('queues paired remote instructions in the active run instead of starting another request', async () => {
+    const app = await fixture();
+    await app.pair();
+    app.bot.push([update(2, '/ask first request')]);
+    await expect.poll(() => app.dispatch.mock.calls.length).toBe(1);
+    const first = await app.store.session(app.session.id);
+    app.bot.push([update(3, 'also check the output')]);
+    await expect.poll(() => app.dispatch.mock.calls.length).toBe(2);
+    expect(app.dispatch.mock.calls[1]![0]).toMatchObject({
+      type: 'steer_run',
+      actor: 'telegram',
+      runId: first.run!.id,
+      content: 'also check the output',
+    });
+    const queued = await app.store.session(app.session.id);
+    expect(queued.run!.id).toBe(first.run!.id);
+    expect(queued.messages.at(-1)!.runInput).toMatchObject({ actor: 'telegram', status: 'queued' });
+    await expect
+      .poll(() => app.bot.sent.some((message) => message.text.includes('추가 지시를 접수')))
+      .toBe(true);
+    expect(app.bot.sent.some((message) => message.text.includes('중지 요청'))).toBe(false);
+  });
   it('lets only the paired account query costs without dispatching a new model request', async () => {
     const reconcile = vi.fn(async () => ({ reconciled: 1, remaining: 0, withoutId: 0 }));
     const app = await fixture(reconcile);

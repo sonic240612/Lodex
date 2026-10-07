@@ -31,7 +31,7 @@ function connectionError(error: unknown): AppError {
   );
 }
 
-async function readResponse(response: Response, signal: AbortSignal): Promise<Buffer> {
+export async function readWebResponse(response: Response, signal: AbortSignal): Promise<Buffer> {
   const reader = response.body?.getReader();
   if (!reader) return Buffer.alloc(0);
   const parts: Buffer[] = [];
@@ -173,7 +173,7 @@ export async function fetchWebPage(options: {
     }
     let content: string;
     try {
-      const body = await readResponse(response, signal);
+      const body = await readWebResponse(response, signal);
       const charset = /charset\s*=\s*["']?([^;\s"']+)/i.exec(contentType)?.[1] ?? 'utf-8';
       try {
         content = new TextDecoder(charset, { fatal: true }).decode(body);

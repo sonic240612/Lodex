@@ -829,12 +829,20 @@ export class Telegram {
                 'TELEGRAM_BUILD',
                 'Build 원격 요청은 데스크톱에서 허용해야 합니다.',
               );
-            command = makeCommand({
-              type: 'send_message',
-              sessionId: session.id,
-              expectedVersion: session.version,
-              content: text.startsWith('/ask ') ? text.slice(5).trim() : text,
-            });
+            command =
+              session.run?.status === 'running'
+                ? makeCommand({
+                    type: 'steer_run',
+                    sessionId: session.id,
+                    runId: session.run.id,
+                    content: text.startsWith('/ask ') ? text.slice(5).trim() : text,
+                  })
+                : makeCommand({
+                    type: 'send_message',
+                    sessionId: session.id,
+                    expectedVersion: session.version,
+                    content: text.startsWith('/ask ') ? text.slice(5).trim() : text,
+                  });
           }
           item.command = commandSchema.parse({ ...command, actor: 'telegram' });
           item.status = 'prepared';
@@ -869,11 +877,13 @@ export class Telegram {
         } else {
           item.status = 'done';
           this.enqueue(
-            item.command.type === 'save_plan'
-              ? '목표와 할 일을 저장했습니다.'
-              : item.command.type === 'set_permission_mode'
-                ? 'Autopilot 권한을 변경했습니다: ' + item.command.mode
-                : '중지 요청을 처리했습니다.',
+            item.command.type === 'steer_run'
+              ? '추가 지시를 접수했습니다. 현재 작업 뒤 다음 모델 요청에 반영합니다.'
+              : item.command.type === 'save_plan'
+                ? '목표와 할 일을 저장했습니다.'
+                : item.command.type === 'set_permission_mode'
+                  ? 'Autopilot 권한을 변경했습니다: ' + item.command.mode
+                  : '중지 요청을 처리했습니다.',
           );
         }
         await this.save();

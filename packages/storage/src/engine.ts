@@ -50,6 +50,7 @@ import {
   runContextCompactionSchema,
   type RunContextCompaction,
   type Message,
+  RUN_INPUT_PREFIX,
   modelCallRecordSchema,
   type ModelCallRecord,
 } from '@lodex/contracts';
@@ -165,7 +166,7 @@ export class StorageEngine {
       'PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;',
     );
     const row = this.db.prepare('PRAGMA user_version').get() as { user_version: number };
-    if (row.user_version > 15) {
+    if (row.user_version > 16) {
       this.db.close();
       throw new AppError(
         'DATABASE_VERSION',
@@ -236,6 +237,7 @@ export class StorageEngine {
     // Older clients cannot preserve per-request reservations or distinguish
     // verified completion from a model claim. Refuse silent downgrade writes.
     if (row.user_version < 15) this.db.exec('PRAGMA user_version=15;');
+    if (row.user_version < 16) this.db.exec('PRAGMA user_version=16;');
   }
   integration(name: string): { version: number; document: unknown } | null {
     const row = this.db
@@ -245,7 +247,7 @@ export class StorageEngine {
   }
   saveIntegration(name: string, expectedVersion: number, document: unknown): number {
     if (
-      !['telegram', 'worktrees'].includes(name) ||
+      !['telegram', 'worktrees', 'command_jobs'].includes(name) ||
       Buffer.byteLength(JSON.stringify(document)) > 2097152
     )
       throw new AppError('INTEGRATION_STATE', '연동 기록 형식 또는 크기를 확인하세요.');
@@ -720,12 +722,52 @@ export class StorageEngine {
             );
           session.contextCompaction = structuredClone(compaction);
         };
-        if (command.type === 'cancel_run') {
+        if (command.type === 'steer_run') {
+          if (session.run?.id !== command.runId || session.run.status !== 'running')
+            throw new AppError(
+              'RUN_CONFLICT',
+              '실행이 끝났거나 변경되었습니다. 새 요청으로 보내세요.',
+              409,
+            );
+          const queued = session.messages.filter(
+            (message) =>
+              message.runInput?.runId === command.runId && message.runInput.status === 'queued',
+          );
+          if (
+            queued.length >= 8 ||
+            queued.reduce(
+              (size, message) => size + Buffer.byteLength(message.content),
+              Buffer.byteLength(command.content),
+            ) > 65536
+          )
+            throw new AppError(
+              'RUN_INPUT_LIMIT',
+              '전달 대기 중인 추가 지시가 많습니다. 다음 단계에 반영될 때까지 기다려 주세요.',
+            );
+          session.messages.push({
+            id: randomUUID(),
+            role: 'user',
+            content: command.content,
+            createdAt: now,
+            status: 'complete',
+            error: null,
+            usage: null,
+            runInput: {
+              runId: command.runId,
+              responseId: session.run.messageId,
+              actor: command.actor,
+              status: 'queued',
+            },
+          });
+        } else if (command.type === 'cancel_run') {
           if (session.run?.id !== command.runId)
             throw new AppError('RUN_CONFLICT', '중지하려는 실행이 현재 실행과 다릅니다.', 409);
           if (session.run.status === 'running') {
             session.run.status = 'cancelled';
             session.run.finishedAt = now;
+            for (const input of session.messages)
+              if (input.runInput?.runId === command.runId && input.runInput.status === 'queued')
+                input.runInput.status = 'interrupted';
             if (session.autopilot?.runId === session.run.id) {
               session.autopilot.status = 'cancelled';
               session.autopilot.reason = '사용자가 중지했습니다.';
@@ -1036,11 +1078,18 @@ export class StorageEngine {
       updateCostTotals(session);
       if (update.usage && message.usage) message.usage = { ...message.usage, ...update.usage };
       updateMessageCostUsage(message);
-      if (update.status) {
+      const pendingInput = session.messages.some(
+        (input) => input.runInput?.runId === update.runId && input.runInput.status === 'queued',
+      );
+      // Atomically defer successful completion if input was queued after the runner's last poll.
+      if (update.status && !(update.status === 'completed' && pendingInput)) {
         session.run.status = update.status;
         session.run.finishedAt = new Date().toISOString();
         message.status = update.status === 'completed' ? 'complete' : update.status;
         message.error = update.error ?? null;
+        for (const input of session.messages)
+          if (input.runInput?.runId === update.runId && input.runInput.status === 'queued')
+            input.runInput.status = 'interrupted';
         if (session.autopilot?.runId === update.runId && session.autopilot.status === 'running') {
           session.autopilot.status =
             update.status === 'cancelled'
@@ -1087,6 +1136,36 @@ export class StorageEngine {
       }
       this.persist(session);
       return session;
+    });
+  }
+  includeRunInputs(
+    sessionId: string,
+    runId: string,
+    continuation: InferenceMessage[],
+  ): { messages: Message[]; continuation: InferenceMessage[] } {
+    return this.transaction(() => {
+      const session = this.session(sessionId);
+      if (session.run?.id !== runId || session.run.status !== 'running')
+        return { messages: [], continuation };
+      const messages = session.messages.filter(
+        (message) => message.runInput?.runId === runId && message.runInput.status === 'queued',
+      );
+      if (!messages.length) return { messages: [], continuation };
+      const response = session.messages.find((message) => message.id === session.run!.messageId)!;
+      const included = [
+        ...continuation,
+        ...messages.map((message) => ({
+          role: 'user' as const,
+          content: RUN_INPUT_PREFIX + message.content,
+        })),
+      ];
+      response.continuation = included;
+      for (const message of messages) {
+        message.runInput!.status = 'included';
+        message.runInput!.includedAt = new Date().toISOString();
+      }
+      this.persist(session);
+      return { messages, continuation: included };
     });
   }
   beginEdit(action: EditAction, allowRunning = false): Session {
@@ -1145,6 +1224,67 @@ export class StorageEngine {
       }
       activity.execution = execution;
       this.persist(session); // Also accepts late cancellation results; never loses a container owner.
+      return session;
+    });
+  }
+  recordWorkspaceChange(sessionId: string, label: string, text: string): Session {
+    if (label !== 'worktree_merge' || Buffer.byteLength(text) > 65536)
+      throw new AppError('WORKSPACE_CHANGE', '잘못된 작업 기록입니다.');
+    return this.transaction(() => {
+      const session = this.session(sessionId);
+      if (session.mode === 'plan')
+        throw new AppError('READ_ONLY', 'Plan 모드에서는 변경을 기록할 수 없습니다.', 403);
+      const now = new Date().toISOString();
+      const change = JSON.parse(text) as {
+        status: string;
+        files: { path: string; afterHash: string | null; applied: boolean }[];
+      };
+      if (!Array.isArray(change.files))
+        throw new AppError('WORKSPACE_CHANGE', '잘못된 변경 기록입니다.');
+      const completed = change.status === 'applied';
+      invalidateSessionVerification(session);
+      session.messages.push({
+        id: randomUUID(),
+        role: 'assistant',
+        createdAt: now,
+        content: completed
+          ? 'Worktree 변경을 원본 프로젝트에 적용했습니다.'
+          : 'Worktree 변경 적용이 중단되었습니다. 적용된 파일과 남은 변경을 확인하세요.',
+        status: 'complete',
+        error: null,
+        usage: emptyUsage(resolveModelConfig(session).provider),
+        activities: [
+          {
+            id: randomUUID(),
+            kind: 'tool',
+            label,
+            status: completed ? 'completed' : 'failed',
+            text,
+            arguments: text,
+            approval: {
+              kind: 'file',
+              target: change.files.map((file) => file.path).join(', '),
+              actor: 'desktop',
+              mode: session.permissionMode ?? 'ask',
+              risk: change.files.some((file) => file.afterHash === null) ? 'high' : 'low',
+              reason: '사용자가 Worktree 변경 검토에서 적용을 선택했습니다.',
+              status: 'approved',
+              decidedBy: 'user',
+              requestedAt: now,
+              decidedAt: now,
+            },
+          },
+        ],
+      });
+      this.persist(session);
+      return session;
+    });
+  }
+  invalidateWorkspace(sessionId: string): Session {
+    return this.transaction(() => {
+      const session = this.session(sessionId);
+      invalidateSessionVerification(session);
+      this.persist(session);
       return session;
     });
   }

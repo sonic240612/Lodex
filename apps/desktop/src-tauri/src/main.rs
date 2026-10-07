@@ -196,6 +196,10 @@ fn route_allowed(method: &str, path: &str) -> bool {
         | ("POST", "/v1/telegram/approve")
         | ("POST", "/v1/telegram/unpair")
         | ("POST", "/v1/worktrees")
+        | ("POST", "/v1/worktrees/review")
+        | ("POST", "/v1/worktrees/merge")
+        | ("POST", "/v1/command-jobs/input")
+        | ("POST", "/v1/command-jobs/stop")
         | ("POST", "/v1/commands")
         | ("POST", "/v1/projects")
         | ("POST", "/v1/sessions/delete")
@@ -227,7 +231,9 @@ fn route_allowed(method: &str, path: &str) -> bool {
         | ("POST", "/v1/approvals") => true,
         ("POST", "/v1/costs/reconcile") => true,
         ("GET", value)
-            if value.starts_with("/v1/models?") || value.starts_with("/v1/execution/check?") =>
+            if value.starts_with("/v1/models?")
+                || value.starts_with("/v1/execution/check?")
+                || value.starts_with("/v1/command-jobs?") =>
         {
             !value.contains('#') && !value.contains('\\')
         }
@@ -409,7 +415,7 @@ async fn daemon_request(
         .request(method, format!("http://127.0.0.1:{}{}", port, path))
         .bearer_auth(token)
         .timeout(Duration::from_secs(
-            if path == "/v1/runtime/action" || path == "/v1/worktrees" {
+            if path == "/v1/runtime/action" || path.starts_with("/v1/worktrees") {
                 200
             } else if path == "/v1/mcp/register"
                 || path == "/v1/mcp/content"
@@ -748,6 +754,14 @@ mod tests {
         assert!(route_allowed("POST", "/v1/backups/export"));
         assert!(route_allowed("POST", "/v1/mcp/completion"));
         assert!(route_allowed("POST", "/v1/costs/reconcile"));
+        assert!(route_allowed("GET", "/v1/command-jobs?sessionId=test"));
+        assert!(route_allowed("POST", "/v1/command-jobs/input"));
+        assert!(route_allowed("POST", "/v1/worktrees/review"));
+        assert!(route_allowed("POST", "/v1/worktrees/merge"));
+        assert!(!route_allowed(
+            "GET",
+            "/v1/command-jobs?sessionId=test#secret"
+        ));
         assert!(!route_allowed("GET", "/v1/costs/reconcile"));
         assert!(!route_allowed("PUT", "/v1/secret"));
         assert!(!route_allowed("GET", "https://example.com"));

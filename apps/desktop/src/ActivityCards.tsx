@@ -96,6 +96,14 @@ export function ActivityCards({
                         ? ` · $${child.usage.costUsd.toFixed(6)}`
                         : ''}
                     </span>
+                    {child.mode === 'build' && (
+                      <p>
+                        Worktree에서 파일 수정·명령 실행
+                        {child.worktreeId && <code> · {child.worktreeId}</code>}
+                        <br />
+                        설정 → Worktree에서 변경을 검토하고 원본에 적용할 수 있습니다.
+                      </p>
+                    )}
                     <pre>{child.text || '결과 대기 중…'}</pre>
                     {child.error && <p role="alert">{child.error}</p>}
                   </div>

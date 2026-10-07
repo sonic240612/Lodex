@@ -1,5 +1,6 @@
 import {
   AppError,
+  RUN_INPUT_PREFIX,
   type InferenceMessage,
   type InferenceRequest,
   type RunContextCompaction,
@@ -126,9 +127,12 @@ export function compactRunningContext(options: {
   const originalEstimateTokens =
     estimateInputTokens(projectRunningContext(base, continuation, previous)) +
     Buffer.byteLength(JSON.stringify(request.tools ?? []));
+  const latestInput = continuation.findLastIndex(
+    (message) => message.role === 'user' && message.content.startsWith(RUN_INPUT_PREFIX),
+  );
   const candidates = [
     ...(!previous?.historyCompacted && omittedHistory.length ? [start] : []),
-    ...ends.filter((end) => end > start),
+    ...ends.filter((end) => end > start && (latestInput < 0 || end <= latestInput)),
   ];
   if (!candidates.length && previous) candidates.push(start);
   for (const through of candidates) {

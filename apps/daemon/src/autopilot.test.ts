@@ -165,6 +165,19 @@ describe('goal verification and scheduling', () => {
       await expect(
         completeGoal(state, input, { executions, signal: new AbortController().signal }),
       ).rejects.toMatchObject({ code: 'VERIFICATION_EXECUTION' });
+    await expect(
+      completeGoal(state, input, {
+        executions: [{ ...execution, projectId: crypto.randomUUID() }],
+        project: {
+          id: crypto.randomUUID(),
+          path: '/source',
+          identity: '',
+          name: 'source',
+          createdAt: '',
+        },
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toMatchObject({ code: 'VERIFICATION_EXECUTION' });
     await completeGoal(state, input, {
       executions: [execution],
       signal: new AbortController().signal,

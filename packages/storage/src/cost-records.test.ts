@@ -95,7 +95,7 @@ describe('durable request cost records', () => {
     });
     expect(upgraded.autopilot?.costBudgetId).toBe(call.budgetId);
     const check = new DatabaseSync(path);
-    expect(check.prepare('PRAGMA user_version').get()?.user_version).toBe(15);
+    expect(check.prepare('PRAGMA user_version').get()?.user_version).toBe(16);
     check.close();
   });
   it('enforces the shared budget atomically and prevents duplicate generation charges', async () => {

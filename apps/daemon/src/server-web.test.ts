@@ -100,20 +100,27 @@ async function setup(
   return { store, command, create, pending, decide };
 }
 
-function webProvider(check: (result: Record<string, unknown>) => void): InferenceProvider {
+function webProvider(
+  check: (result: Record<string, unknown>) => void,
+  name: 'web_fetch' | 'web_search' = 'web_fetch',
+): InferenceProvider {
   let round = 0;
   return {
     listModels: async () => [],
     capabilities: async () => ({ streaming: true, tools: true }),
     async *generate(request) {
-      expect(request.tools?.some((tool) => tool.function.name === 'web_fetch')).toBe(true);
+      expect(request.tools?.some((tool) => tool.function.name === name)).toBe(true);
       if (round++ === 0) {
         yield {
           type: 'tool_call_delta',
           index: 0,
           id: 'web-1',
-          name: 'web_fetch',
-          arguments: JSON.stringify({ url: 'https://example.com/docs' }),
+          name,
+          arguments: JSON.stringify(
+            name === 'web_search'
+              ? { query: 'public documentation' }
+              : { url: 'https://example.com/docs' },
+          ),
         };
         yield { type: 'finished', reason: 'tool_calls' };
       } else {
@@ -126,6 +133,42 @@ function webProvider(check: (result: Record<string, unknown>) => void): Inferenc
 }
 
 describe('web tool agent integration', () => {
+  it('reviews the exact search query in Plan and resumes with source URLs after approval', async () => {
+    const fetcher = vi.fn(
+      async () =>
+        new Response(
+          '<a class="result__a" href="https://example.com/docs">Docs</a><div class="result__snippet">Public docs</div>',
+        ),
+    );
+    const app = await setup(
+      webProvider(
+        (result) =>
+          expect(result).toMatchObject({
+            provider: 'duckduckgo',
+            results: [{ url: 'https://example.com/docs' }],
+          }),
+        'web_search',
+      ),
+      fetcher,
+    );
+    const session = await app.create('ask', 'plan');
+    await app.command(
+      makeCommand({
+        type: 'send_message',
+        sessionId: session.id,
+        expectedVersion: session.version,
+        content: 'Search public documentation',
+      }),
+    );
+    const pending = await app.pending(session.id);
+    expect(new URL(pending.approval!.target!).searchParams.get('q')).toBe('public documentation');
+    expect(fetcher).not.toHaveBeenCalled();
+    await app.decide(session.id, pending.id, 'approve');
+    await expect
+      .poll(async () => (await app.store.session(session.id)).run?.status)
+      .toBe('completed');
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
   it.each([
     ['ask', 'plan', 'approve'],
     ['auto', 'build', 'approve'],

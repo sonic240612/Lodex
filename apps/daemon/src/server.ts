@@ -67,6 +67,8 @@ import {
   executeHostCommand,
   isProjectReadTool,
   webFetchTool,
+  webSearchTool,
+  readProjectInstructions,
   fetchWebPage,
 } from '@lodex/tools';
 import { runAgent } from './agent-runner';
@@ -94,6 +96,13 @@ import { RunMcp, selectedMcpTools } from './mcp';
 import { loadMcpSecret, loadTelegramSecret, telegramToken } from './secrets';
 import { Telegram } from './telegram';
 import { Worktrees } from './worktrees';
+import {
+  WorktreeReviews,
+  worktreeTools,
+  worktreeReviewSchema,
+  worktreeMergeSchema,
+} from './worktree-reviews';
+import { CommandJobs, commandJobTools, commandJobActionSchema } from './jobs';
 import { McpContentPreviews } from './mcp-content';
 import { OAuthEnvStore } from './oauth-store';
 import { InferenceScheduler } from './inference-scheduler';
@@ -701,9 +710,11 @@ export async function startServer(options: ServerOptions) {
         pricing: (config) => pricing.get(config.provider + '\0' + config.model),
         ...(observations ? { observations } : {}),
         ...(options.webFetcher ? { webFetcher: options.webFetcher } : {}),
-        ...(options.hostCommandExecutor
-          ? { hostCommandExecutor: options.hostCommandExecutor }
-          : {}),
+        commandExecutor: (input) => jobs.run(session, input, 'docker', executeCommand),
+        hostCommandExecutor: (input) =>
+          jobs.run(session, input, 'host', options.hostCommandExecutor ?? executeHostCommand),
+        jobs,
+        ...(worktrees && worktreeReviews ? { worktrees, worktreeReviews } : {}),
         waitForApproval: (activityId, signal) =>
           waitForApproval(session.run!.id, session.id, activityId, signal),
         waitForElicitation: (activityId, signal) =>
@@ -949,6 +960,7 @@ export async function startServer(options: ServerOptions) {
       tools.push(historySearchTool);
       tools.push(toolResultRecallTool);
       tools.push(webFetchTool);
+      tools.push(webSearchTool);
       if (
         observations &&
         (session.config.eco ||
@@ -962,6 +974,12 @@ export async function startServer(options: ServerOptions) {
       )
         tools.push(observationRecallTool);
       if (session.routing?.subagentsEnabled) tools.push(subagentTool);
+      if (worktreeReviews && tools.some((tool) => tool.function.name === 'read_file'))
+        tools.push(
+          ...worktreeTools.filter(
+            (tool) => session.mode !== 'plan' || tool.function.name === 'review_worktree',
+          ),
+        );
       tools.push(...mcpSelections.map((value) => value.definition));
       if (selectedSkills.length) tools.push(...skillTools);
       if (
@@ -976,6 +994,15 @@ export async function startServer(options: ServerOptions) {
         tools.some((tool) => tool.function.name === 'read_file')
       )
         tools.push(hostExecutionTool);
+      if (
+        jobs.list(session.id).length ||
+        tools.some((tool) => ['run_command', 'run_host_command'].includes(tool.function.name))
+      )
+        tools.push(
+          ...commandJobTools.filter(
+            (tool) => session.mode !== 'plan' || tool.function.name === 'read_command_job',
+          ),
+        );
       if (
         session.permissionMode === 'full' &&
         tools.some((tool) => tool.function.name === 'read_file')
@@ -1032,6 +1059,15 @@ export async function startServer(options: ServerOptions) {
         selectedSkills.length
           ? skillCatalog(selectedSkills, { maxBytes: session.config.eco ? 3000 : 6000 })
           : undefined,
+        session.projectId &&
+          (session.config.provider !== 'openrouter' || session.config.projectCloudConsent)
+          ? {
+              projectInstructions: await readProjectInstructions(
+                await store.project(session.projectId),
+                new AbortController().signal,
+              ),
+            }
+          : {},
       );
       if (command.type === 'resume_goal') {
         const evidence = goalResumeEvidence(session);
@@ -1120,9 +1156,11 @@ export async function startServer(options: ServerOptions) {
     if (command.type === 'cancel_run') active.get(command.runId)?.abort.abort();
     return result;
   }
+  const jobs = await CommandJobs.open(store);
   const worktrees = options.worktreeRoot
     ? await Worktrees.open(store, options.worktreeRoot)
     : undefined;
+  const worktreeReviews = worktrees ? new WorktreeReviews(store, worktrees) : undefined;
   let telegramKeychainToken = options.telegramToken ?? null,
     telegramTokenSource: SecretSource = 'none';
   const resolveTelegramToken = async () => {
@@ -1210,6 +1248,72 @@ export async function startServer(options: ServerOptions) {
         json(response, 200, await telegram.approve(value.data.userId, value.data.chatId));
       } else if (request.method === 'POST' && url.pathname === '/v1/telegram/unpair') {
         json(response, 200, await telegram.unpair());
+      } else if (request.method === 'POST' && url.pathname === '/v1/worktrees/review') {
+        if (!worktreeReviews || !worktrees)
+          throw new AppError('WORKTREE_PATH', 'Worktree 저장소가 연결되지 않았습니다.');
+        const input = worktreeReviewSchema.parse(await readJson(request));
+        const record = worktrees.list().find((record) => record.id === input.worktreeId);
+        if (record?.projectId && jobs.hasActiveProject(record.projectId))
+          throw new AppError('WORKTREE_BUSY', 'Worktree 명령이 끝난 뒤 검토하세요.', 409);
+        json(response, 200, {
+          preview: await worktreeReviews.preview(
+            input.worktreeId,
+            AbortSignal.any([shutdown.signal, AbortSignal.timeout(60000)]),
+          ),
+        });
+      } else if (request.method === 'POST' && url.pathname === '/v1/worktrees/merge') {
+        if (!worktreeReviews)
+          throw new AppError('WORKTREE_PATH', 'Worktree 저장소가 연결되지 않았습니다.');
+        const input = worktreeMergeSchema
+          .extend({ sessionId: z.uuid() })
+          .parse(await readJson(request));
+        const result = await serial(async () => {
+          const session = await store.session(input.sessionId),
+            preview = worktreeReviews!.get(input.previewId);
+          if (session.mode === 'plan' || session.projectId !== preview.sourceProjectId)
+            throw new AppError(
+              'READ_ONLY',
+              '원본 프로젝트의 Build 대화를 선택한 뒤 적용하세요.',
+              403,
+            );
+          if (
+            jobs.hasActiveProject(preview.sourceProjectId) ||
+            (await store.snapshot()).sessions.some(
+              (other) =>
+                other.projectId === preview.sourceProjectId && other.run?.status === 'running',
+            )
+          )
+            throw new AppError('PROJECT_BUSY', '원본 프로젝트의 실행이 끝난 뒤 적용하세요.', 409);
+          const record = worktrees!.list().find((record) => record.id === preview.worktreeId);
+          if (record?.projectId && jobs.hasActiveProject(record.projectId))
+            throw new AppError('WORKTREE_BUSY', 'Worktree 명령이 끝난 뒤 적용하세요.', 409);
+          await store.invalidateWorkspace(session.id);
+          let merged: import('@lodex/contracts').WorktreeRecord;
+          try {
+            merged = await worktreeReviews!.apply(
+              input.previewId,
+              input.resolutions,
+              AbortSignal.any([shutdown.signal, AbortSignal.timeout(60000)]),
+            );
+          } catch (error) {
+            const changed = worktrees!.list().find((record) => record.id === preview.worktreeId);
+            if (changed?.merge?.previewId === input.previewId)
+              await store.recordWorkspaceChange(
+                session.id,
+                'worktree_merge',
+                JSON.stringify(changed.merge),
+              );
+            throw error;
+          }
+
+          await store.recordWorkspaceChange(
+            session.id,
+            'worktree_merge',
+            JSON.stringify(merged.merge),
+          );
+          return { record: merged, session: await store.session(session.id) };
+        });
+        json(response, 200, result);
       } else if (request.method === 'GET' && url.pathname === '/v1/worktrees') {
         json(response, 200, { records: worktrees?.list() ?? [] });
       } else if (request.method === 'POST' && url.pathname === '/v1/worktrees') {
@@ -1715,6 +1819,23 @@ export async function startServer(options: ServerOptions) {
             }),
           ),
         );
+      } else if (request.method === 'GET' && url.pathname === '/v1/command-jobs') {
+        const sessionId = url.searchParams.get('sessionId') ?? '';
+        await store.session(sessionId);
+        json(response, 200, { jobs: jobs.list(sessionId) });
+      } else if (
+        request.method === 'POST' &&
+        ['/v1/command-jobs/input', '/v1/command-jobs/stop'].includes(url.pathname)
+      ) {
+        const input = commandJobActionSchema.parse(await readJson(request));
+        const session = await store.session(input.sessionId);
+        if (url.pathname.endsWith('/input') && session.mode === 'plan')
+          throw new AppError('READ_ONLY', 'Plan 모드에서는 명령 입력을 보낼 수 없습니다.', 403);
+        json(response, 200, {
+          job: url.pathname.endsWith('/input')
+            ? await jobs.input(input.sessionId, input.jobId, input.input, input.eof)
+            : await jobs.stop(input.sessionId, input.jobId),
+        });
       } else if (request.method === 'POST' && url.pathname === '/v1/projects') {
         const value = (await readJson(request)) as { path?: unknown };
         const project = await inspectProject(value?.path);
@@ -1835,6 +1956,8 @@ export async function startServer(options: ServerOptions) {
       closing = true;
       shutdown.abort();
       await telegram.close();
+      for (const run of active.values()) run.abort.abort();
+      await jobs.close();
       await worktrees?.close();
       await oauth?.close();
       await backups?.close();

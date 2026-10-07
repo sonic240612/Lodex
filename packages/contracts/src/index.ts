@@ -107,6 +107,25 @@ export const runCommandSchema = z.strictObject({
   stdin: z.string().max(8000).default(''),
 });
 export type FusedCommand = z.infer<typeof runCommandSchema>;
+export const jobCommandSchema = runCommandSchema.extend({
+  interactive: z.boolean().default(false),
+  background: z.boolean().default(false),
+  timeoutMs: z.number().int().min(1000).max(86400000).default(60000),
+});
+export interface CommandJob {
+  id: string;
+  sessionId: string;
+  projectId?: string;
+  runId: string;
+  actor: 'desktop' | 'telegram';
+  background: boolean;
+  interactive: boolean;
+  inputOpen: boolean;
+  inputBytes: number;
+  createdAt: string;
+  execution?: CommandExecution;
+  error?: string;
+}
 /** Accept SoL-Pi's spelling while preserving Lodex's explicit command limits. */
 export const fusionFields = {
   thenRun: runCommandSchema.optional(),
@@ -136,6 +155,9 @@ export function normalizeFusedCommand(input: {
   );
 }
 export interface CommandExecution {
+  jobId?: string;
+  background?: boolean;
+  projectId?: string;
   verificationRevision?: number;
   id: string;
   containerName: string;
@@ -344,6 +366,13 @@ export const commandSchema = z.discriminatedUnion('type', [
   }),
   z.strictObject({
     ...envelope,
+    sessionId: idSchema,
+    type: z.literal('steer_run'),
+    runId: idSchema,
+    content: z.string().trim().min(1).max(16000),
+  }),
+  z.strictObject({
+    ...envelope,
     ...target,
     type: z.literal('start_autopilot'),
     taskIds: z.array(idSchema).max(100),
@@ -449,7 +478,15 @@ export const emptyUsage = (provider: ProviderId): Usage => ({
   prefillTps: null,
   ttftMs: null,
 });
+export const RUN_INPUT_PREFIX = 'Additional user instruction sent during this run:\n';
 export interface Message {
+  runInput?: {
+    runId: string;
+    responseId: string;
+    actor: 'desktop' | 'telegram';
+    status: 'queued' | 'included' | 'interrupted';
+    includedAt?: string;
+  };
   costCalls?: ModelCallRecord[];
   inferenceConfig?: ModelConfig;
   id: string;
@@ -488,6 +525,9 @@ export const contextCompactionSchema = z.strictObject({
 });
 export type ContextCompaction = z.infer<typeof contextCompactionSchema>;
 export interface SubagentRecord {
+  mode?: 'read' | 'build';
+  worktreeId?: string;
+  projectId?: string;
   id: string;
   task: string;
   status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
@@ -680,6 +720,7 @@ export interface Run {
   context?: ContextManifest;
 }
 export interface ContextManifest {
+  projectInstructions?: { path: string; scope: string; sha256: string }[];
   mcpAttachmentIds?: string[];
   mcpTools?: string[];
   skillCatalog?: { includedIds: string[]; omittedIds: string[]; serializedBytes: number };

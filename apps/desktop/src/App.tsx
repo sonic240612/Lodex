@@ -36,6 +36,8 @@ import { ConversationHistory } from './ConversationHistory';
 import { SettingsScreen, type SettingsSectionId } from './SettingsScreen';
 import { SettingsSurface } from './SettingsSurface';
 import { SlashMenu } from './SlashMenu';
+import { CompactionSummary } from './CompactionSummary';
+import { CommandJobsPanel } from './CommandJobsPanel';
 import {
   availableSlashCommands,
   suggestSlashCommands,
@@ -289,7 +291,11 @@ export function App() {
   }, [session?.id]);
   useEffect(() => {
     if (followLatest.current) scrollToBottom('instant');
-  }, [session?.messages.at(-1)?.content, running]);
+  }, [
+    session?.messages.filter((message) => message.role === 'assistant').at(-1)?.content,
+    session?.messages.length,
+    running,
+  ]);
   async function createSession(
     modelConfig = workspace.config,
     routing = session?.routing,
@@ -334,7 +340,7 @@ export function App() {
       setError('워크스페이스 연결을 기다려 주세요.');
       return;
     }
-    if (running && command !== 'stop') {
+    if (running && command !== 'stop' && command !== 'message') {
       setError('현재 실행이 끝난 뒤 명령을 실행하세요.');
       return;
     }
@@ -369,6 +375,20 @@ export function App() {
     setBusy(true);
     try {
       let target = session;
+      if (running && command === 'message') {
+        workspace.upsert(
+          (
+            await sendCommand({
+              type: 'steer_run',
+              sessionId: target!.id,
+              runId: target!.run!.id,
+              content: argument,
+            })
+          ).session,
+        );
+        setText('');
+        return;
+      }
       if (command === 'plan' || command === 'build') {
         if (target && target.mode !== nextMode) {
           target = (
@@ -958,6 +978,15 @@ export function App() {
                           '응답 내용이 없습니다.'
                         ))}
                     </div>
+                    {message.runInput && (
+                      <span className="message-status" role="status">
+                        {message.runInput.status === 'queued'
+                          ? '추가 지시 · 다음 단계에 전달 대기'
+                          : message.runInput.status === 'included'
+                            ? '추가 지시 · 모델 입력에 반영'
+                            : '추가 지시 · 실행 중단으로 미반영'}
+                      </span>
+                    )}
                     {message.error && (
                       <p className="message-error">
                         <Icon name="info" size={15} />
@@ -1027,6 +1056,13 @@ export function App() {
               </button>
             </div>
           )}
+          {session && (
+            <CommandJobsPanel
+              sessionId={session.id}
+              connected={workspace.connected}
+              readOnly={mode === 'plan'}
+            />
+          )}
           <form
             className="composer"
             onSubmit={(event) => {
@@ -1048,7 +1084,11 @@ export function App() {
                 slashOpen ? `slash-command-${slashSuggestions[activeSlash]!.id}` : undefined
               }
               placeholder={
-                project ? project.name + '에서 작업 요청하기 · / 명령' : '메시지 보내기 · / 명령'
+                running
+                  ? '추가 지시를 입력하면 다음 단계에 반영합니다.'
+                  : project
+                    ? project.name + '에서 작업 요청하기 · / 명령'
+                    : '메시지 보내기 · / 명령'
               }
               value={text}
               rows={2}
@@ -1159,17 +1199,27 @@ export function App() {
               <div className="composer-spacer" />
               <span className="composer-hint">Ctrl + . 모드 전환 · Shift + Enter 줄바꿈</span>
               {running ? (
-                <button
-                  type="button"
-                  className="send-button stop-button"
-                  aria-label="응답 중지"
-                  disabled={busy}
-                  onClick={() => {
-                    void cancel();
-                  }}
-                >
-                  <Icon name="stop" size={16} />
-                </button>
+                <>
+                  <button
+                    type="submit"
+                    className="send-button"
+                    aria-label="실행 중 추가 지시 전달"
+                    disabled={!text.trim() || busy || !workspace.connected}
+                  >
+                    <Icon name="arrow" size={20} />
+                  </button>
+                  <button
+                    type="button"
+                    className="send-button stop-button"
+                    aria-label="응답 중지"
+                    disabled={busy}
+                    onClick={() => {
+                      void cancel();
+                    }}
+                  >
+                    <Icon name="stop" size={16} />
+                  </button>
+                </>
               ) : (
                 <button
                   type="submit"
@@ -1185,7 +1235,7 @@ export function App() {
           <div className="composer-footer">
             <span>
               {running
-                ? '응답을 생성하는 중입니다.'
+                ? '추가 지시는 현재 작업을 마친 뒤 다음 모델 요청에 반영합니다.'
                 : project
                   ? config.provider === 'openrouter' && !config.projectCloudConsent
                     ? '프로젝트 파일 전송이 꺼져 있습니다. 설정에서 허용할 수 있습니다.'
@@ -1289,6 +1339,7 @@ export function App() {
               </div>
             </div>
           </div>
+          <CompactionSummary session={session} />
         </div>
       </main>
 
@@ -1524,6 +1575,7 @@ export function App() {
               )}
               {settingsSection === 'worktree' && (
                 <WorktreeManager
+                  session={session}
                   embedded
                   projects={workspace.projects}
                   selectedId={workspace.selectedProjectId}

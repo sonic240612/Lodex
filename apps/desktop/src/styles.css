@@ -2750,3 +2750,79 @@ input[type='checkbox'] {
     gap: 8px;
   }
 }
+
+.compaction-summary {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 4px 6px 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.command-jobs-panel {
+  max-height: 280px;
+  overflow: auto;
+  padding: 12px;
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+}
+.command-job-row {
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+  margin-top: 8px;
+}
+.command-job-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 13px;
+}
+.command-job-heading code {
+  flex: 1;
+  min-width: 80px;
+  overflow-wrap: anywhere;
+}
+.command-job-row pre {
+  max-height: 160px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+.command-input-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.command-input-form textarea {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  font-size: 14px;
+}
+
+.worktree-review-panel pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 240px;
+  overflow: auto;
+  font-size: 13px;
+}
+.worktree-conflict-editor textarea {
+  width: 100%;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-family: monospace;
+  font-size: 13px;
+}
+.worktree-review-panel details {
+  margin: 12px 0;
+}

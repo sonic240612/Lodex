@@ -138,6 +138,7 @@ export async function completeGoal(
       execution.status !== 'completed' ||
       execution.exitCode !== 0 ||
       execution.cleanupPending ||
+      (execution.projectId !== undefined && execution.projectId !== runtime.project?.id) ||
       execution.verificationRevision !== (state.workspaceRevision ?? 0)
     )
       throw new AppError(

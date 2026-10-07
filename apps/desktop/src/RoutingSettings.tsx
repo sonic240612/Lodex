@@ -148,8 +148,9 @@ export function RoutingSettings({
             서브에이전트 사용
           </label>
           <p className="field-note">
-            한 번에 최대 3개 작업을 별도 컨텍스트에서 분석합니다. 프로젝트 읽기만 허용하며, 부모의
-            호출 예산과 중지 신호를 공유합니다. 로컬 추론은 순서대로 실행합니다.
+            한 번에 최대 3개 작업을 별도 컨텍스트에서 진행합니다. Plan에서는 읽기만 허용하고,
+            Build에서는 별도 Worktree의 수정과 허용된 명령을 실행할 수 있습니다. 부모의 권한·호출
+            예산·중지 신호를 공유합니다. 로컬 추론은 순서대로 실행합니다.
           </p>
           {(['plan', 'build', 'subagent'] as const).map((role) => {
             const config = draft[role];
@@ -162,7 +163,7 @@ export function RoutingSettings({
                     ? 'Plan · 계획'
                     : role === 'build'
                       ? 'Build · 작업'
-                      : '서브에이전트 · 분석'}
+                      : '서브에이전트 · 작업'}
                 </legend>
                 <label>
                   연결
