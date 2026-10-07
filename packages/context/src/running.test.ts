@@ -45,6 +45,25 @@ function exchanges(count: number, bytes = 1300): InferenceMessage[] {
 }
 
 describe('running context checkpoints', () => {
+  it('can reduce a Korean checkpoint even when the excerpt increases JavaScript character count', () => {
+    const base = request(),
+      continuation = exchanges(1, 1);
+    const previous = {
+      summary: '가'.repeat(30) + 'x'.repeat(42),
+      throughContinuationCount: 2,
+      historyCompacted: true,
+      createdAt: new Date().toISOString(),
+      count: 1,
+      originalEstimateTokens: 7000,
+      compactedEstimateTokens: 4000,
+    };
+    const next = compactRunningContext({ request: base, continuation, previous, force: true });
+    expect(Buffer.byteLength(next.checkpoint.summary)).toBeLessThan(
+      Buffer.byteLength(previous.summary),
+    );
+    expect(next.checkpoint.summary.length).toBeGreaterThan(previous.summary.length);
+  });
+
   it('replays a saved checkpoint on a later turn without restoring omitted exchanges or old opaque reasoning', () => {
     const base = request(),
       continuation = exchanges(8);

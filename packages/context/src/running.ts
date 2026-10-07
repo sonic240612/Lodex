@@ -147,7 +147,7 @@ export function compactRunningContext(options: {
         options.force &&
         through === start &&
         previous &&
-        summary.length >= previous.summary.length
+        Buffer.byteLength(summary) >= Buffer.byteLength(previous.summary)
       )
         continue;
       const checkpoint: RunContextCompaction = {

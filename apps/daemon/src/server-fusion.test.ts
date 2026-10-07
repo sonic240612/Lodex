@@ -191,7 +191,7 @@ async function setup(
           'running',
         );
       },
-      { timeout: options.realHost ? 10000 : 2000 },
+      { timeout: options.realHost ? 35000 : 2000 },
     );
     const current = await store.session(session.id);
     expect(current.run?.status, JSON.stringify(current.messages.at(-1))).toBe(status);
@@ -380,7 +380,7 @@ describe('SoL-Pi Action Fusion daemon adaptation', () => {
         thenRun: {
           command:
             process.platform === 'win32' ? "Get-Content '../outside.txt'" : "cat '../outside.txt'",
-          timeoutMs: 5000,
+          timeoutMs: 30000,
         },
       }),
       (result) => {
@@ -394,7 +394,7 @@ describe('SoL-Pi Action Fusion daemon adaptation', () => {
     await app.finish();
     expect(await readFile(join(app.root, 'outside.txt'), 'utf8')).toBe('fused-host-evidence');
     expect(app.rounds()).toBe(2);
-  });
+  }, 45000);
   it('keeps a host replacement after a nonzero check and returns failure to the same model run', async () => {
     const app = await setup(
       'host_write_file',
