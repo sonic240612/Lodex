@@ -21,14 +21,41 @@ import {
 import { decodeSse } from '@lodex/providers';
 import { Store } from '@lodex/storage';
 import { startServer } from './server';
-import type { executeCommand } from '@lodex/tools';
+import type { executeCommand, executeHostCommand } from '@lodex/tools';
 const cleanup: (() => Promise<void>)[] = [];
 const token = 'a'.repeat(64);
+async function confirmPending(app: Awaited<ReturnType<typeof setup>>, sessionId: string) {
+  await vi.waitFor(async () =>
+    expect(
+      (await app.store.session(sessionId)).messages
+        .flatMap((message) => message.activities ?? [])
+        .some(
+          (activity) =>
+            activity.approval?.kind === 'verification' && activity.approval.status === 'pending',
+        ),
+    ).toBe(true),
+  );
+  const session = await app.store.session(sessionId);
+  const activity = session.messages
+    .flatMap((message) => message.activities ?? [])
+    .find((entry) => entry.approval?.status === 'pending')!;
+  const response = await app.request('/v1/approvals', {
+    method: 'POST',
+    body: JSON.stringify({
+      sessionId,
+      expectedVersion: session.version,
+      activityId: activity.id,
+      action: 'approve',
+    }),
+  });
+  expect(response.status).toBe(200);
+}
 async function setup(
   provider?: InferenceProvider,
   secrets?: { openrouterKey: string; openrouterKeySource: SecretSource; envFilePath: string },
   commandExecutor?: typeof executeCommand,
   withObservations = false,
+  hostCommandExecutor?: typeof executeHostCommand,
 ) {
   const dir = await mkdtemp(join(tmpdir(), 'lodex-http-한글 '));
   const store = await Store.open(join(dir, 'test.sqlite'), resolve('apps/daemon/dist/worker.cjs'));
@@ -39,6 +66,7 @@ async function setup(
     ...secrets,
     ...(provider ? { providerFactory: factory } : {}),
     ...(commandExecutor ? { commandExecutor } : {}),
+    ...(hostCommandExecutor ? { hostCommandExecutor } : {}),
     ...(withObservations ? { observationRoot: join(dir, 'observations') } : {}),
   });
   cleanup.push(async () => {
@@ -613,7 +641,7 @@ describe('authenticated daemon integration', () => {
       else expect(session.autopilot?.reason).toBeTruthy();
     },
   );
-  it('runs Autopilot without Docker by verifying saved criteria with evidence', async () => {
+  it('requires user confirmation for task and final evidence when no machine verifier is saved', async () => {
     const taskId = crypto.randomUUID();
     let round = 0;
     const provider: InferenceProvider = {
@@ -684,6 +712,8 @@ describe('authenticated daemon integration', () => {
         limits: autopilotLimitsSchema.parse({}),
       }),
     );
+    await confirmPending(app, session.id);
+    await confirmPending(app, session.id);
     await vi.waitFor(async () =>
       expect((await app.store.session(session.id)).autopilot?.status).toBe('completed'),
     );
@@ -968,6 +998,7 @@ describe('authenticated daemon integration', () => {
       }),
     );
     expect(response.status).toBe(200);
+    await confirmPending(app, session.id);
     await vi.waitFor(async () =>
       expect((await app.store.session(session.id)).run?.status).toBe('completed'),
     );
@@ -1034,6 +1065,7 @@ describe('authenticated daemon integration', () => {
       }),
     );
     expect(response.status).toBe(200);
+    await confirmPending(app, session.id);
     await vi.waitFor(async () =>
       expect((await app.store.session(session.id)).run?.status).toBe('completed'),
     );
@@ -1045,6 +1077,180 @@ describe('authenticated daemon integration', () => {
       reservedCostUsd: 0,
       costUnconfirmed: false,
     });
+  });
+  it('automatically queries missing stream cost and continues the same goal without another generation', async () => {
+    let calls = 0,
+      lookups = 0;
+    const provider: InferenceProvider = {
+      listModels: async () => [
+        {
+          id: 'fixture/auto-cost',
+          name: 'Fixture',
+          contextLength: 65536,
+          maxCompletionTokens: 4096,
+          defaultTemperature: null,
+          defaultTopP: null,
+          tools: true,
+          pricing: { prompt: 0, completion: 0.000001, request: 0 },
+        },
+      ],
+      capabilities: async () => ({ tools: true, streaming: true }),
+      getGenerationUsage: async (id) => {
+        lookups++;
+        return { generationId: id, costUsd: 0.002 };
+      },
+      async *generate() {
+        calls++;
+        yield { type: 'usage', usage: { generationId: 'gen-auto' } };
+        yield {
+          type: 'tool_call_delta',
+          index: 0,
+          id: 'auto-done',
+          name: 'complete_goal',
+          arguments: '{"evidence":"result delivered"}',
+        };
+        yield { type: 'finished', reason: 'tool_calls' };
+      },
+    };
+    const app = await setup(provider, {
+      openrouterKey: 'fixture-key',
+      openrouterKeySource: 'environment',
+      envFilePath: join(tmpdir(), 'lodex-cost-fixture.env'),
+    });
+    const session = await app.create({
+      provider: 'openrouter',
+      model: 'fixture/auto-cost',
+      cloudConsent: true,
+    });
+    await app.command(
+      makeCommand({
+        type: 'start_goal',
+        sessionId: session.id,
+        expectedVersion: session.version,
+        goal: 'finish',
+        limits: autopilotLimitsSchema.parse({}),
+      }),
+    );
+    await confirmPending(app, session.id);
+    await vi.waitFor(async () =>
+      expect((await app.store.session(session.id)).run?.status).toBe('completed'),
+    );
+    const completed = await app.store.session(session.id);
+    expect(completed.autopilot).toMatchObject({
+      status: 'completed',
+      spentCostUsd: 0.002,
+      reservedCostUsd: 0,
+      costUnconfirmed: false,
+    });
+    expect(completed.messages.at(-1)?.costCalls?.[0]).toMatchObject({
+      generationId: 'gen-auto',
+      status: 'settled',
+    });
+    expect(calls).toBe(1);
+    expect(lookups).toBe(1);
+  });
+  it('runs saved verification commands on the Full Access host when Docker is disabled', async () => {
+    const taskId = crypto.randomUUID(),
+      commands: string[] = [];
+    let calls = 0;
+    const provider: InferenceProvider = {
+      listModels: async () => [],
+      capabilities: async () => ({ tools: true, streaming: true }),
+      async *generate() {
+        const name = calls++ === 0 ? 'verify_task' : 'verify_goal';
+        yield {
+          type: 'tool_call_delta',
+          index: 0,
+          id: 'host-check-' + calls,
+          name,
+          arguments: name === 'verify_task' ? JSON.stringify({ taskId }) : '{}',
+        };
+        yield { type: 'finished', reason: 'tool_calls' };
+      },
+    };
+    const executor: typeof executeHostCommand = async (options) => {
+      const command = JSON.parse(options.argumentsJson).command as string;
+      commands.push(command);
+      const execution = {
+        id: crypto.randomUUID(),
+        environment: 'host' as const,
+        containerName: '',
+        command,
+        cwd: '.',
+        status: 'completed' as const,
+        startedAt: new Date().toISOString(),
+        finishedAt: new Date().toISOString(),
+        exitCode: 0,
+        output: 'checked',
+        truncated: false,
+        cleanupPending: false,
+      };
+      await options.record(execution);
+      return execution;
+    };
+    const app = await setup(provider, undefined, undefined, false, executor);
+    const { project } = await app
+      .request('/v1/projects', { method: 'POST', body: JSON.stringify({ path: app.dir }) })
+      .then((response) => response.json());
+    let session = await app.create({ provider: 'llama-server', model: 'fixture' }, project.id);
+    session = (
+      await app
+        .command(
+          makeCommand({
+            type: 'set_permission_mode',
+            sessionId: session.id,
+            expectedVersion: session.version,
+            mode: 'full',
+          }),
+        )
+        .then((response) => response.json())
+    ).session;
+    session = (
+      await app
+        .command(
+          makeCommand({
+            type: 'save_plan',
+            sessionId: session.id,
+            expectedVersion: session.version,
+            plan: {
+              ...defaultPlan(),
+              goal: 'check on host',
+              criteria: 'checks pass',
+              includeInContext: true,
+              verificationCommand: 'final-check',
+              tasks: [
+                {
+                  id: taskId,
+                  title: 'check',
+                  done: false,
+                  criteria: 'task check passes',
+                  verificationCommand: 'task-check',
+                },
+              ],
+            },
+          }),
+        )
+        .then((response) => response.json())
+    ).session;
+    await app.command(
+      makeCommand({
+        type: 'start_autopilot',
+        sessionId: session.id,
+        expectedVersion: session.version,
+        taskIds: [],
+        limits: autopilotLimitsSchema.parse({}),
+      }),
+    );
+    await vi.waitFor(async () =>
+      expect((await app.store.session(session.id)).autopilot?.status).toBe('completed'),
+    );
+    expect(commands).toEqual(['task-check', 'final-check']);
+    expect(
+      (await app.store.session(session.id)).messages
+        .at(-1)
+        ?.activities?.filter((activity) => activity.execution)
+        .every((activity) => activity.execution?.environment === 'host'),
+    ).toBe(true);
   });
   it('stops before an OpenRouter call that cannot fit in the USD budget', async () => {
     let calls = 0;
@@ -1098,6 +1304,107 @@ describe('authenticated daemon integration', () => {
     session = await app.store.session(session.id);
     expect(calls).toBe(0);
     expect(session.autopilot?.reason).toContain('비용 한도');
+  });
+  it('queries a persisted generation without regenerating, settles once, and then permits goal resume', async () => {
+    let calls = 0,
+      lookups = 0;
+    const provider: InferenceProvider = {
+      listModels: async () => [
+        {
+          id: 'fixture/reconcile',
+          name: 'Fixture',
+          contextLength: 65536,
+          maxCompletionTokens: 4096,
+          defaultTemperature: null,
+          defaultTopP: null,
+          tools: true,
+          pricing: { prompt: 0, completion: 0.000001, request: 0 },
+        },
+      ],
+      capabilities: async () => ({ tools: true, streaming: true }),
+      getGenerationUsage: async (id) => {
+        expect(id).toBe('gen-reconcile');
+        lookups++;
+        return lookups === 1 ? null : { generationId: id, costUsd: 0.002, billing: 'reported' };
+      },
+      async *generate() {
+        calls++;
+        yield { type: 'usage', usage: { generationId: 'gen-reconcile' } };
+        yield { type: 'text_delta', text: 'persisted partial response' };
+        yield { type: 'finished', reason: 'stop' };
+      },
+    };
+    const app = await setup(provider, {
+      openrouterKey: 'fixture-key',
+      openrouterKeySource: 'environment',
+      envFilePath: join(tmpdir(), 'lodex-cost-fixture.env'),
+    });
+    let session = await app.create({
+      provider: 'openrouter',
+      model: 'fixture/reconcile',
+      cloudConsent: true,
+      maxTokens: 4096,
+      contextBudgetTokens: 65536,
+    });
+    expect(
+      (
+        await app.command(
+          makeCommand({
+            type: 'start_goal',
+            sessionId: session.id,
+            expectedVersion: session.version,
+            goal: 'reconcile',
+            limits: autopilotLimitsSchema.parse({ costUsd: 0.01 }),
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    await vi.waitFor(async () =>
+      expect((await app.store.session(session.id)).autopilot?.status).toBe('paused'),
+    );
+    session = await app.store.session(session.id);
+    expect(session.messages.at(-1)?.costCalls?.[0]).toMatchObject({
+      generationId: 'gen-reconcile',
+      status: 'unconfirmed',
+    });
+    expect(
+      (
+        await app.command(
+          makeCommand({
+            type: 'resume_goal',
+            sessionId: session.id,
+            expectedVersion: session.version,
+          }),
+        )
+      ).status,
+    ).toBe(409);
+    expect(calls).toBe(1);
+    const response = await app.request('/v1/costs/reconcile', {
+      method: 'POST',
+      body: JSON.stringify({ sessionId: session.id, expectedVersion: session.version }),
+    });
+    expect(response.status).toBe(200);
+    const result = (await response.json()) as {
+      session: Session;
+      reconciled: number;
+      remaining: number;
+    };
+    expect(result).toMatchObject({ reconciled: 1, remaining: 0 });
+    expect(result.session.autopilot).toMatchObject({
+      reservedCostUsd: 0,
+      spentCostUsd: 0.002,
+      costUnconfirmed: false,
+      status: 'paused',
+    });
+    expect(result.session.messages.at(-1)?.content).toBe('persisted partial response');
+    const again = await app.request('/v1/costs/reconcile', {
+      method: 'POST',
+      body: JSON.stringify({ sessionId: session.id, expectedVersion: result.session.version }),
+    });
+    expect(again.status).toBe(200);
+    expect(await again.json()).toMatchObject({ reconciled: 0, remaining: 0 });
+    expect(calls).toBe(1);
+    expect(lookups).toBe(2);
   });
   it('keeps the reservation and pauses when OpenRouter omits actual cost', async () => {
     const provider: InferenceProvider = {
@@ -1155,6 +1462,145 @@ describe('authenticated daemon integration', () => {
     });
     expect(session.autopilot!.reservedCostUsd).toBeGreaterThan(0);
     expect(session.autopilot?.reason).toContain('실제 호출 비용');
+  });
+  it('also retains and reconciles ordinary chat costs without inventing an Autopilot budget', async () => {
+    let calls = 0,
+      lookups = 0;
+    const provider: InferenceProvider = {
+      listModels: async () => [],
+      capabilities: async () => ({ tools: true, streaming: true }),
+      getGenerationUsage: async (id) => {
+        lookups++;
+        return lookups === 1 ? null : { generationId: id, costUsd: 0.003 };
+      },
+      async *generate() {
+        calls++;
+        yield { type: 'usage', usage: { generationId: 'gen-chat' } };
+        yield { type: 'text_delta', text: 'ordinary answer' };
+        yield { type: 'finished', reason: 'stop' };
+      },
+    };
+    const app = await setup(provider, {
+      openrouterKey: 'fixture-key',
+      openrouterKeySource: 'environment',
+      envFilePath: join(tmpdir(), 'lodex-cost-fixture.env'),
+    });
+    let session = await app.create({
+      provider: 'openrouter',
+      model: 'fixture/chat',
+      cloudConsent: true,
+    });
+    await app.command(
+      makeCommand({
+        type: 'send_message',
+        sessionId: session.id,
+        expectedVersion: session.version,
+        content: 'answer',
+      }),
+    );
+    await vi.waitFor(async () =>
+      expect((await app.store.session(session.id)).run?.status).toBe('completed'),
+    );
+    session = await app.store.session(session.id);
+    expect(session.autopilot).toBeUndefined();
+    expect(session.messages.at(-1)?.costCalls?.[0]).toMatchObject({
+      generationId: 'gen-chat',
+      status: 'unconfirmed',
+      reservedCostUsd: 0,
+    });
+    expect(session.messages.at(-1)?.usage).toMatchObject({
+      costUsd: null,
+      billing: 'pending_reconciliation',
+    });
+    const response = await app.request('/v1/costs/reconcile', {
+      method: 'POST',
+      body: JSON.stringify({ sessionId: session.id, expectedVersion: session.version }),
+    });
+    expect(response.status).toBe(200);
+    const result = (await response.json()) as { session: Session };
+    expect(result.session.messages.at(-1)?.usage).toMatchObject({
+      costUsd: 0.003,
+      billing: 'reported',
+    });
+    expect(result.session.messages.at(-1)?.content).toBe('ordinary answer');
+    expect(calls).toBe(1);
+    expect(lookups).toBe(2);
+  });
+  it('persists generation identity before cancellation and reconciles without reviving or replaying it', async () => {
+    let calls = 0;
+    const provider: InferenceProvider = {
+      listModels: async () => [
+        {
+          id: 'fixture/cancel-cost',
+          name: 'Fixture',
+          contextLength: 65536,
+          maxCompletionTokens: 4096,
+          defaultTemperature: null,
+          defaultTopP: null,
+          tools: true,
+          pricing: { prompt: 0, completion: 0.000001, request: 0 },
+        },
+      ],
+      capabilities: async () => ({ tools: true, streaming: true }),
+      getGenerationUsage: async (id) => ({ generationId: id, costUsd: 0.001, billing: 'reported' }),
+      async *generate(_request, signal) {
+        calls++;
+        yield { type: 'usage', usage: { generationId: 'gen-cancelled' } };
+        await new Promise<void>((_resolve, reject) => {
+          signal.throwIfAborted();
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+      },
+    };
+    const app = await setup(provider, {
+      openrouterKey: 'fixture-key',
+      openrouterKeySource: 'environment',
+      envFilePath: join(tmpdir(), 'lodex-cost-fixture.env'),
+    });
+    let session = await app.create({
+      provider: 'openrouter',
+      model: 'fixture/cancel-cost',
+      cloudConsent: true,
+      maxTokens: 4096,
+      contextBudgetTokens: 65536,
+    });
+    await app.command(
+      makeCommand({
+        type: 'start_goal',
+        sessionId: session.id,
+        expectedVersion: session.version,
+        goal: 'cancel billing',
+        limits: autopilotLimitsSchema.parse({}),
+      }),
+    );
+    await vi.waitFor(async () =>
+      expect(
+        (await app.store.session(session.id)).messages.at(-1)?.costCalls?.[0]?.generationId,
+      ).toBe('gen-cancelled'),
+    );
+    session = await app.store.session(session.id);
+    await app.command(
+      makeCommand({ type: 'cancel_run', sessionId: session.id, runId: session.run!.id }),
+    );
+    await vi.waitFor(async () =>
+      expect((await app.store.session(session.id)).messages.at(-1)?.costCalls?.[0]?.status).toBe(
+        'unconfirmed',
+      ),
+    );
+    session = await app.store.session(session.id);
+    const response = await app.request('/v1/costs/reconcile', {
+      method: 'POST',
+      body: JSON.stringify({ sessionId: session.id, expectedVersion: session.version }),
+    });
+    expect(response.status).toBe(200);
+    const result = (await response.json()) as { session: Session };
+    expect(result.session.run?.status).toBe('cancelled');
+    expect(result.session.autopilot).toMatchObject({
+      status: 'cancelled',
+      spentCostUsd: 0.001,
+      reservedCostUsd: 0,
+    });
+    expect(calls).toBe(1);
   });
   it('offers read-only Plan tools, reviews a plan, and adopts it without executing tasks', async () => {
     let round = 0;

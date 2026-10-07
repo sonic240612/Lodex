@@ -49,6 +49,11 @@ export function PlanReview({
       {proposal.plan.verificationCommand && (
         <pre aria-label="최종 검증 명령">{proposal.plan.verificationCommand}</pre>
       )}
+      {!!proposal.plan.verificationArtifacts?.length && (
+        <pre aria-label="최종 검증 파일">
+          {JSON.stringify(proposal.plan.verificationArtifacts, null, 2)}
+        </pre>
+      )}
       <ol>
         {proposal.plan.tasks.map((task) => (
           <li key={task.id}>
@@ -56,6 +61,11 @@ export function PlanReview({
             <p>{task.criteria}</p>
             {task.verificationCommand && (
               <pre aria-label={task.title + ' 검증 명령'}>{task.verificationCommand}</pre>
+            )}
+            {!!task.verificationArtifacts?.length && (
+              <pre aria-label={task.title + ' 검증 파일'}>
+                {JSON.stringify(task.verificationArtifacts, null, 2)}
+              </pre>
             )}
             {!!task.dependsOn?.length && (
               <small>

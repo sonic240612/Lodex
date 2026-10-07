@@ -49,7 +49,47 @@ import {
   contextCompactionSchema,
   runContextCompactionSchema,
   type RunContextCompaction,
+  type Message,
+  modelCallRecordSchema,
+  type ModelCallRecord,
 } from '@lodex/contracts';
+
+function updateCostTotals(session: Session) {
+  const state = session.autopilot;
+  if (!state) return;
+  const calls = session.messages
+    .flatMap((message) => message.costCalls ?? [])
+    .filter((call) => call.budgetId === (state.costBudgetId ?? state.runId));
+  if (!calls.length) return;
+  const baseline = state.costBaseline ?? { spent: 0, reserved: 0, unconfirmed: false };
+  state.spentCostUsd =
+    baseline.spent +
+    calls.reduce((sum, call) => sum + (call.status === 'settled' ? call.actualCostUsd! : 0), 0);
+  state.reservedCostUsd =
+    baseline.reserved +
+    calls.reduce((sum, call) => sum + (call.status === 'settled' ? 0 : call.reservedCostUsd), 0);
+  state.costUnconfirmed =
+    baseline.unconfirmed || calls.some((call) => call.status === 'unconfirmed');
+}
+function invalidateSessionVerification(session: Session) {
+  const state = session.autopilot;
+  if (!state) return;
+  state.workspaceRevision = (state.workspaceRevision ?? 0) + 1;
+  state.completedTaskIds = [];
+  if (state.status === 'completed') {
+    state.status = 'paused';
+    state.reason = '검증 이후 작업이 변경되었습니다. 완료를 다시 확인해야 합니다.';
+  }
+}
+function updateMessageCostUsage(message: Message) {
+  if (!message.usage || !message.costCalls?.length) return;
+  message.usage.costUsd = message.costCalls.every((call) => call.status === 'settled')
+    ? message.costCalls.reduce((sum, call) => sum + call.actualCostUsd!, 0)
+    : null;
+  message.usage.billing = message.usage.costUsd === null ? 'pending_reconciliation' : 'reported';
+  const generationId = message.costCalls.at(-1)?.generationId;
+  if (generationId) message.usage.generationId = generationId;
+}
 
 // Additive JSON fields are defaulted on all read paths, including old SSE events.
 function hydrate(session: Session): Session {
@@ -89,6 +129,9 @@ function hydrate(session: Session): Session {
     config: modelConfigSchema.parse(session.config),
     messages: session.messages.map((message) => ({
       ...message,
+      ...(message.costCalls
+        ? { costCalls: message.costCalls.map((call) => modelCallRecordSchema.parse(call)) }
+        : {}),
       ...(message.runContextCompaction
         ? { runContextCompaction: runContextCompactionSchema.parse(message.runContextCompaction) }
         : {}),
@@ -122,7 +165,7 @@ export class StorageEngine {
       'PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;',
     );
     const row = this.db.prepare('PRAGMA user_version').get() as { user_version: number };
-    if (row.user_version > 14) {
+    if (row.user_version > 15) {
       this.db.close();
       throw new AppError(
         'DATABASE_VERSION',
@@ -190,6 +233,9 @@ export class StorageEngine {
       this.db.exec(`BEGIN IMMEDIATE;
       CREATE TABLE integration_state (name TEXT PRIMARY KEY, version INTEGER NOT NULL, document TEXT NOT NULL);
       PRAGMA user_version=14; COMMIT;`);
+    // Older clients cannot preserve per-request reservations or distinguish
+    // verified completion from a model claim. Refuse silent downgrade writes.
+    if (row.user_version < 15) this.db.exec('PRAGMA user_version=15;');
   }
   integration(name: string): { version: number; document: unknown } | null {
     const row = this.db
@@ -979,9 +1025,25 @@ export class StorageEngine {
         message.runContextCompaction = checkpoint;
       }
       if (update.context) session.run.context = update.context;
-      if (update.autopilot && update.autopilot.runId === update.runId)
-        session.autopilot = update.autopilot;
+      if (update.autopilot && update.autopilot.runId === update.runId) {
+        const previous = session.autopilot;
+        session.autopilot = {
+          ...update.autopilot,
+          workspaceRevision: Math.max(
+            previous?.workspaceRevision ?? 0,
+            update.autopilot.workspaceRevision ?? 0,
+          ),
+          ...(previous?.costBaseline ? { costBaseline: previous.costBaseline } : {}),
+          ...(previous?.costBudgetId ? { costBudgetId: previous.costBudgetId } : {}),
+        };
+        if ((previous?.workspaceRevision ?? 0) > (update.autopilot.workspaceRevision ?? 0)) {
+          session.autopilot.completedTaskIds = [];
+          if (session.autopilot.status === 'completed') session.autopilot.status = 'running';
+        }
+      }
+      updateCostTotals(session);
       if (update.usage && message.usage) message.usage = { ...message.usage, ...update.usage };
+      updateMessageCostUsage(message);
       if (update.status) {
         session.run.status = update.status;
         session.run.finishedAt = new Date().toISOString();
@@ -1065,6 +1127,7 @@ export class StorageEngine {
           409,
         );
       if (action.action === 'apply' || action.action === 'undo') edit.operation = action.action;
+      else delete edit.operation;
       edit.status = 'applying';
       if ('files' in edit)
         edit.observations = edit.files.map((f) => ({ path: f.path, state: 'unknown' }));
@@ -1081,8 +1144,110 @@ export class StorageEngine {
         .find((a) => a.id === activityId);
       if (!activity || (activity.execution && activity.execution.id !== execution.id))
         throw new AppError('EXECUTION_NOT_FOUND', '명령 실행 기록을 찾을 수 없습니다.', 409);
+      if (!['verify_task', 'verify_goal'].includes(activity.label)) {
+        if (!activity.execution) invalidateSessionVerification(session);
+        execution = {
+          ...execution,
+          verificationRevision: session.autopilot?.workspaceRevision ?? 0,
+        };
+      }
       activity.execution = execution;
       this.persist(session); // Also accepts late cancellation results; never loses a container owner.
+      return session;
+    });
+  }
+  recordModelCall(sessionId: string, input: ModelCallRecord): Session {
+    const call = modelCallRecordSchema.parse(input);
+    if ((call.status === 'settled') !== (call.actualCostUsd !== undefined))
+      throw new AppError('COST_RECORD', '비용 정산 상태와 금액이 일치하지 않습니다.');
+    return this.transaction(() => {
+      const session = this.session(sessionId);
+      const message = session.messages.find(
+        (entry) => entry.id === call.messageId && entry.role === 'assistant',
+      );
+      if (!message) throw new AppError('COST_RECORD', '요청 기록의 응답을 찾을 수 없습니다.', 409);
+      const calls = message.costCalls ?? [];
+      if (
+        call.generationId &&
+        session.messages.some((entry) =>
+          entry.costCalls?.some(
+            (other) => other.id !== call.id && other.generationId === call.generationId,
+          ),
+        )
+      )
+        throw new AppError(
+          'COST_RECORD',
+          '같은 OpenRouter 요청 ID를 두 번 정산할 수 없습니다.',
+          409,
+        );
+      const existing = calls.find((entry) => entry.id === call.id);
+      if (!existing) {
+        const unbudgeted =
+          call.budgetId === 'unbudgeted-' + call.runId &&
+          call.reservedCostUsd === 0 &&
+          session.autopilot?.runId !== call.runId;
+        if (
+          call.status !== 'reserved' ||
+          session.run?.id !== call.runId ||
+          session.run.status !== 'running' ||
+          session.run.messageId !== call.messageId ||
+          (!unbudgeted &&
+            (!session.autopilot ||
+              (session.autopilot.costBudgetId ?? session.autopilot.runId) !== call.budgetId))
+        )
+          throw new AppError(
+            'COST_RECORD',
+            '실행 중인 예산에만 새 요청을 예약할 수 있습니다.',
+            409,
+          );
+        if (
+          session.messages.some((entry) => entry.costCalls?.some((record) => record.id === call.id))
+        )
+          throw new AppError('COST_RECORD', '중복 요청 기록입니다.', 409);
+        if (
+          !unbudgeted &&
+          session.autopilot &&
+          session.autopilot.spentCostUsd +
+            session.autopilot.reservedCostUsd +
+            call.reservedCostUsd >
+            session.autopilot.limits.costUsd + 1e-12
+        )
+          throw new AppError('COST_BUDGET', '공유 OpenRouter 비용 예산을 초과합니다.');
+        if (!unbudgeted && session.autopilot) {
+          session.autopilot.costBaseline ??= {
+            spent: session.autopilot.spentCostUsd,
+            reserved: session.autopilot.reservedCostUsd,
+            unconfirmed: session.autopilot.costUnconfirmed,
+          };
+          session.autopilot.costBudgetId ??= call.budgetId;
+        }
+        calls.push(call);
+      } else {
+        for (const key of [
+          'budgetId',
+          'runId',
+          'messageId',
+          'model',
+          'reservedCostUsd',
+          'createdAt',
+        ] as const)
+          if (call[key] !== existing[key])
+            throw new AppError('COST_RECORD', '요청 예약의 식별 정보가 변경되었습니다.', 409);
+        if (existing.generationId && existing.generationId !== call.generationId)
+          throw new AppError('COST_RECORD', '요청 ID가 변경되었습니다.', 409);
+        if (existing.status === 'settled') {
+          if (call.status !== 'settled' || call.actualCostUsd !== existing.actualCostUsd)
+            throw new AppError('COST_RECORD', '확정 비용은 다시 변경할 수 없습니다.', 409);
+          return session;
+        }
+        if (existing.status === 'unconfirmed' && call.status === 'reserved')
+          throw new AppError('COST_RECORD', '미확정 요청을 다시 예약할 수 없습니다.', 409);
+        calls[calls.indexOf(existing)] = call;
+      }
+      message.costCalls = calls;
+      updateMessageCostUsage(message);
+      updateCostTotals(session);
+      this.persist(session);
       return session;
     });
   }
@@ -1188,6 +1353,7 @@ export class StorageEngine {
       if (!activity || activity.kind !== 'tool' || !activity.label.startsWith('mcp_'))
         throw new AppError('MCP_ACTIVITY', 'MCP 실행 기록을 찾을 수 없습니다.', 409);
       const previous = activity.mcpCall;
+      if (!previous && call.mayWrite !== false) invalidateSessionVerification(session);
       if (
         previous &&
         ['serverId', 'serverRevision', 'toolName', 'toolRevision', 'startedAt'].some(
@@ -1249,6 +1415,7 @@ export class StorageEngine {
       );
       if (!edit || edit.status !== 'applying')
         throw new AppError('EDIT_STATE', '처리 중인 수정안이 없습니다.', 409);
+      if (edit.operation && status !== 'rejected') invalidateSessionVerification(session);
       if ('files' in edit) {
         edit.status = status;
         if (observations) edit.observations = observations;
@@ -1266,6 +1433,16 @@ export class StorageEngine {
   recover(): number {
     let count = 0;
     for (const session of this.snapshot().sessions) {
+      for (const call of session.messages.flatMap((message) => message.costCalls ?? [])) {
+        if (call.status === 'reserved') {
+          this.recordModelCall(session.id, {
+            ...call,
+            status: 'unconfirmed',
+            updatedAt: new Date().toISOString(),
+          });
+          count++;
+        }
+      }
       for (const activity of session.messages.flatMap((m) => m.activities ?? [])) {
         if (activity.mcpCall?.status === 'running') {
           this.recordMcpCall(session.id, activity.id, {

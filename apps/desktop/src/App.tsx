@@ -37,6 +37,7 @@ import { McpElicitationBanner } from './McpElicitationBanner';
 import { ApprovalBanner } from './ApprovalBanner';
 import { ExecutionPanel } from './ExecutionPanel';
 import { AutopilotPanel } from './AutopilotPanel';
+import { ArtifactChecksEditor } from './ArtifactChecksEditor';
 import { appendPlanTask, normalizePlanDraft, removePlanTask } from './plan-draft';
 import type { SkillSelectionSave } from './SkillManager';
 import type { McpSelectionSave } from './McpManager';
@@ -1288,9 +1289,12 @@ export function App() {
               </p>
             </details>
           )}
-          {session && (session.projectId || session.autopilot) && (
-            <AutopilotPanel key={session.id} session={session} />
-          )}
+          {session &&
+            (session.projectId ||
+              session.autopilot ||
+              session.messages.some((message) =>
+                message.costCalls?.some((call) => call.status !== 'settled'),
+              )) && <AutopilotPanel key={session.id} session={session} />}
         </aside>
       )}
       {confirmFullAccess && (
@@ -1558,6 +1562,11 @@ function PlanEditor({
         placeholder="예: npm test"
         onChange={(event) => update({ ...draft, verificationCommand: event.target.value })}
       />
+      <ArtifactChecksEditor
+        label="최종 검증 파일"
+        checks={draft.verificationArtifacts ?? []}
+        onChange={(verificationArtifacts) => update({ ...draft, verificationArtifacts })}
+      />
       <label className="check-field plan-context-choice">
         <input
           type="checkbox"
@@ -1682,6 +1691,18 @@ function PlanEditor({
                       ...current,
                       tasks: current.tasks.map((item) =>
                         item.id === task.id ? { ...item, criteria: event.target.value } : item,
+                      ),
+                    }))
+                  }
+                />
+                <ArtifactChecksEditor
+                  label={task.title + ' 검증 파일'}
+                  checks={task.verificationArtifacts ?? []}
+                  onChange={(verificationArtifacts) =>
+                    update((current) => ({
+                      ...current,
+                      tasks: current.tasks.map((item) =>
+                        item.id === task.id ? { ...item, verificationArtifacts } : item,
                       ),
                     }))
                   }

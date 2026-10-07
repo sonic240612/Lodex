@@ -23,6 +23,7 @@ import {
   type Activity,
   type McpContextAttachment,
   type ContextCompaction,
+  type ModelCallRecord,
 } from '@lodex/contracts';
 import type { RunUpdate } from './engine';
 export type { RunUpdate } from './engine';
@@ -139,6 +140,9 @@ export class Store {
   }
   session(id: string): Promise<Session> {
     return this.call('session', id);
+  }
+  recordModelCall(sessionId: string, call: ModelCallRecord): Promise<Session> {
+    return this.call('recordModelCall', sessionId, call);
   }
   project(id: string): Promise<Project> {
     return this.call('project', id);

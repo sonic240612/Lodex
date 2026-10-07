@@ -493,29 +493,67 @@ describe('MCP session integration', () => {
       ),
     ).rejects.toMatchObject({ code: 'MCP_CHANGED' });
   });
-  it('runs selected read-only MCP tools during a goal and completes without replay', async () => {
-    const f = await fixture({ goal: true });
-    const response = await f.request(
-      '/v1/commands',
-      makeCommand({
-        type: 'start_goal',
-        sessionId: f.session.id,
-        expectedVersion: f.session.version,
-        goal: 'Read the selected MCP source and finish with evidence',
-        limits: {},
-      }),
-    );
-    expect(response.status).toBe(200);
-    await expect
-      .poll(async () => (await f.store.session(f.session.id)).run?.status)
-      .toBe('completed');
-    expect(f.calls()).toBe(1);
-    const session = await f.store.session(f.session.id);
-    expect(session.autopilot).toMatchObject({ status: 'completed', goalDriven: true });
-    expect(session.messages.at(-1)?.activities?.find((a) => a.mcpCall)?.mcpCall?.status).toBe(
-      'completed',
-    );
-  });
+  it.each(['ask', 'full'] as const)(
+    'runs read-only MCP during a %s goal without invalidating checks or replaying',
+    async (mode) => {
+      const f = await fixture({ goal: true });
+      await f.request(
+        '/v1/commands',
+        makeCommand({
+          type: 'set_permission_mode',
+          sessionId: f.session.id,
+          expectedVersion: f.session.version,
+          mode,
+        }),
+      );
+      const before = await f.store.session(f.session.id);
+      const response = await f.request(
+        '/v1/commands',
+        makeCommand({
+          type: 'start_goal',
+          sessionId: f.session.id,
+          expectedVersion: before.version,
+          goal: 'Read the selected MCP source and finish with evidence',
+          limits: {},
+        }),
+      );
+      expect(response.status).toBe(200);
+      await expect
+        .poll(async () =>
+          (await f.store.session(f.session.id)).messages
+            .at(-1)
+            ?.activities?.some(
+              (entry) =>
+                entry.approval?.kind === 'verification' && entry.approval.status === 'pending',
+            ),
+        )
+        .toBe(true);
+      const pending = await f.store.session(f.session.id);
+      const activity = pending.messages
+        .at(-1)!
+        .activities!.find((entry) => entry.approval?.status === 'pending')!;
+      expect(
+        (
+          await f.request('/v1/approvals', {
+            sessionId: pending.id,
+            expectedVersion: pending.version,
+            activityId: activity.id,
+            action: 'approve',
+          })
+        ).status,
+      ).toBe(200);
+      await expect
+        .poll(async () => (await f.store.session(f.session.id)).run?.status)
+        .toBe('completed');
+      expect(f.calls()).toBe(1);
+      const session = await f.store.session(f.session.id);
+      expect(session.autopilot).toMatchObject({ status: 'completed', goalDriven: true });
+      expect(session.autopilot?.workspaceRevision ?? 0).toBe(0);
+      expect(session.messages.at(-1)?.activities?.find((a) => a.mcpCall)?.mcpCall?.status).toBe(
+        'completed',
+      );
+    },
+  );
   it('does not start MCP in Plan even for readOnlyHint tools', async () => {
     const f = await fixture();
     const session = (

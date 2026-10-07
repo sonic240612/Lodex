@@ -456,6 +456,16 @@ export async function approvalAction(action: ApprovalAction): Promise<Session> {
   });
   return result.session;
 }
+export async function reconcileSessionCosts(
+  session: Session,
+): Promise<{ session: Session; reconciled: number; remaining: number; withoutId: number }> {
+  if (!nativeDesktop) throw new Error('데스크톱 앱에서 비용을 조회하세요.');
+  return invoke('daemon_request', {
+    method: 'POST',
+    path: '/v1/costs/reconcile',
+    body: { sessionId: session.id, expectedVersion: session.version },
+  });
+}
 export async function elicitationAction(action: ElicitationAction): Promise<Session> {
   if (!nativeDesktop) throw new Error('MCP 사용자 입력은 데스크톱 앱에서 사용할 수 있습니다.');
   const result = await invoke<{ session: Session }>('daemon_request', {

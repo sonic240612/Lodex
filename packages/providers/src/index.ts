@@ -304,6 +304,67 @@ export class ChatCompletionProvider implements InferenceProvider {
       ...(descriptor?.templateCapabilities ? { template: descriptor.templateCapabilities } : {}),
     };
   }
+  async getGenerationUsage(id: string, signal: AbortSignal): Promise<Partial<Usage> | null> {
+    if (this.kind !== 'openrouter') return null;
+    if (!id || id.length > 500) throw new AppError('GENERATION_ID', '요청 ID를 확인하세요.');
+    const response = await this.fetchResponse('/generation?id=' + encodeURIComponent(id), {
+      method: 'GET',
+      headers: this.headers(),
+      redirect: 'error',
+      signal,
+    });
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      if ([404, 429, 500, 502, 503, 504].includes(response.status)) return null;
+      throw new AppError(
+        'GENERATION_HTTP',
+        `OpenRouter 비용 조회 실패 (HTTP ${response.status}).`,
+        502,
+      );
+    }
+    const reader = response.body?.getReader();
+    if (!reader) throw new AppError('GENERATION_FORMAT', '비용 조회 결과가 비어 있습니다.', 502);
+    let text = '',
+      bytes = 0;
+    const decoder = new TextDecoder('utf-8', { fatal: true });
+    try {
+      for (;;) {
+        signal.throwIfAborted();
+        const part = await reader.read();
+        if (part.done) break;
+        bytes += part.value.byteLength;
+        if (bytes > 65536)
+          throw new AppError('GENERATION_FORMAT', '비용 조회 결과가 너무 큽니다.', 502);
+        text += decoder.decode(part.value, { stream: true });
+      }
+      text += decoder.decode();
+      const data = object(object(JSON.parse(text)).data);
+      if (data.id !== id)
+        throw new AppError('GENERATION_ID', '조회 결과의 요청 ID가 다릅니다.', 502);
+      const costUsd = number(data.total_cost);
+      if (
+        costUsd === null ||
+        !(
+          data.cancelled === true ||
+          (typeof data.finish_reason === 'string' && data.finish_reason.length)
+        )
+      )
+        return null;
+      return {
+        generationId: id,
+        costUsd,
+        billing: 'reported',
+        inputTokens: number(data.native_tokens_prompt) ?? number(data.tokens_prompt),
+        outputTokens: number(data.native_tokens_completion) ?? number(data.tokens_completion),
+      };
+    } catch (error) {
+      if (signal.aborted) throw signal.reason;
+      if (error instanceof AppError) throw error;
+      throw new AppError('GENERATION_FORMAT', '비용 조회 형식이 올바르지 않습니다.', 502);
+    } finally {
+      await reader.cancel().catch(() => undefined);
+    }
+  }
   private requestBody(
     request: InferenceRequest,
     stream: boolean,
@@ -418,6 +479,7 @@ export class ChatCompletionProvider implements InferenceProvider {
     const config = request.config;
     const splitter = new ThinkingSplitter();
     let structuredThinking = false;
+    let generationId: string | undefined;
     const toolIndexesById = new Map<string, number>();
     const implicitToolIndexes: number[] = [];
     let nextToolIndex = 0;
@@ -462,6 +524,14 @@ export class ChatCompletionProvider implements InferenceProvider {
         throw new AppError('INVALID_JSON', '서버 스트림에 잘못된 JSON이 있습니다.', 502);
       }
       const chunk = object(parsed);
+      if (this.kind === 'openrouter' && typeof chunk.id === 'string' && chunk.id.length <= 500) {
+        if (generationId && generationId !== chunk.id)
+          throw new AppError('GENERATION_ID', '응답 도중 요청 ID가 변경되었습니다.', 502);
+        if (!generationId && chunk.id) {
+          generationId = chunk.id;
+          yield { type: 'usage', usage: { generationId } };
+        }
+      }
       if (chunk.error)
         throw new AppError('PROVIDER_STREAM', '모델 제공자가 응답 도중 오류를 반환했습니다.', 502);
       const choice = object(Array.isArray(chunk.choices) ? chunk.choices[0] : undefined);

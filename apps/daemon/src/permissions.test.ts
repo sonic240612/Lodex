@@ -2,6 +2,14 @@ import { describe, expect, it } from 'vitest';
 import { permissionDecision } from './permissions';
 
 describe('permission policy', () => {
+  it.each(['ask', 'auto', 'full'] as const)(
+    'keeps user completion confirmation separate from %s action permissions',
+    (mode) => {
+      expect(
+        permissionDecision(mode, { kind: 'verification', target: 'answer delivered' }, 'telegram'),
+      ).toMatchObject({ action: 'prompt', kind: 'verification', actor: 'telegram' });
+    },
+  );
   it('asks for every project write in ask mode', () => {
     expect(permissionDecision('ask', { kind: 'file', paths: ['src/app.ts'] })).toMatchObject({
       action: 'prompt',

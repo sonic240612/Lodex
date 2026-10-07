@@ -74,7 +74,9 @@ The desktop app can also store the key in the operating system keychain. `.env`,
 
 Full Access is stored per conversation. File hashes, path checks, symlink checks, cancellation, process cleanup, and audit records still apply.
 
-`/goal <goal>` starts an independent goal run and continues until the model records completion or reaches a blocker or budget. Saved plan execution uses task dependencies and verification evidence. Manual task checkboxes remain separate from verification records.
+`/goal <goal>` continues until completion, a blocker, or a budget limit. Completion checks successful current-run commands or exact artifact hashes; evidence alone requires user confirmation. Saved plans can use verification commands, file content/hash checks, or user confirmation. Later changes invalidate earlier checks. Manual task checkboxes remain separate.
+
+OpenRouter requests retain their IDs and cost reservations across interruption. Missing cost is checked through [generation metadata](https://openrouter.ai/docs/api/api-reference/generations/get-generation). Use **OpenRouter cost reconciliation** or Telegram `/costs` to query unresolved requests before `/resume`; this never regenerates a response. Requests without an ID retain their reservation.
 
 ## Context
 

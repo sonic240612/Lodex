@@ -1,6 +1,7 @@
 import type { PermissionDecision, PermissionMode } from '@lodex/contracts';
 
 export type PermissionRequest =
+  | { kind: 'verification'; target: string }
   | { kind: 'file'; paths: string[]; destructive?: boolean }
   | { kind: 'web'; target: string }
   | { kind: 'command'; command: string; network: 'none' | 'bridge'; environment: 'docker' | 'host' }
@@ -50,6 +51,17 @@ export function permissionDecision(
 ): Omit<PermissionDecision, 'status' | 'requestedAt' | 'decidedAt' | 'decidedBy'> & {
   action: 'allow' | 'prompt';
 } {
+  if (request.kind === 'verification')
+    return {
+      kind: request.kind,
+      target: request.target,
+      actor,
+      mode,
+      risk: 'low',
+      reason:
+        '자동 검증 수단이 없어 제출된 완료 결과를 사용자가 확인해야 합니다. 작업 권한과 완료 확인은 별도입니다.',
+      action: 'prompt',
+    };
   if (mode === 'full')
     return {
       kind: request.kind,

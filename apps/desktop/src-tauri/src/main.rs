@@ -225,6 +225,7 @@ fn route_allowed(method: &str, path: &str) -> bool {
         | ("POST", "/v1/mcp/oauth/disconnect")
         | ("POST", "/v1/edits")
         | ("POST", "/v1/approvals") => true,
+        ("POST", "/v1/costs/reconcile") => true,
         ("GET", value)
             if value.starts_with("/v1/models?") || value.starts_with("/v1/execution/check?") =>
         {
@@ -746,6 +747,8 @@ mod tests {
         assert!(route_allowed("GET", "/v1/backups"));
         assert!(route_allowed("POST", "/v1/backups/export"));
         assert!(route_allowed("POST", "/v1/mcp/completion"));
+        assert!(route_allowed("POST", "/v1/costs/reconcile"));
+        assert!(!route_allowed("GET", "/v1/costs/reconcile"));
         assert!(!route_allowed("PUT", "/v1/secret"));
         assert!(!route_allowed("GET", "https://example.com"));
         assert!(!route_allowed("POST", "/v1/models?provider=openrouter"));

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { autopilotLimitsSchema, resolveModelConfig, type Session } from '@lodex/contracts';
-import { nativeDesktop, sendCommand, snapshot } from './bridge';
+import { nativeDesktop, reconcileSessionCosts, sendCommand, snapshot } from './bridge';
 import { useWorkspace } from './state';
 
 export function AutopilotPanel({ session }: { session: Session }) {
@@ -9,8 +9,33 @@ export function AutopilotPanel({ session }: { session: Session }) {
   const [selected, setSelected] = useState<string[]>([]),
     [busy, setBusy] = useState(false),
     [error, setError] = useState('');
+  const [costStatus, setCostStatus] = useState('');
   const state = session.autopilot;
   const running = session.run?.status === 'running';
+  const pendingCosts = session.messages
+    .flatMap((message) => message.costCalls ?? [])
+    .filter((call) => call.status !== 'settled');
+  async function reconcile() {
+    setBusy(true);
+    setError('');
+    setCostStatus('');
+    try {
+      const result = await reconcileSessionCosts(session);
+      workspace.upsert(result.session);
+      setCostStatus(
+        `${result.reconciled}개 정산 · ${result.remaining}개 미확정` +
+          (result.withoutId
+            ? ` · 요청 ID가 없는 ${result.withoutId}개 예약은 자동 정산할 수 없습니다.`
+            : result.remaining
+              ? ' · 잠시 후 다시 조회하세요.'
+              : ''),
+      );
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure));
+    } finally {
+      setBusy(false);
+    }
+  }
   const usesCloud =
     resolveModelConfig(session).provider === 'openrouter' ||
     (session.routing?.subagentsEnabled &&
@@ -98,16 +123,26 @@ export function AutopilotPanel({ session }: { session: Session }) {
             <details>
               <summary>검증 기록 {state.evidence.length}개</summary>
               <ol>
-                {state.evidence.map((e) => (
-                  <li key={e.executionId}>
+                {state.evidence.map((e, index) => (
+                  <li key={index}>
                     {e.taskId
                       ? state.plan.tasks.find((t) => t.id === e.taskId)?.title
                       : '최종 검증'}{' '}
-                    · {e.passed ? '통과' : '실패'}
+                    ·{' '}
+                    {e.passed
+                      ? e.revision === (state.workspaceRevision ?? 0) && e.source
+                        ? '통과'
+                        : '재검증 필요'
+                      : '실패'}
                     <small>
                       {e.executionId
                         ? `명령 실행 ${e.executionId.slice(0, 8)}`
                         : `근거 ${(e.summary ?? '').slice(0, 160)}`}
+                      {e.source === 'user'
+                        ? ' · 사용자 확인'
+                        : e.source === 'artifact'
+                          ? ' · 파일 확인'
+                          : ''}
                     </small>
                   </li>
                 ))}
@@ -116,6 +151,15 @@ export function AutopilotPanel({ session }: { session: Session }) {
           )}
         </>
       )}
+      {(state?.costUnconfirmed || pendingCosts.length > 0) && (
+        <div>
+          <p>기존 요청의 비용을 조회합니다. 목표·계획 실행의 예약은 정산까지 유지됩니다.</p>
+          <button disabled={!nativeDesktop || running || busy} onClick={() => void reconcile()}>
+            OpenRouter 비용 조회·정산
+          </button>
+        </div>
+      )}
+      {costStatus && <p role="status">{costStatus}</p>}
       {!state?.goalDriven && (
         <details>
           <summary>실행 범위·예산</summary>
@@ -157,7 +201,8 @@ export function AutopilotPanel({ session }: { session: Session }) {
       {!state?.goalDriven && (
         <p>
           저장한 계획과 완료 기준을 사용합니다. Docker 명령 실행을 켜고 검증 명령을 저장한 경우에는
-          명령으로 확인하고, 그 외에는 프로젝트 검사 근거를 기록합니다. 수정안은 검토를 기다립니다.
+          명령으로 확인합니다. 저장한 검증 파일은 내용·해시를 확인하며, 자동 검증 수단이 없으면
+          사용자 완료 확인을 요청합니다. 이후 변경하면 이전 검증이 무효화됩니다.
         </p>
       )}
       {!state?.goalDriven && (

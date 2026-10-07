@@ -67,6 +67,8 @@ export class InferenceScheduler {
     return {
       listModels: (signal) => metadata().listModels(signal),
       capabilities: (model) => metadata().capabilities(model),
+      getGenerationUsage: (id, signal) =>
+        metadata().getGenerationUsage?.(id, signal) ?? Promise.resolve(null),
       async countInputTokens(request, signal) {
         signal.throwIfAborted();
         const config = request.config;

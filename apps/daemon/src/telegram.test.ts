@@ -81,7 +81,11 @@ const update = (
     ...overrides,
   },
 });
-async function fixture() {
+async function fixture(
+  reconcileCosts?: (
+    sessionId: string,
+  ) => Promise<{ reconciled: number; remaining: number; withoutId: number }>,
+) {
   const dir = await mkdtemp(join(tmpdir(), 'lodex-telegram-')),
     path = join(dir, 'state.sqlite'),
     bot = new Bot();
@@ -106,6 +110,7 @@ async function fixture() {
     dispatch,
     decideApproval,
     decideElicitation,
+    ...(reconcileCosts ? { reconcileCosts } : {}),
     fetch: bot.fetch,
   });
   let manager = await Telegram.open(options());
@@ -154,6 +159,20 @@ async function fixture() {
 }
 
 describe('durable Telegram channel', () => {
+  it('lets only the paired account query costs without dispatching a new model request', async () => {
+    const reconcile = vi.fn(async () => ({ reconciled: 1, remaining: 0, withoutId: 0 }));
+    const app = await fixture(reconcile);
+    await app.pair();
+    app.bot.push([update(2, '/costs', 101), update(3, '/costs')]);
+    await expect.poll(() => reconcile.mock.calls.length).toBe(1);
+    await expect
+      .poll(() => app.bot.sent.some((message) => message.text.includes('1개 정산')))
+      .toBe(true);
+    expect(app.dispatch).not.toHaveBeenCalled();
+    app.bot.push([update(3, '/costs')]);
+    await expect.poll(() => !!app.bot.waiting).toBe(true);
+    expect(reconcile).toHaveBeenCalledTimes(1);
+  });
   it('clears local queued channel copies when the connected conversation is deleted', async () => {
     const app = await fixture();
     await app.pair();
@@ -337,67 +356,70 @@ describe('durable Telegram channel', () => {
     ]);
   });
 
-  it('notifies and resolves a pending approval from the paired account', async () => {
-    const app = await fixture();
-    await app.pair();
-    await app.manager.configure({
-      enabled: true,
-      sessionId: app.session.id,
-      allowBuild: true,
-      transmissionConsent: true,
-    });
-    let session = await app.store.session(app.session.id);
-    const sent = await app.store.apply(
-      makeCommand({
-        type: 'send_message',
+  it.each(['command', 'verification'] as const)(
+    'notifies and resolves a pending %s approval from the paired account',
+    async (kind) => {
+      const app = await fixture();
+      await app.pair();
+      await app.manager.configure({
+        enabled: true,
+        sessionId: app.session.id,
+        allowBuild: kind === 'command',
+        transmissionConsent: true,
+      });
+      let session = await app.store.session(app.session.id);
+      const sent = await app.store.apply(
+        makeCommand({
+          type: 'send_message',
+          sessionId: session.id,
+          expectedVersion: session.version,
+          content: '승인 테스트',
+        }),
+      );
+      const activityId = crypto.randomUUID();
+      await app.store.updateRun({
         sessionId: session.id,
-        expectedVersion: session.version,
-        content: '승인 테스트',
-      }),
-    );
-    const activityId = crypto.randomUUID();
-    await app.store.updateRun({
-      sessionId: session.id,
-      runId: sent.session.run!.id,
-      activities: [
-        {
-          id: activityId,
-          kind: 'tool',
-          label: 'run_command',
-          status: 'running',
-          text: '',
-          approval: {
-            kind: 'command',
-            target: 'npm test',
-            actor: 'telegram',
-            mode: 'ask',
-            risk: 'low',
-            reason: '프로젝트 명령 실행',
-            status: 'pending',
-            requestedAt: new Date().toISOString(),
+        runId: sent.session.run!.id,
+        activities: [
+          {
+            id: activityId,
+            kind: 'tool',
+            label: 'run_command',
+            status: 'running',
+            text: '',
+            approval: {
+              kind,
+              target: 'npm test',
+              actor: 'telegram',
+              mode: 'ask',
+              risk: 'low',
+              reason: '프로젝트 명령 실행',
+              status: 'pending',
+              requestedAt: new Date().toISOString(),
+            },
           },
-        },
-      ],
-    });
-    app.manager.wake();
-    await expect
-      .poll(() => app.bot.sent.some((message) => message.text.includes('승인이 필요합니다.')))
-      .toBe(true);
-    app.bot.push([update(2, '/approve')]);
-    await expect.poll(() => app.decideApproval.mock.calls.length).toBe(1);
-    expect(app.decideApproval.mock.calls[0]![0]).toMatchObject({
-      sessionId: session.id,
-      activityId,
-      action: 'approve',
-    });
-    await expect
-      .poll(() => app.bot.sent.some((message) => message.text === '승인했습니다.'))
-      .toBe(true);
-    session = await app.store.session(session.id);
-    expect(
-      session.messages.flatMap((message) => message.activities ?? [])[0]?.approval,
-    ).toMatchObject({ status: 'approved', decidedBy: 'user' });
-  });
+        ],
+      });
+      app.manager.wake();
+      await expect
+        .poll(() => app.bot.sent.some((message) => message.text.includes('승인이 필요합니다.')))
+        .toBe(true);
+      app.bot.push([update(2, '/approve')]);
+      await expect.poll(() => app.decideApproval.mock.calls.length).toBe(1);
+      expect(app.decideApproval.mock.calls[0]![0]).toMatchObject({
+        sessionId: session.id,
+        activityId,
+        action: 'approve',
+      });
+      await expect
+        .poll(() => app.bot.sent.some((message) => message.text === '승인했습니다.'))
+        .toBe(true);
+      session = await app.store.session(session.id);
+      expect(
+        session.messages.flatMap((message) => message.activities ?? [])[0]?.approval,
+      ).toMatchObject({ status: 'approved', decidedBy: 'user' });
+    },
+  );
 
   it('notifies and submits MCP elicitation JSON without persisting answer values', async () => {
     const app = await fixture();

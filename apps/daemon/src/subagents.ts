@@ -9,6 +9,7 @@ import {
   type SubagentRecord,
   type ToolDefinition,
   type Usage,
+  type ModelCallReservation,
 } from '@lodex/contracts';
 import { measureRequest } from '@lodex/context';
 import { isProjectReadTool, projectTools, runProjectTool } from '@lodex/tools';
@@ -48,12 +49,15 @@ type Options = {
   project?: Project;
   skills?: RegisteredSkill[];
   signal: AbortSignal;
-  reserveModelCall: (inputEstimateTokens: number) => number | Promise<number>;
+  reserveModelCall: (
+    inputEstimateTokens: number,
+  ) => ModelCallReservation | Promise<ModelCallReservation>;
   settleModelCall?: (
-    reservation: number,
+    reservation: ModelCallReservation,
     usage: Partial<Usage>,
     completed: boolean,
   ) => void | Promise<void>;
+  onModelUsage?: (reservation: ModelCallReservation, usage: Partial<Usage>) => Promise<void>;
   reserveToolCall: () => void | Promise<void>;
   onUpdate: (records: SubagentRecord[]) => Promise<void>;
 };
@@ -171,8 +175,10 @@ export async function runSubagents(tasks: { task: string }[], options: Options):
                   throw new AppError('SUBAGENT_REASONING', '모델 추론 상태가 일치하지 않습니다.');
                 mergeDetails(details, event.data);
               } else if (event.type === 'tool_call_delta') assembler.add(event);
-              else if (event.type === 'usage') Object.assign(round, event.usage);
-              else if (event.type === 'finished') finished = event.reason;
+              else if (event.type === 'usage') {
+                Object.assign(round, event.usage);
+                await options.onModelUsage?.(costReservation, round);
+              } else if (event.type === 'finished') finished = event.reason;
               else if (event.type === 'error') throw new AppError(event.code, event.message);
             }
             streamCompleted = true;

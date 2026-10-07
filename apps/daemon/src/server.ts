@@ -73,6 +73,7 @@ import { runAgent } from './agent-runner';
 import { planningTool } from './planning';
 import { historySearchTool, toolResultRecallTool } from './history';
 import { goalCompletionTool, verificationTools } from './autopilot';
+import { reconcileCosts } from './costs';
 import { RuntimeManager } from '@lodex/local-runtime';
 import {
   discoverSkillDirectories,
@@ -1109,6 +1110,12 @@ export async function startServer(options: ServerOptions) {
     dispatch: (value) => serial(() => command(value)),
     decideApproval: (value) => serial(() => reviewApproval(value)),
     decideElicitation: (value) => serial(() => reviewElicitation(value)),
+    reconcileCosts: (sessionId) =>
+      serial(async () => {
+        const session = await store.session(sessionId);
+        const config = { ...resolveModelConfig(session), provider: 'openrouter' as const };
+        return reconcileCosts(store, session, inference.provider({ ...session, config }));
+      }),
     ...(options.telegramFetch ? { fetch: options.telegramFetch } : {}),
   });
   const server = createServer(async (request, response) => {
@@ -1616,6 +1623,25 @@ export async function startServer(options: ServerOptions) {
         json(response, 200, {
           session: await serial(() => reviewEdit(parsed.data)),
         });
+      } else if (request.method === 'POST' && url.pathname === '/v1/costs/reconcile') {
+        const input = z
+          .strictObject({ sessionId: z.uuid(), expectedVersion: z.number().int().nonnegative() })
+          .parse(await readJson(request));
+        json(
+          response,
+          200,
+          await serial(async () => {
+            const session = await store.session(input.sessionId);
+            if (session.version !== input.expectedVersion)
+              throw new AppError(
+                'VERSION_CONFLICT',
+                '대화가 변경되었습니다. 최신 상태에서 다시 조회하세요.',
+                409,
+              );
+            const config = { ...resolveModelConfig(session), provider: 'openrouter' as const };
+            return reconcileCosts(store, session, inference.provider({ ...session, config }));
+          }),
+        );
       } else if (request.method === 'POST' && url.pathname === '/v1/approvals') {
         const parsed = approvalActionSchema.safeParse(await readJson(request));
         if (!parsed.success)

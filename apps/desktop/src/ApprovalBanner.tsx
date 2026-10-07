@@ -7,6 +7,7 @@ const titles: Record<PermissionDecision['kind'], string> = {
   fusion: '파일 변경 및 검증 권한 요청',
   mcp: 'MCP 작업 권한 요청',
   web: '웹 조회 권한 요청',
+  verification: '완료 결과 확인',
 };
 
 export function ApprovalBanner({
@@ -41,7 +42,7 @@ export function ApprovalBanner({
       </button>
       <button
         className="permission-allow"
-        disabled={busy || (mode === 'plan' && approval.kind !== 'web')}
+        disabled={busy || (mode === 'plan' && !['web', 'verification'].includes(approval.kind))}
         onClick={() => onDecide('approve')}
       >
         수락

@@ -79,6 +79,9 @@ type Options = {
   dispatch: (command: Command) => Promise<CommandResult>;
   decideApproval: (action: ApprovalAction) => Promise<Session>;
   decideElicitation: (action: ElicitationAction) => Promise<Session>;
+  reconcileCosts?: (
+    sessionId: string,
+  ) => Promise<{ reconciled: number; remaining: number; withoutId: number }>;
   fetch?: typeof fetch;
 };
 class BotError extends AppError {
@@ -574,12 +577,12 @@ export class Telegram {
             throw new AppError('TELEGRAM_EXPIRED', '요청이 만료되었습니다. 다시 보내세요.');
           const text = item.text.trim();
           if (text === '/approve' || text === '/deny') {
-            if (!this.state.config.allowBuild)
+            const approval = this.pendingApproval(session);
+            if (!this.state.config.allowBuild && approval?.approval?.kind !== 'verification')
               throw new AppError(
                 'TELEGRAM_BUILD',
                 'Telegram 설정에서 Build 원격 요청을 먼저 허용하세요.',
               );
-            const approval = this.pendingApproval(session);
             if (!approval)
               throw new AppError('TELEGRAM_APPROVAL', '대기 중인 승인 요청이 없습니다.');
             await this.options.decideApproval({
@@ -634,6 +637,20 @@ export class Telegram {
             await this.save();
             continue;
           }
+          if (text === '/costs') {
+            if (!this.options.reconcileCosts)
+              throw new AppError('COST_UNAVAILABLE', '비용 조회가 연결되지 않았습니다.');
+            const result = await this.options.reconcileCosts(session.id);
+            this.enqueue(
+              `${result.reconciled}개 정산 · ${result.remaining}개 미확정` +
+                (result.withoutId
+                  ? ` · 요청 ID 없는 ${result.withoutId}개 예약은 자동 정산할 수 없습니다.`
+                  : ''),
+            );
+            item.status = 'done';
+            await this.save();
+            continue;
+          }
           if (text === '/status') {
             const approval = this.pendingApproval(session);
             const elicitation = this.pendingElicitation(session);
@@ -682,7 +699,7 @@ export class Telegram {
           }
           if (text === '/help' || text === '/start') {
             this.enqueue(
-              '/ask 메시지 — 연결한 대화에 요청\n/goal 목표 — 독립 목표 실행\n/resume — 중단된 /goal 계속\n/run — 저장 계획 자동 실행\n/plan · /todo — 목표와 할 일 조회\n/todo goal 목표 | 완료 기준\n/todo add 할 일 | 완료 기준\n/todo done 번호 · /todo undo 번호 · /todo remove 번호\n/autopilot ask|auto|full — 승인 단계 변경\n/approve · /deny — 대기 작업 결정\n/answer JSON · /decline · /cancel-input — MCP 입력 결정\n/stop — 현재 실행 중지\n일반 텍스트도 요청으로 전달됩니다. 원격 Build와 권한 변경은 Telegram 설정에서 허용해야 합니다.',
+              '/ask 메시지 — 연결한 대화에 요청\n/goal 목표 — 독립 목표 실행\n/resume — 중단된 /goal 계속\n/costs — OpenRouter 미확정 비용 조회·정산\n/run — 저장 계획 자동 실행\n/plan · /todo — 목표와 할 일 조회\n/todo goal 목표 | 완료 기준\n/todo add 할 일 | 완료 기준\n/todo done 번호 · /todo undo 번호 · /todo remove 번호\n/autopilot ask|auto|full — 승인 단계 변경\n/approve · /deny — 대기 작업 결정\n/answer JSON · /decline · /cancel-input — MCP 입력 결정\n/stop — 현재 실행 중지\n일반 텍스트도 요청으로 전달됩니다. 원격 Build와 권한 변경은 Telegram 설정에서 허용해야 합니다.',
             );
             item.status = 'done';
             await this.save();
@@ -885,15 +902,16 @@ export class Telegram {
   }
   private approvalSummary(activity: Activity) {
     const approval = activity.approval!;
-    return approval.kind + ' · ' + approval.target + '\n사유: ' + approval.reason;
+    return (
+      (approval.kind === 'verification' ? '완료 결과 확인' : approval.kind) +
+      ' · ' +
+      approval.target +
+      '\n사유: ' +
+      approval.reason
+    );
   }
   private async notifyPendingApproval() {
-    if (
-      !this.state.owner ||
-      !this.state.config.transmissionConsent ||
-      !this.state.config.allowBuild ||
-      !this.state.config.sessionId
-    )
+    if (!this.state.owner || !this.state.config.transmissionConsent || !this.state.config.sessionId)
       return;
     let session: Session;
     try {
@@ -903,6 +921,7 @@ export class Telegram {
     }
     const approval = this.pendingApproval(session);
     if (!approval || approval.id === this.state.notifiedApprovalId) return;
+    if (!this.state.config.allowBuild && approval.approval?.kind !== 'verification') return;
     this.enqueue(
       '승인이 필요합니다.\n' +
         this.approvalSummary(approval) +

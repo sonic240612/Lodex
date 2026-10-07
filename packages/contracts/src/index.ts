@@ -15,12 +15,22 @@ export * from './routing';
 
 export const PROTOCOL_VERSION = 1 as const;
 export const idSchema = z.uuid();
+export const artifactCheckSchema = z.strictObject({
+  path: z.string().trim().min(1).max(4096),
+  sha256: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/)
+    .optional(),
+  contains: z.string().min(1).max(4000).optional(),
+});
+export type ArtifactCheck = z.infer<typeof artifactCheckSchema>;
 export const taskSchema = z.strictObject({
   id: idSchema,
   title: z.string().trim().min(1).max(500),
   done: z.boolean(),
   criteria: z.string().trim().max(2000).optional(),
   verificationCommand: z.string().trim().max(8000).optional(),
+  verificationArtifacts: z.array(artifactCheckSchema).max(16).optional(),
   dependsOn: z.array(idSchema).max(100).optional(),
 });
 export const planSchema = z
@@ -30,6 +40,7 @@ export const planSchema = z
     includeInContext: z.boolean().default(false),
     criteria: z.string().trim().max(4000).optional(),
     verificationCommand: z.string().trim().max(8000).optional(),
+    verificationArtifacts: z.array(artifactCheckSchema).max(16).optional(),
     tasks: z
       .array(taskSchema)
       .max(100)
@@ -125,6 +136,7 @@ export function normalizeFusedCommand(input: {
   );
 }
 export interface CommandExecution {
+  verificationRevision?: number;
   id: string;
   containerName: string;
   environment?: 'docker' | 'host';
@@ -146,6 +158,7 @@ export const planDraftSchema = z.strictObject({
   goal: z.string().trim().min(1).max(4000),
   criteria: z.string().trim().min(1).max(4000),
   verificationCommand: z.string().trim().max(8000).optional(),
+  verificationArtifacts: z.array(artifactCheckSchema).max(16).optional(),
   tasks: z
     .array(
       z.strictObject({
@@ -153,6 +166,7 @@ export const planDraftSchema = z.strictObject({
         title: z.string().trim().min(1).max(500),
         criteria: z.string().trim().max(2000),
         verificationCommand: z.string().trim().max(8000).optional(),
+        verificationArtifacts: z.array(artifactCheckSchema).max(16).optional(),
         dependsOn: z.array(z.string().max(40)).max(100),
       }),
     )
@@ -172,6 +186,9 @@ export const autopilotLimitsSchema = z.strictObject({
   costUsd: z.number().min(0.01).max(1000).default(1),
 });
 export interface AutopilotState {
+  costBudgetId?: string;
+  costBaseline?: { spent: number; reserved: number; unconfirmed: boolean };
+  workspaceRevision?: number;
   goalDriven?: boolean;
   runId: string;
   status: 'running' | 'paused' | 'completed' | 'cancelled' | 'interrupted';
@@ -185,6 +202,10 @@ export interface AutopilotState {
     summary?: string;
     passed: boolean;
     at: string;
+    source?: 'command' | 'artifact' | 'user';
+    revision?: number;
+    artifacts?: { path: string; sha256: string }[];
+    executionIds?: string[];
   }[];
   limits: z.infer<typeof autopilotLimitsSchema>;
   modelCalls: number;
@@ -409,6 +430,7 @@ export interface Metric {
   source: 'engine_reported' | 'provider_reported' | 'app_observed';
 }
 export interface Usage {
+  generationId?: string;
   inputTokens: number | null;
   outputTokens: number | null;
   costUsd: number | null;
@@ -427,6 +449,7 @@ export const emptyUsage = (provider: ProviderId): Usage => ({
   ttftMs: null,
 });
 export interface Message {
+  costCalls?: ModelCallRecord[];
   inferenceConfig?: ModelConfig;
   id: string;
   role: 'user' | 'assistant';
@@ -586,7 +609,7 @@ export interface McpElicitation {
   elicitationId?: string;
 }
 export interface PermissionDecision {
-  kind: 'file' | 'command' | 'mcp' | 'fusion' | 'web';
+  kind: 'file' | 'command' | 'mcp' | 'fusion' | 'web' | 'verification';
   target: string;
   actor: 'desktop' | 'telegram';
   mode: PermissionMode;
@@ -605,6 +628,7 @@ export interface Activity {
   observation?: { id: string; bytes: number };
   subagents?: SubagentRecord[];
   mcpCall?: {
+    mayWrite?: boolean;
     serverId: string;
     serverRevision: string;
     toolName: string;
@@ -817,6 +841,7 @@ export type InferenceEvent =
   | { type: 'finished'; reason: string }
   | { type: 'error'; code: string; message: string };
 export interface InferenceProvider {
+  getGenerationUsage?(id: string, signal: AbortSignal): Promise<Partial<Usage> | null>;
   listModels(signal?: AbortSignal): Promise<ModelDescriptor[]>;
   capabilities(model: string): Promise<ModelCapabilities>;
   /** Returns null when the provider cannot count the fully formatted request without generating. */
@@ -839,6 +864,21 @@ export class AppError extends Error {
     super(message);
   }
 }
+export const modelCallRecordSchema = z.strictObject({
+  id: z.uuid(),
+  budgetId: z.string().min(1).max(100),
+  runId: z.uuid(),
+  messageId: z.uuid(),
+  model: z.string().min(1).max(256),
+  reservedCostUsd: z.number().finite().nonnegative(),
+  generationId: z.string().min(1).max(500).optional(),
+  status: z.enum(['reserved', 'unconfirmed', 'settled']),
+  actualCostUsd: z.number().finite().nonnegative().optional(),
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime(),
+});
+export type ModelCallRecord = z.infer<typeof modelCallRecordSchema>;
+export type ModelCallReservation = number | { id: string; reservedCostUsd: number };
 
 export function prepareAutopilot(
   session: Session,
@@ -879,6 +919,8 @@ export function prepareAutopilot(
   const wholeGoal = selected.size === plan.tasks.length;
   return {
     runId,
+    costBudgetId: crypto.randomUUID(),
+    costBaseline: { spent: 0, reserved: 0, unconfirmed: false },
     status: 'running',
     plan,
     taskIds: plan.tasks.filter((t) => selected.has(t.id)).map((t) => t.id),
@@ -912,6 +954,8 @@ export function prepareGoal(
   });
   return {
     goalDriven: true,
+    costBudgetId: crypto.randomUUID(),
+    costBaseline: { spent: 0, reserved: 0, unconfirmed: false },
     runId,
     status: 'running',
     plan,
@@ -933,6 +977,20 @@ export function resumeGoal(session: Session, runId = ''): AutopilotState {
   const previous = session.autopilot;
   if (!previous?.goalDriven || previous.status === 'completed' || previous.status === 'cancelled')
     throw new AppError('GOAL_NOT_PAUSED', '계속 실행할 목표가 없습니다.', 409);
+  if (
+    previous.costUnconfirmed ||
+    session.messages.some((message) =>
+      message.costCalls?.some(
+        (call) =>
+          call.budgetId === (previous.costBudgetId ?? previous.runId) && call.status !== 'settled',
+      ),
+    )
+  )
+    throw new AppError(
+      'COST_UNCONFIRMED',
+      '이전 OpenRouter 요청의 비용을 먼저 조회·정산하세요. 같은 유료 요청을 다시 생성하지 않았습니다.',
+      409,
+    );
   const { reason: _reason, ...rest } = structuredClone(previous);
   const limits = autopilotLimitsSchema.parse(rest.limits);
   return {
@@ -946,8 +1004,7 @@ export function resumeGoal(session: Session, runId = ''): AutopilotState {
     },
     spentCostUsd: rest.spentCostUsd ?? 0,
     reservedCostUsd: rest.reservedCostUsd ?? 0,
-    // A manual resume is the user's acknowledgement; the conservative reservation remains charged.
-    costUnconfirmed: false,
+    costUnconfirmed: rest.costUnconfirmed ?? false,
     runId,
     status: 'running',
   };
@@ -957,7 +1014,7 @@ export function goalPrompt(state: AutopilotState) {
     'Continue working autonomously until the user goal is achieved or a real blocker requires user action.',
     'Use the available tools to inspect, implement, and verify. Do not stop after merely explaining a plan.',
     'When a file change needs approval, propose it and pause. After approval, continue from the persisted conversation.',
-    'Call complete_goal only after the goal is actually achieved. Include concrete evidence in that tool call.',
+    'Call complete_goal only after the goal is actually achieved. Include concrete evidence plus executionIds from successful current-run commands or artifacts with path and exact sha256 from read_file. Evidence alone requests user confirmation; it cannot mark the goal verified. After later file changes, commands, or external effects, verify again.',
     'Goal: ' + state.plan.goal,
   ].join('\n');
 }
@@ -971,7 +1028,7 @@ export function readyAutopilotTasks(state: AutopilotState) {
 }
 export function autopilotPrompt(state: AutopilotState) {
   return (
-    'Execute the selected working plan within the configured budget. The user authorized this Autopilot run for the selected project. Work on ready tasks only. Use verify_task after checking a task against its saved completion criteria; a saved verification command will run in Docker when command execution is enabled, otherwise provide concrete evidence from your inspection. Never mark tasks complete in prose alone. After all selected tasks pass, call verify_goal with final evidence. A proposed file change is not applied until the user approves it. Stop and explain missing prerequisites.\nSelected task IDs: ' +
+    'Execute the selected working plan within the configured budget. Work on ready tasks only. Use verify_task to run the saved command or check saved artifacts. A saved command requires Docker or Full Access host execution and cannot be replaced by prose. With no machine verifier, provide evidence for explicit user confirmation. Later project changes invalidate earlier verification; verify again. After all selected tasks pass, call verify_goal. Proposed changes require the conversation permission policy. Stop and explain missing prerequisites.\nSelected task IDs: ' +
     JSON.stringify(state.taskIds) +
     '\nReady task IDs: ' +
     JSON.stringify(readyAutopilotTasks(state).map((t) => t.id))

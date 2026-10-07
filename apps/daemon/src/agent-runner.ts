@@ -15,6 +15,8 @@ import {
   type ModelPricing,
   type Usage,
   type RunContextCompaction,
+  type ModelCallRecord,
+  type ModelCallReservation,
   readyAutopilotTasks,
   activityProposal,
   defaultPermissionMode,
@@ -44,7 +46,7 @@ import {
 import type { Store } from '@lodex/storage';
 import { proposePlan } from './planning';
 import { readStoredToolResult, searchSessionHistory } from './history';
-import { autopilotVerificationRequest, completeGoal, verifyAutopilot } from './autopilot';
+import { completeGoal, invalidateVerification, verifyAutopilot } from './autopilot';
 import { runSkillTool } from './skills';
 import type {
   CreateMessageRequestParams,
@@ -243,6 +245,7 @@ export async function runAgent(options: {
   const continuation: InferenceMessage[] = [];
   const rounds: Partial<Usage>[] = [];
   const usedIds = new Set<string>();
+  const callRecords = new Map<string, ModelCallRecord>();
   let runContextCompaction: RunContextCompaction | undefined;
   let compactionActivity: Activity | undefined;
   let content = '',
@@ -276,7 +279,7 @@ export async function runAgent(options: {
   const save = async (terminal?: 'completed' | 'failed' | 'cancelled', error?: string) => {
     if (content.length > 262144 || Buffer.byteLength(JSON.stringify(activities)) > 262144)
       throw new AppError('OUTPUT_LIMIT', '응답 또는 활동 기록 한도를 초과했습니다.');
-    await store.updateRun({
+    const updated = await store.updateRun({
       sessionId: session.id,
       runId,
       text: content,
@@ -288,6 +291,15 @@ export async function runAgent(options: {
       ...(terminal ? { status: terminal } : {}),
       ...(error ? { error } : {}),
     });
+    if (
+      autopilot &&
+      updated.autopilot &&
+      (updated.autopilot.workspaceRevision ?? 0) > (autopilot.workspaceRevision ?? 0)
+    ) {
+      autopilot.workspaceRevision = updated.autopilot.workspaceRevision ?? 0;
+      autopilot.completedTaskIds = [];
+      if (autopilot.status === 'completed') autopilot.status = updated.autopilot.status;
+    }
     lastSave = performance.now();
   };
   const authorize = async (card: Activity, request: PermissionRequest): Promise<boolean> => {
@@ -420,30 +432,98 @@ export async function runAgent(options: {
     if (autopilot) {
       autopilot.modelCalls++;
       autopilot.reservedOutputTokens += config.maxTokens;
-      autopilot.reservedCostUsd += costReservation;
     }
     await save();
+    if (config.provider === 'openrouter') {
+      const now = new Date().toISOString();
+      const call: ModelCallRecord = {
+        id: randomUUID(),
+        budgetId: autopilot ? (autopilot.costBudgetId ?? autopilot.runId) : 'unbudgeted-' + runId,
+        runId,
+        messageId: session.run!.messageId,
+        model: config.model,
+        reservedCostUsd: costReservation,
+        status: 'reserved',
+        createdAt: now,
+        updatedAt: now,
+      };
+      await persistCall(call);
+      return { id: call.id, reservedCostUsd: costReservation };
+    }
     return costReservation;
+  };
+  const persistCall = async (call: ModelCallRecord) => {
+    const updated = await store.recordModelCall(session.id, call);
+    callRecords.set(call.id, call);
+    if (autopilot && updated.autopilot) {
+      autopilot.spentCostUsd = updated.autopilot.spentCostUsd;
+      autopilot.reservedCostUsd = updated.autopilot.reservedCostUsd;
+      autopilot.costUnconfirmed = updated.autopilot.costUnconfirmed;
+      if (updated.autopilot.costBaseline) autopilot.costBaseline = updated.autopilot.costBaseline;
+      if (updated.autopilot.costBudgetId) autopilot.costBudgetId = updated.autopilot.costBudgetId;
+    }
+  };
+  const noteModelUsage = async (reservation: ModelCallReservation, roundUsage: Partial<Usage>) => {
+    if (typeof reservation === 'number' || !roundUsage.generationId) return;
+    const call = callRecords.get(reservation.id)!;
+    if (call.generationId && call.generationId !== roundUsage.generationId)
+      throw new AppError('GENERATION_ID', 'OpenRouter 요청 ID가 변경되었습니다.');
+    if (!call.generationId)
+      await persistCall({
+        ...call,
+        generationId: roundUsage.generationId,
+        updatedAt: new Date().toISOString(),
+      });
   };
   const settleModelCall = async (
     config: ModelConfig,
-    reservation: number,
+    reservation: ModelCallReservation,
     roundUsage: Partial<Usage>,
     completed: boolean,
+    billingProvider: InferenceProvider = provider,
   ) => {
-    if (!autopilot || config.provider !== 'openrouter') return;
-    const actual = roundUsage.costUsd;
-    if (!completed || typeof actual !== 'number' || !Number.isFinite(actual) || actual < 0) {
-      autopilot.costUnconfirmed = true;
-      await save();
+    if (config.provider !== 'openrouter' || typeof reservation === 'number') return;
+    await noteModelUsage(reservation, roundUsage);
+    let actual = completed ? roundUsage.costUsd : null;
+    const call = callRecords.get(reservation.id)!;
+    if (
+      (typeof actual !== 'number' || !Number.isFinite(actual) || actual < 0) &&
+      call.generationId &&
+      !signal.aborted
+    ) {
+      try {
+        const resolved = await billingProvider.getGenerationUsage?.(
+          call.generationId,
+          AbortSignal.any([signal, AbortSignal.timeout(5000)]),
+        );
+        if (
+          resolved?.generationId === call.generationId &&
+          typeof resolved.costUsd === 'number' &&
+          Number.isFinite(resolved.costUsd) &&
+          resolved.costUsd >= 0
+        ) {
+          actual = resolved.costUsd;
+          Object.assign(roundUsage, resolved);
+        }
+      } catch {
+        /* Keep the reservation; querying metadata never retries generation. */
+      }
+    }
+    if (typeof actual !== 'number' || !Number.isFinite(actual) || actual < 0) {
+      await persistCall({ ...call, status: 'unconfirmed', updatedAt: new Date().toISOString() });
+      if (signal.aborted || !autopilot) return;
       throw new AppError(
         'COST_UNCONFIRMED',
-        'OpenRouter가 실제 호출 비용을 반환하지 않아 예약 금액을 유지하고 자동 실행을 멈췄습니다.',
+        'OpenRouter 실제 호출 비용을 확인하지 못했습니다. 예약을 유지하고 중지했습니다. 비용 조회·정산 후 재개하세요.',
       );
     }
-    autopilot.reservedCostUsd = Math.max(0, autopilot.reservedCostUsd - reservation);
-    autopilot.spentCostUsd += actual;
-    if (autopilot.spentCostUsd > autopilot.limits.costUsd + 1e-12) {
+    await persistCall({
+      ...call,
+      status: 'settled',
+      actualCostUsd: actual,
+      updatedAt: new Date().toISOString(),
+    });
+    if (autopilot && autopilot.spentCostUsd > autopilot.limits.costUsd + 1e-12) {
       await save();
       throw new AppError(
         'COST_BUDGET',
@@ -568,8 +648,10 @@ export async function runAgent(options: {
               'MCP_SAMPLING_TOOLS',
               'MCP Sampling 응답에서 예기치 않은 도구 호출을 받았습니다.',
             );
-          } else if (event.type === 'usage') Object.assign(roundUsage, event.usage);
-          else if (event.type === 'error') throw new AppError(event.code, event.message, 502);
+          } else if (event.type === 'usage') {
+            Object.assign(roundUsage, event.usage);
+            await noteModelUsage(reservation, roundUsage);
+          } else if (event.type === 'error') throw new AppError(event.code, event.message, 502);
           else if (event.type === 'finished') finished = event.reason;
         }
         streamCompleted = true;
@@ -830,8 +912,10 @@ export async function runAgent(options: {
             }
             card.label = call.name || '도구 요청 수신';
             card.arguments = call.arguments;
-          } else if (event.type === 'usage') Object.assign(roundUsage, event.usage);
-          else if (event.type === 'error') throw new AppError(event.code, event.message, 502);
+          } else if (event.type === 'usage') {
+            Object.assign(roundUsage, event.usage);
+            await noteModelUsage(costReservation, roundUsage);
+          } else if (event.type === 'error') throw new AppError(event.code, event.message, 502);
           else if (event.type === 'finished') finished = event.reason;
           if (performance.now() - lastSave > 180) await save();
         }
@@ -947,7 +1031,14 @@ export async function runAgent(options: {
             reserveModelCall: (inputEstimateTokens) =>
               reserveModelCall(options.subagents!.config, inputEstimateTokens),
             settleModelCall: (reservation, roundUsage, completed) =>
-              settleModelCall(options.subagents!.config, reservation, roundUsage, completed),
+              settleModelCall(
+                options.subagents!.config,
+                reservation,
+                roundUsage,
+                completed,
+                options.subagents!.provider,
+              ),
+            onModelUsage: noteModelUsage,
             reserveToolCall,
             onUpdate: async (records) => {
               card.subagents = records;
@@ -957,7 +1048,27 @@ export async function runAgent(options: {
         } else if (call.name === 'complete_goal') {
           if (!autopilot) throw new AppError('GOAL_REQUIRED', '실행 중인 /goal이 없습니다.');
           try {
-            result = JSON.stringify(completeGoal(autopilot, call.arguments));
+            if (
+              activities.some((entry) =>
+                ['proposed', 'partial', 'applying', 'uncertain'].includes(
+                  activityProposal(entry)?.status ?? '',
+                ),
+              )
+            )
+              throw new AppError(
+                'GOAL_EDITS_PENDING',
+                '아직 적용·확인되지 않은 파일 변경이 있습니다.',
+              );
+            result = JSON.stringify(
+              await completeGoal(autopilot, call.arguments, {
+                ...(project ? { project } : {}),
+                signal,
+                executions: activities.flatMap((entry) =>
+                  entry.execution ? [entry.execution] : [],
+                ),
+                confirm: (evidence) => authorize(card, { kind: 'verification', target: evidence }),
+              }),
+            );
           } catch (error) {
             result = JSON.stringify({
               error: error instanceof AppError ? error.code : 'GOAL_INPUT',
@@ -971,45 +1082,66 @@ export async function runAgent(options: {
               'Autopilot에서만 검증 도구를 사용할 수 있습니다.',
             );
           try {
-            const verificationRequest = autopilotVerificationRequest(
-              autopilot,
-              call.name,
-              call.arguments,
-            );
-            const commandAllowed =
-              !verificationRequest.command ||
-              !project ||
-              session.execution?.backend !== 'docker' ||
-              (await authorize(card, {
-                kind: 'command',
-                command: verificationRequest.command,
-                network: session.execution.network,
-                environment: 'docker',
-              }));
-            if (!commandAllowed)
-              result = JSON.stringify({
-                status: 'rejected',
-                message: 'The user rejected this verification command. Do not claim it ran.',
-              });
-            else {
-              const verification = await verifyAutopilot({
-                state: autopilot,
-                name: call.name,
-                argumentsJson: call.arguments,
-                signal,
-                ...(project && session.execution?.backend === 'docker'
-                  ? { project, config: session.execution }
-                  : {}),
-                ...(options.commandExecutor ? { executor: options.commandExecutor } : {}),
-                record: async (execution) => {
-                  card.execution = structuredClone(execution);
-                  await store.recordExecution(session.id, card.id, execution);
-                },
-              });
-              result = JSON.stringify(verification);
-              if ('cleanupPending' in verification && verification.cleanupPending)
-                throw new AppError('CLEANUP_REQUIRED', '검증 컨테이너 정리가 필요합니다.');
-            }
+            if (
+              call.name === 'verify_goal' &&
+              activities.some((entry) =>
+                ['proposed', 'partial', 'applying', 'uncertain'].includes(
+                  activityProposal(entry)?.status ?? '',
+                ),
+              )
+            )
+              throw new AppError(
+                'GOAL_EDITS_PENDING',
+                '아직 적용·확인되지 않은 파일 변경이 있습니다.',
+              );
+            const verification = await verifyAutopilot({
+              state: autopilot,
+              name: call.name,
+              argumentsJson: call.arguments,
+              signal,
+              ...(project ? { project } : {}),
+              confirm: (evidence) => authorize(card, { kind: 'verification', target: evidence }),
+              ...(project &&
+              session.mode !== 'plan' &&
+              (session.execution?.backend === 'docker' || session.permissionMode === 'full')
+                ? {
+                    executeVerification: async (command: string) => {
+                      const environment =
+                        session.execution?.backend === 'docker' ? 'docker' : 'host';
+                      if (
+                        !(await authorize(card, {
+                          kind: 'command',
+                          command,
+                          environment,
+                          network: environment === 'docker' ? session.execution!.network : 'bridge',
+                        }))
+                      )
+                        throw new AppError(
+                          'VERIFICATION_REJECTED',
+                          '사용자가 검증 명령 실행을 거절했습니다.',
+                        );
+                      const shared = {
+                        project,
+                        signal,
+                        argumentsJson: JSON.stringify({ command, cwd: '.', timeoutMs: 120000 }),
+                        record: async (execution: NonNullable<Activity['execution']>) => {
+                          card.execution = structuredClone(execution);
+                          await store.recordExecution(session.id, card.id, execution);
+                        },
+                      };
+                      return environment === 'host'
+                        ? (options.hostCommandExecutor ?? executeHostCommand)(shared)
+                        : (options.commandExecutor ?? executeCommand)({
+                            ...shared,
+                            config: session.execution!,
+                          });
+                    },
+                  }
+                : {}),
+            });
+            result = JSON.stringify(verification);
+            if ('cleanupPending' in verification && verification.cleanupPending)
+              throw new AppError('CLEANUP_REQUIRED', '검증 컨테이너 정리가 필요합니다.');
           } catch (error) {
             if (card.execution?.cleanupPending) throw error;
             result = JSON.stringify({
@@ -1102,8 +1234,12 @@ export async function runAgent(options: {
               signal,
               maxBytes: session.config.eco ? 12288 : 24576,
               record: async (audit) => {
-                card.mcpCall = structuredClone(audit);
-                await store.recordMcpCall(session.id, card.id, audit);
+                const policy = options.mcp!.permission(call.name);
+                card.mcpCall = {
+                  ...structuredClone(audit),
+                  mayWrite: !policy.readOnly || policy.destructive || policy.openWorld,
+                };
+                await store.recordMcpCall(session.id, card.id, card.mcpCall);
               },
               sampling: (params, samplingSignal) => sampleForMcp(params, samplingSignal, call.name),
               elicitation: (params, elicitationSignal) =>
@@ -1485,6 +1621,27 @@ export async function runAgent(options: {
           }
         }
         signal.throwIfAborted();
+        if (autopilot && !['verify_task', 'verify_goal', 'complete_goal'].includes(call.name)) {
+          const editStatus = activityProposal(card)?.status;
+          const body = JSON.parse(result);
+          if (
+            card.execution ||
+            ['applied', 'partial'].includes(editStatus ?? '') ||
+            (call.name === 'host_write_file' && !body.error && body.status !== 'rejected') ||
+            (card.mcpCall && card.mcpCall.mayWrite !== false)
+          ) {
+            const storedRevision =
+              (await store.session(session.id)).autopilot?.workspaceRevision ?? 0;
+            if (storedRevision > (autopilot.workspaceRevision ?? 0)) {
+              autopilot.workspaceRevision = storedRevision;
+              autopilot.completedTaskIds = [];
+            } else invalidateVerification(autopilot);
+            if (card.execution) {
+              card.execution.verificationRevision = autopilot.workspaceRevision ?? 0;
+              await store.recordExecution(session.id, card.id, card.execution);
+            }
+          }
+        }
         card.text = card.execution
           ? JSON.stringify({
               status: card.execution.status,

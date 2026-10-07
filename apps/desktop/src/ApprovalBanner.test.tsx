@@ -24,6 +24,18 @@ function activity(kind: PermissionDecision['kind']): Activity {
 }
 
 describe('approval banner', () => {
+  it('offers completion confirmation without granting a write or command permission', () => {
+    const html = renderToStaticMarkup(
+      <ApprovalBanner
+        activity={activity('verification')}
+        mode="plan"
+        busy={false}
+        onDecide={vi.fn()}
+      />,
+    );
+    expect(html).toContain('완료 결과 확인');
+    expect(html).not.toContain('disabled');
+  });
   it('shows the exact URL and enables web approval in Plan', () => {
     const html = renderToStaticMarkup(
       <ApprovalBanner activity={activity('web')} mode="plan" busy={false} onDecide={vi.fn()} />,

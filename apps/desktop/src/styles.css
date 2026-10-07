@@ -2594,3 +2594,19 @@ input[type='checkbox'] {
     grid-template-columns: 1fr;
   }
 }
+.artifact-checks {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin: 12px 0;
+  padding: 10px;
+  min-width: 0;
+}
+.artifact-checks > div {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.artifact-checks input {
+  width: 100%;
+  min-width: 0;
+}
