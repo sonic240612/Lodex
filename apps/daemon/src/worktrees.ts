@@ -49,7 +49,9 @@ export class Worktrees {
   private async git(cwd: string, args: string[], signal: AbortSignal, filters: string[] = []) {
     const env: NodeJS.ProcessEnv = {
       GIT_CONFIG_NOSYSTEM: '1',
-      GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
+      // Git for Windows does not consistently accept the NUL device as a
+      // config file. Use the checked empty regular file on every platform.
+      GIT_CONFIG_GLOBAL: join(this.root, 'disabled-hooks'),
       GIT_TERMINAL_PROMPT: '0',
       GIT_OPTIONAL_LOCKS: '0',
     };
@@ -108,7 +110,7 @@ export class Worktrees {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       }
       const hookInfo = await lstat(hooks);
-      if (!hookInfo.isFile() || hookInfo.isSymbolicLink())
+      if (!hookInfo.isFile() || hookInfo.isSymbolicLink() || hookInfo.size !== 0)
         throw new AppError('WORKTREE_HOOKS', 'Git 훅 비활성 경로가 변경되었습니다.');
       const top = (await this.git(source.path, ['rev-parse', '--show-toplevel'], signal)).trim();
       if ((await realpath(top)) !== source.path)

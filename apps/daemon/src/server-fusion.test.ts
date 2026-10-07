@@ -194,7 +194,7 @@ async function setup(
       { timeout: options.realHost ? 10000 : 2000 },
     );
     const current = await store.session(session.id);
-    expect(current.run?.status, current.messages.at(-1)?.error ?? undefined).toBe(status);
+    expect(current.run?.status, JSON.stringify(current.messages.at(-1))).toBe(status);
     return current;
   };
   const decide = async (action: 'approve' | 'reject') => {
