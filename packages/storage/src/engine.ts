@@ -1205,6 +1205,8 @@ export class StorageEngine {
           session.messages.some((entry) => entry.costCalls?.some((record) => record.id === call.id))
         )
           throw new AppError('COST_RECORD', '중복 요청 기록입니다.', 409);
+        if (!unbudgeted && session.autopilot?.costUnconfirmed)
+          throw new AppError('COST_UNCONFIRMED', '공유 실행의 미확정 비용을 먼저 정산하세요.');
         if (
           !unbudgeted &&
           session.autopilot &&

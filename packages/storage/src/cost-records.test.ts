@@ -59,6 +59,25 @@ async function fixture() {
   return { store, session, call, path };
 }
 describe('durable request cost records', () => {
+  it('rejects a new shared reservation after uncertainty while allowing the existing request to settle', async () => {
+    const { store, session, call } = await fixture();
+    await store.recordModelCall(session.id, call);
+    await store.recordModelCall(session.id, { ...call, status: 'unconfirmed' });
+    await expect(
+      store.recordModelCall(session.id, { ...call, id: crypto.randomUUID() }),
+    ).rejects.toMatchObject({ code: 'COST_UNCONFIRMED' });
+    const settled = await store.recordModelCall(session.id, {
+      ...call,
+      status: 'settled',
+      actualCostUsd: 0.002,
+    });
+    expect(settled.autopilot).toMatchObject({
+      spentCostUsd: 0.002,
+      reservedCostUsd: 0,
+      costUnconfirmed: false,
+    });
+    expect(settled.messages.at(-1)?.costCalls).toHaveLength(1);
+  });
   it('upgrades a v14 database without losing a durable request or its budget', async () => {
     const { store, session, call, path } = await fixture();
     await store.recordModelCall(session.id, { ...call, generationId: 'gen-migration' });

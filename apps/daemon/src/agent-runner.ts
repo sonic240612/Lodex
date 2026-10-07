@@ -389,8 +389,22 @@ export async function runAgent(options: {
       }),
     };
   };
+  const checkSharedCost = () => {
+    if (!autopilot) return;
+    if (autopilot.costUnconfirmed)
+      throw new AppError(
+        'COST_UNCONFIRMED',
+        'OpenRouter 역할의 실제 호출 비용을 확인하지 못했습니다. 공유 실행을 중지했습니다. 비용 조회·정산 후 재개하세요.',
+      );
+    if (autopilot.spentCostUsd > autopilot.limits.costUsd + 1e-12)
+      throw new AppError(
+        'COST_BUDGET',
+        `OpenRouter 실제 비용이 설정한 $${autopilot.limits.costUsd.toFixed(2)} 한도를 초과했습니다.`,
+      );
+  };
   const reserveModelCall = async (config: ModelConfig, inputEstimateTokens: number) => {
     signal.throwIfAborted();
+    checkSharedCost();
     if (modelCount >= maxModels)
       throw new AppError('STEP_LIMIT', '부모·서브에이전트의 공유 모델 호출 예산에 도달했습니다.');
     if (
@@ -1723,6 +1737,7 @@ export async function runAgent(options: {
         });
         await save();
         if (autopilot) {
+          checkSharedCost();
           emptyRounds = 0;
           if (autopilot.status === 'completed') {
             // Remaining calls in the same model response are never executed after completion.

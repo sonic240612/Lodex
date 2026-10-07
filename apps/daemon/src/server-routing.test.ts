@@ -8,6 +8,7 @@ import {
   type AgentRoutingConfig,
   type InferenceProvider,
   type InferenceRequest,
+  type ModelDescriptor,
 } from '@lodex/contracts';
 import { Store } from '@lodex/storage';
 import { startServer } from './server';
@@ -22,6 +23,7 @@ async function setup(
   generate: InferenceProvider['generate'],
   routing: AgentRoutingConfig,
   project = false,
+  models: ModelDescriptor[] = [],
 ) {
   const dir = await mkdtemp(join(tmpdir(), 'lodex-roles-'));
   const store = await Store.open(join(dir, 'state.sqlite'), resolve('apps/daemon/dist/worker.cjs'));
@@ -31,7 +33,7 @@ async function setup(
     openrouterKey: 'fixture-key',
     providerFactory: () => ({
       generate,
-      listModels: async () => [],
+      listModels: async () => models,
       capabilities: async () => ({ tools: true, streaming: true }),
     }),
   });
@@ -77,6 +79,79 @@ async function setup(
 }
 
 describe('role routing and durable delegation', () => {
+  it('pauses a local parent when an OpenRouter child has unconfirmed cost', async () => {
+    let parents = 0,
+      children = 0;
+    const app = await setup(
+      async function* (request) {
+        if (request.config.model === 'parent') {
+          parents++;
+          yield {
+            type: 'tool_call_delta',
+            index: 0,
+            id: 'delegate-cost',
+            name: 'delegate_tasks',
+            arguments: '{"tasks":[{"task":"inspect the supplied facts"}]}',
+          };
+          yield { type: 'finished', reason: 'tool_calls' };
+        } else {
+          children++;
+          yield { type: 'usage', usage: { generationId: 'gen-child-unconfirmed' } };
+          yield { type: 'text_delta', text: 'child finding' };
+          yield { type: 'finished', reason: 'stop' };
+        }
+      },
+      {
+        subagentsEnabled: true,
+        build: { ...base, provider: 'llama-server', model: 'parent' },
+        subagent: { ...base, provider: 'openrouter', model: 'child', cloudConsent: true },
+      },
+      false,
+      [
+        {
+          id: 'child',
+          name: 'Child',
+          contextLength: 65536,
+          maxCompletionTokens: 4096,
+          defaultTemperature: null,
+          defaultTopP: null,
+          tools: true,
+          pricing: { prompt: 0, completion: 0.000001, request: 0 },
+        },
+      ],
+    );
+    expect(
+      (
+        await app.command(
+          makeCommand({
+            type: 'start_goal',
+            sessionId: app.session.id,
+            expectedVersion: app.session.version,
+            goal: 'delegate',
+            limits: {
+              modelCalls: null,
+              toolCalls: null,
+              minutes: null,
+              outputTokens: null,
+              costUsd: 1,
+            },
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    await expect
+      .poll(async () => (await app.store.session(app.session.id)).autopilot?.status)
+      .toBe('paused');
+    const result = await app.store.session(app.session.id);
+    expect(result.autopilot?.costUnconfirmed).toBe(true);
+    expect(result.messages.at(-1)?.costCalls?.[0]).toMatchObject({
+      generationId: 'gen-child-unconfirmed',
+      status: 'unconfirmed',
+    });
+    expect(result.messages.at(-1)?.continuation?.at(-1)?.role).toBe('tool');
+    expect(parents).toBe(1);
+    expect(children).toBe(1);
+  });
   it('keeps parent and child generations running beyond the former shared cap', async () => {
     let calls = 0;
     const app = await setup(
