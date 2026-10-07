@@ -396,7 +396,7 @@ export function RoutingSettings({
             );
           })}
           {hasMessages && (
-            <p>저장하면 같은 프로젝트에 새 대화를 만듭니다. 기존 대화의 설정은 유지됩니다.</p>
+            <p>대화 기록을 유지하고 다음 요청부터 변경한 역할별 모델을 사용합니다.</p>
           )}
           <datalist id="routing-openrouter-models">
             {catalog.map((model) => (
@@ -416,7 +416,7 @@ export function RoutingSettings({
             취소
           </button>
           <button className="primary-button" disabled={saving || running}>
-            {saving ? '저장 중…' : hasMessages ? '새 대화로 저장' : '저장'}
+            {saving ? '저장 중…' : '저장'}
           </button>
         </footer>
       </form>

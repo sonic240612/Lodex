@@ -12,6 +12,7 @@ import {
   type LocalProfile,
   type ContextManifest,
   engineSettingsSchema,
+  resolveModelConfig,
 } from '@lodex/contracts';
 import { Store } from './index';
 import { inspectSkillDirectory, readSkill } from '@lodex/skills';
@@ -1444,8 +1445,8 @@ describe('durable worker storage', () => {
     expect((await store.session(session.id)).run?.status).toBe('cancelled');
     expect((await store.session(session.id)).messages.at(-1)?.content).toBe('');
   });
-  it('requires a new conversation to switch an existing local history to cloud', async () => {
-    const { store } = await db();
+  it('switches an existing local history to cloud in place and persists it after restart', async () => {
+    const { store, path } = await db();
     const session = await create(store);
     const sent = await store.apply(
       makeCommand({
@@ -1460,15 +1461,122 @@ describe('durable worker storage', () => {
       runId: sent.session.run!.id,
       status: 'completed',
     });
-    await expect(
-      store.apply(
+    const config = {
+      ...session.config,
+      provider: 'openrouter' as const,
+      model: 'cloud-model',
+      cloudConsent: true,
+    };
+    const changed = (
+      await store.apply(
         makeCommand({
           type: 'configure_session',
           sessionId: session.id,
           expectedVersion: completed.version,
-          config: { ...session.config, provider: 'openrouter', cloudConsent: true },
+          config,
         }),
-      ),
-    ).rejects.toThrow('새 대화');
+      )
+    ).session;
+    expect(changed.id).toBe(session.id);
+    expect(changed.messages).toEqual(completed.messages);
+    expect(changed.plan).toEqual(completed.plan);
+    expect(changed.run).toEqual(completed.run);
+    expect(changed.config).toEqual(config);
+    expect((await store.snapshot()).sessions).toHaveLength(1);
+    await close(store);
+    const reopened = await open(path);
+    expect((await reopened.session(session.id)).config).toEqual(config);
+    expect((await reopened.session(session.id)).messages).toEqual(completed.messages);
+  });
+  it('changes the active role with the composer model without replacing other roles', async () => {
+    const { store } = await db();
+    let session = await create(store);
+    const mode = session.mode ?? 'build';
+    const other = mode === 'build' ? 'plan' : 'build';
+    const routing = {
+      subagentsEnabled: true,
+      [mode]: { ...session.config, model: 'active-before' },
+      [other]: { ...session.config, model: 'other-role' },
+      subagent: { ...session.config, model: 'child-role' },
+    };
+    session = (
+      await store.apply(
+        makeCommand({
+          type: 'configure_routing',
+          sessionId: session.id,
+          expectedVersion: session.version,
+          routing,
+        }),
+      )
+    ).session;
+    const sent = (
+      await store.apply(
+        makeCommand({
+          type: 'send_message',
+          sessionId: session.id,
+          expectedVersion: session.version,
+          content: 'Keep this history.',
+        }),
+      )
+    ).session;
+    session = await store.updateRun({
+      sessionId: session.id,
+      runId: sent.run!.id,
+      status: 'completed',
+      text: 'Earlier answer.',
+    });
+    const config = {
+      ...session.config,
+      model: 'active-after',
+      temperature: 0.2,
+      useDefaultTemperature: false,
+    };
+    const changed = (
+      await store.apply(
+        makeCommand({
+          type: 'configure_session',
+          sessionId: session.id,
+          expectedVersion: session.version,
+          config,
+        }),
+      )
+    ).session;
+    expect(resolveModelConfig(changed)).toEqual(config);
+    expect(changed.config).toEqual(config);
+    expect(changed.routing?.[other]).toEqual(routing[other]);
+    expect(changed.routing?.subagent).toEqual(routing.subagent);
+    expect(changed.routing?.subagentsEnabled).toBe(true);
+    expect(changed.messages).toEqual(session.messages);
+    expect(changed.messages.at(-1)?.inferenceConfig?.model).toBe('active-before');
+  });
+  it('rejects model and routing changes during a running response without altering history', async () => {
+    const { store } = await db();
+    let session = await create(store);
+    session = (
+      await store.apply(
+        makeCommand({
+          type: 'send_message',
+          sessionId: session.id,
+          expectedVersion: session.version,
+          content: 'running',
+        }),
+      )
+    ).session;
+    for (const command of [
+      makeCommand({
+        type: 'configure_session',
+        sessionId: session.id,
+        expectedVersion: session.version,
+        config: { ...session.config, model: 'new' },
+      }),
+      makeCommand({
+        type: 'configure_routing',
+        sessionId: session.id,
+        expectedVersion: session.version,
+        routing: { subagentsEnabled: false },
+      }),
+    ])
+      await expect(store.apply(command)).rejects.toMatchObject({ code: 'BUSY' });
+    expect(await store.session(session.id)).toEqual(session);
   });
 });

@@ -438,9 +438,7 @@ export function App() {
     }
   }
   async function applyConfig(value: ModelConfig) {
-    workspace.setConfig(value);
-    if (session?.messages.length) await createSession(value);
-    else if (session) {
+    if (session) {
       const result = await sendCommand({
         type: 'configure_session',
         sessionId: session.id,
@@ -449,11 +447,11 @@ export function App() {
       });
       workspace.upsert(result.session);
     }
+    workspace.setConfig(value);
     setSettings(false);
   }
   async function applyRouting(routing: AgentRoutingConfig) {
-    if (!session || session.messages.length)
-      await createSession(session?.config ?? workspace.config, routing);
+    if (!session) await createSession(workspace.config, routing);
     else {
       const result = await sendCommand({
         type: 'configure_routing',
@@ -466,8 +464,8 @@ export function App() {
     setRoutingSettings(false);
   }
   async function chooseLocalModel(profile: LocalProfile) {
-    const config: ModelConfig = {
-      ...workspace.config,
+    const modelConfig: ModelConfig = {
+      ...config,
       provider: 'llama-server',
       model: profile.name,
       baseUrl: 'http://127.0.0.1:8080/v1',
@@ -479,8 +477,7 @@ export function App() {
       cloudConsent: false,
       projectCloudConsent: false,
     };
-    await createSession(config, { subagentsEnabled: false });
-    workspace.setConfig(config);
+    await applyConfig(modelConfig);
     setModelManager(false);
   }
   async function applySkills(value: SkillSelectionSave) {
@@ -1308,7 +1305,12 @@ export function App() {
       )}
       {modelManager && (
         <Suspense fallback={<div role="status">모델 관리 화면을 여는 중…</div>}>
-          <ModelManager onClose={() => setModelManager(false)} onChoose={chooseLocalModel} />
+          <ModelManager
+            hasSession={!!session}
+            running={!!running}
+            onClose={() => setModelManager(false)}
+            onChoose={chooseLocalModel}
+          />
         </Suspense>
       )}
       {skillManager && (
@@ -1355,7 +1357,7 @@ export function App() {
       )}
       {settings && (
         <Settings
-          config={session?.config ?? workspace.config}
+          config={config}
           hasMessages={!!session?.messages.length}
           running={!!running}
           onClose={() => setSettings(false)}
@@ -2315,7 +2317,7 @@ function Settings({
           <div className="dialog-footer">
             <span>
               {hasMessages
-                ? '기존 대화의 설정은 유지하고 새 대화를 만듭니다.'
+                ? '대화 기록을 유지하고 다음 요청부터 선택한 모델과 설정을 사용합니다.'
                 : '이 설정은 새 대화에 적용됩니다.'}
             </span>
             <button
@@ -2323,7 +2325,7 @@ function Settings({
               className="primary-button"
               disabled={busy || running || (!nativeDesktop && draft.provider !== 'demo')}
             >
-              {busy ? '처리 중…' : hasMessages ? '새 대화로 적용' : '설정 적용'}
+              {busy ? '처리 중…' : '설정 적용'}
             </button>
           </div>
         </form>

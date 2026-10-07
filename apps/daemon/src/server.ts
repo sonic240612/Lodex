@@ -878,7 +878,7 @@ export async function startServer(options: ServerOptions) {
           )
             throw new AppError(
               'MODEL_PROFILE_CHANGED',
-              '관리 모델 설정이 바뀌었거나 삭제되었습니다. 모델 목록에서 새 대화를 만드세요.',
+              '관리 모델 설정이 바뀌었거나 삭제되었습니다. 모델 목록에서 이 대화에 사용할 모델을 다시 선택하세요.',
               409,
             );
           if (config.contextBudgetTokens > profile.settings.contextSize)

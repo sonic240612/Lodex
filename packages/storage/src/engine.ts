@@ -904,29 +904,20 @@ export class StorageEngine {
         } else {
           if (session.run?.status === 'running')
             throw new AppError('BUSY', '현재 응답이 끝나거나 중지된 뒤 변경하세요.', 409);
+          if (command.type === 'configure_routing' || command.type === 'configure_session') {
+            // Freeze the legacy replay identity before changing the fallback model.
+            for (const message of session.messages)
+              if (message.role === 'assistant' && !message.inferenceConfig)
+                message.inferenceConfig = session.config;
+          }
           if (command.type === 'configure_routing') {
-            if (
-              session.messages.length &&
-              JSON.stringify(session.routing) !== JSON.stringify(command.routing)
-            )
-              throw new AppError(
-                'NEW_SESSION_REQUIRED',
-                '역할별 모델 설정을 바꾸려면 새 대화를 만드세요.',
-                409,
-              );
             session.routing = command.routing;
           } else if (command.type === 'configure_session') {
-            // Switching providers cannot silently send a local conversation to the cloud.
-            if (
-              session.messages.length &&
-              JSON.stringify(session.config) !== JSON.stringify(command.config)
-            )
-              throw new AppError(
-                'NEW_SESSION_REQUIRED',
-                '모델과 생성 설정을 바꾸려면 새 대화를 만드세요.',
-                409,
-              );
             session.config = command.config;
+            // The composer edits its active role even when that role has an override.
+            const role = session.mode ?? 'build';
+            if (session.routing?.[role])
+              session.routing = { ...session.routing, [role]: command.config };
           } else {
             if (context && context.sourceSessionVersion !== session.version)
               throw new AppError(

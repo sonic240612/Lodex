@@ -236,12 +236,12 @@ async function previewCommand(command: Command): Promise<CommandResult> {
       session.plan = proposal.plan;
       proposal.status = 'adopted';
     } else if (command.type === 'configure_routing') {
-      if (session.messages.length)
-        throw new Error('역할별 모델 설정을 바꾸려면 새 대화를 만드세요.');
       session.routing = command.routing;
-    } else if (command.type === 'configure_session')
+    } else if (command.type === 'configure_session') {
       session.config = { ...command.config, provider: 'demo', model: 'demo' };
-    else if (command.type === 'send_message') {
+      const role = session.mode ?? 'build';
+      if (session.routing?.[role]) session.routing = { ...session.routing, [role]: session.config };
+    } else if (command.type === 'send_message') {
       const now = new Date().toISOString();
       session.title = command.content.slice(0, 60);
       session.messages.push({

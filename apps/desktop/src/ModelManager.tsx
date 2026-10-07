@@ -29,9 +29,13 @@ const blank = (): LocalProfileInput => ({
   vramReservationMb: 22528,
 });
 export function ModelManager({
+  hasSession,
+  running,
   onClose,
   onChoose,
 }: {
+  hasSession: boolean;
+  running: boolean;
   onClose: () => void;
   onChoose: (profile: LocalProfile) => Promise<void>;
 }) {
@@ -476,10 +480,10 @@ export function ModelManager({
                 </span>
                 <div className="edit-actions">
                   <button
-                    disabled={unavailable || busy || instance?.status === 'loading'}
+                    disabled={unavailable || busy || running || instance?.status === 'loading'}
                     onClick={() => void operation(() => onChoose(profile), false)}
                   >
-                    이 모델로 새 대화
+                    {hasSession ? '이 대화에 적용' : '이 모델 사용'}
                   </button>
                   <button
                     disabled={

@@ -79,6 +79,111 @@ async function setup(
 }
 
 describe('role routing and durable delegation', () => {
+  it('switches local and cloud models in one conversation, retaining tool evidence but filtering old reasoning', async () => {
+    const requests: InferenceRequest[] = [];
+    let firstRead = true;
+    const app = await setup(
+      async function* (request) {
+        requests.push(structuredClone(request));
+        if (request.config.model === 'base' && firstRead) {
+          firstRead = false;
+          yield { type: 'reasoning_delta', text: 'private previous model state' };
+          yield {
+            type: 'tool_call_delta',
+            index: 0,
+            id: 'inspect-before-switch',
+            name: 'read_file',
+            arguments: '{"path":"hello.txt"}',
+          };
+          yield { type: 'finished', reason: 'tool_calls' };
+        } else {
+          yield { type: 'text_delta', text: 'Answer from ' + request.config.model };
+          yield { type: 'usage', usage: { costUsd: 0 } };
+          yield { type: 'finished', reason: 'stop' };
+        }
+      },
+      { subagentsEnabled: false },
+      true,
+    );
+    expect((await app.send()).status).toBe(200);
+    await expect
+      .poll(async () => (await app.store.session(app.session.id)).run?.status)
+      .toBe('completed');
+    const original = await app.store.session(app.session.id);
+    expect(
+      original.messages.at(-1)?.continuation?.some((message) => message.reasoningContent),
+    ).toBe(true);
+    const cloudConfig = {
+      ...base,
+      provider: 'openrouter' as const,
+      model: 'cloud-next',
+      cloudConsent: false,
+      projectCloudConsent: true,
+    };
+    let response = await app.command(
+      makeCommand({
+        type: 'configure_session',
+        sessionId: original.id,
+        expectedVersion: original.version,
+        config: cloudConfig,
+      }),
+    );
+    expect(response.status).toBe(200);
+    response = await app.send();
+    expect(response.status).toBe(403);
+    expect((await response.json()).error.code).toBe('CLOUD_CONSENT');
+    let current = await app.store.session(original.id);
+    expect(current.messages).toEqual(original.messages);
+    response = await app.command(
+      makeCommand({
+        type: 'configure_session',
+        sessionId: current.id,
+        expectedVersion: current.version,
+        config: { ...cloudConfig, cloudConsent: true },
+      }),
+    );
+    expect(response.status).toBe(200);
+    expect((await app.send()).status).toBe(200);
+    await expect
+      .poll(async () => (await app.store.session(original.id)).run?.status)
+      .toBe('completed');
+    const cloudRequest = requests.find((request) => request.config.model === 'cloud-next')!;
+    expect(
+      cloudRequest.messages.some(
+        (message) =>
+          message.toolCallId === 'inspect-before-switch' &&
+          message.content.includes('actual project evidence'),
+      ),
+    ).toBe(true);
+    expect(cloudRequest.messages.some((message) => message.content === 'Answer from base')).toBe(
+      true,
+    );
+    expect(
+      cloudRequest.messages.every(
+        (message) => !message.reasoningContent && !message.reasoningDetails,
+      ),
+    ).toBe(true);
+    current = await app.store.session(original.id);
+    response = await app.command(
+      makeCommand({
+        type: 'configure_session',
+        sessionId: current.id,
+        expectedVersion: current.version,
+        config: { ...base, model: 'local-next' },
+      }),
+    );
+    expect(response.status).toBe(200);
+    expect((await app.send()).status).toBe(200);
+    await expect
+      .poll(async () => (await app.store.session(original.id)).run?.status)
+      .toBe('completed');
+    expect(requests.at(-1)?.config.model).toBe('local-next');
+    expect(
+      requests.at(-1)?.messages.some((message) => message.content === 'Answer from cloud-next'),
+    ).toBe(true);
+    expect((await app.store.snapshot()).sessions).toHaveLength(1);
+    expect((await app.store.session(original.id)).messages).toHaveLength(6);
+  });
   it('pauses a local parent when an OpenRouter child has unconfirmed cost', async () => {
     let parents = 0,
       children = 0;
@@ -323,7 +428,7 @@ describe('role routing and durable delegation', () => {
     expect((await cloud.store.session(cloud.session.id)).messages).toHaveLength(0);
   });
 
-  it('locks used routing and recovers running children without replaying them', async () => {
+  it('allows changing used routing after interruption without replaying recovered children', async () => {
     const app = await setup(
       async function* () {
         yield { type: 'finished', reason: 'stop' };
@@ -378,7 +483,11 @@ describe('role routing and durable delegation', () => {
         routing: { subagentsEnabled: false },
       }),
     );
-    expect(response.status).toBe(409);
-    expect((await response.json()).error.code).toBe('NEW_SESSION_REQUIRED');
+    expect(response.status).toBe(200);
+    const updated = await app.store.session(recovered.id);
+    expect(updated.routing).toEqual({ subagentsEnabled: false });
+    expect(updated.messages).toEqual(recovered.messages);
+    expect(updated.run?.status).toBe('interrupted');
+    expect((await app.store.snapshot()).sessions).toHaveLength(1);
   });
 });

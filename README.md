@@ -12,6 +12,7 @@ Desktop agent harness for local LLMs and OpenRouter.
 - Download public Hugging Face GGUF files with restart-persistent history, verify their hash and metadata, and apply VRAM-aware context, GPU, KV cache, thread, and reservation recommendations.
 - Use OpenRouter models with catalog defaults, automatic context/output limits, reported cost, and transient request retries.
 - Route Plan, Build, and subagent work to different models. Up to three isolated read-only subagents can run concurrently.
+- Switch models and generation settings in the same conversation between requests, keeping history and the saved plan.
 - Open local project folders, create Git worktrees, and keep conversations scoped to a project.
 - Read one or many project files, find them with recursive globs, and search text with optional case folding; create, move, or delete reviewed paths; apply single or multi-file edits with optional Docker validation; and undo verified text edits.
 - Run Docker commands with saved limits. Full Access enables host files, shell commands, environment variables, network access, and selected MCP calls.
