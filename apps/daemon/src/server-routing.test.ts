@@ -99,7 +99,8 @@ describe('role routing and durable delegation', () => {
       { subagentsEnabled: true, plan: { ...base, model: 'planner' } },
     );
     expect((await app.send()).status).toBe(200);
-    await expect.poll(() => calls).toBeGreaterThan(12);
+    // This asserts removal of the call cap, not 13 generations per second.
+    await expect.poll(() => calls, { timeout: 5000 }).toBeGreaterThan(12);
     const running = await app.store.session(app.session.id);
     expect(running.run?.status).toBe('running');
     expect(
