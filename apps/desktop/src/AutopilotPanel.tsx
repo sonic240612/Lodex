@@ -175,6 +175,7 @@ export function AutopilotPanel({
         <div>
           <p>기존 요청의 비용을 조회합니다. 목표·계획 실행의 예약은 정산까지 유지됩니다.</p>
           <button
+            className="secondary-button"
             disabled={!nativeDesktop || running || busy || saving}
             onClick={() => void reconcile()}
           >

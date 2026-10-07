@@ -783,6 +783,7 @@ export function McpManager({
                   설정 편집·다시 검사
                 </button>
                 <button
+                  className="danger-button"
                   disabled={busy || unavailable || running}
                   onClick={() =>
                     void operation(async () => {

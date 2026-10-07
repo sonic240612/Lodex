@@ -2100,6 +2100,7 @@ function Settings({
                     </button>
                     {configured && (
                       <button
+                        className="danger-button"
                         type="button"
                         disabled={busy || envManaged}
                         onClick={() => {

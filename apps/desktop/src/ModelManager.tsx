@@ -528,6 +528,7 @@ export function ModelManager({
                     설정 편집
                   </button>
                   <button
+                    className="danger-button"
                     disabled={
                       unavailable ||
                       busy ||

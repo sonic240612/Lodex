@@ -139,6 +139,7 @@ export function TelegramSettings({
             </button>
             {status?.configured && (
               <button
+                className="danger-button"
                 type="button"
                 disabled={
                   busy ||
@@ -253,7 +254,7 @@ export function TelegramSettings({
             <p>
               연결 계정: {status.owner.name} · {status.owner.userId}
             </p>
-            <button disabled={busy} onClick={() => void action('unpair')}>
+            <button className="danger-button" disabled={busy} onClick={() => void action('unpair')}>
               계정 연결 해제
             </button>
           </section>

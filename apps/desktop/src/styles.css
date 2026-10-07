@@ -27,7 +27,7 @@ button {
 }
 button:disabled {
   cursor: default;
-  opacity: 0.38;
+  opacity: 0.45;
 }
 button,
 input,
@@ -57,9 +57,6 @@ textarea {
 button {
   border: 0;
 }
-button:disabled:hover {
-  background: inherit;
-}
 p,
 h1,
 h2 {
@@ -68,7 +65,8 @@ h2 {
 button {
   transition:
     background 0.15s,
-    color 0.15s;
+    color 0.15s,
+    border-color 0.15s;
 }
 ::selection {
   background: #769d7960;
@@ -111,6 +109,62 @@ button {
   --danger: #ab4636;
   --shadow: #0001;
   color-scheme: light;
+}
+/* Shared action buttons. Low specificity keeps navigation, icon and picker layouts intact. */
+button:where(
+  :not([class]),
+  [class=''],
+  .secondary-button,
+  .primary-button,
+  .permission-allow,
+  .danger-button,
+  .review-reveal,
+  .save-plan,
+  .compact-context-button,
+  .edit-actions button,
+  .dialog-actions button,
+  .permission-banner button,
+  .input-action button,
+  .execution-panel button,
+  .integration-body button
+) {
+  appearance: none;
+  min-height: 36px;
+  max-width: 100%;
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+  vertical-align: middle;
+  overflow-wrap: anywhere;
+}
+button:where(
+    :not([class]),
+    [class=''],
+    .secondary-button,
+    .review-reveal,
+    .edit-actions button,
+    .dialog-actions button,
+    .permission-banner button,
+    .input-action button,
+    .execution-panel button,
+    .integration-body button
+  ):hover:not(:disabled) {
+  background: var(--surface-hover);
+  border-color: color-mix(in srgb, var(--muted) 35%, var(--border));
+}
+.danger-button {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface));
+  border-color: color-mix(in srgb, var(--danger) 30%, var(--border));
+}
+.danger-button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 18%, var(--surface-hover));
+  border-color: var(--danger);
 }
 .sidebar-closed {
   grid-template-columns: minmax(440px, 1fr) 300px;
@@ -179,7 +233,7 @@ button {
   color: var(--muted);
   flex-shrink: 0;
 }
-.icon-button:hover,
+.icon-button:hover:not(:disabled),
 .icon-button.is-active {
   background: var(--surface);
   color: var(--text);
@@ -376,20 +430,6 @@ button {
   align-items: center;
   gap: 8px;
 }
-.edit-actions button,
-.review-reveal {
-  font-size: 12px;
-  padding: 7px 12px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--surface);
-  color: var(--text);
-  cursor: pointer;
-}
-.edit-actions button:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
 .edit-actions small {
   color: var(--subtle);
 }
@@ -429,19 +469,6 @@ button {
   justify-content: flex-end;
   gap: 10px;
   margin-top: 22px;
-}
-.dialog-actions button {
-  padding: 8px 18px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
-  color: var(--text);
-  cursor: pointer;
-}
-.dialog-actions .danger-button {
-  background: #bc3f49;
-  border-color: #bc3f49;
-  color: white;
 }
 .full-access-dialog li {
   margin: 7px 0;
@@ -646,7 +673,7 @@ button {
   border-radius: 8px;
   text-align: left;
 }
-.permission-menu button:hover,
+.permission-menu button:hover:not(:disabled),
 .permission-menu button.selected {
   background: var(--surface);
 }
@@ -760,7 +787,7 @@ button {
   color: var(--muted);
   min-height: 117px;
 }
-.suggestions button:hover {
+.suggestions button:hover:not(:disabled) {
   background: var(--surface);
   border-color: #ffffff25;
 }
@@ -1014,16 +1041,7 @@ button {
   margin-top: 3px;
 }
 .permission-banner button {
-  padding: 7px 12px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--surface);
-  font-size: 13px;
   flex-shrink: 0;
-}
-.permission-banner .permission-allow {
-  background: var(--accent);
-  color: var(--bg);
 }
 .elicitation-banner {
   align-items: stretch;
@@ -1169,7 +1187,7 @@ button {
 .send-button:disabled {
   opacity: 0.3;
 }
-.send-button:hover {
+.send-button:hover:not(:disabled) {
   background: var(--accent);
 }
 .stop-button {
@@ -1280,12 +1298,6 @@ button {
   align-items: center;
   justify-content: center;
   gap: 7px;
-  min-height: 34px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  color: var(--text);
-  background: var(--surface);
-  cursor: pointer;
 }
 .context-compaction-actions {
   display: grid;
@@ -1299,7 +1311,6 @@ button {
   border-color: var(--accent);
 }
 .compact-context-button:disabled {
-  opacity: 0.45;
   cursor: not-allowed;
 }
 .context-popover small {
@@ -1378,6 +1389,8 @@ button {
 .goal-mode-switch button {
   flex: 1;
   padding: 8px 10px;
+  border: 0;
+  background: transparent;
   border-radius: 7px;
   font-size: 14px;
 }
@@ -1515,6 +1528,8 @@ button {
   outline: none;
 }
 .add-task > button {
+  min-height: 0;
+  border: 0;
   background: transparent;
   display: flex;
   padding: 2px;
@@ -1524,13 +1539,9 @@ button {
   width: 100%;
   margin-top: 13px;
   background: var(--accent-surface);
-  border: 1px solid var(--border);
   color: var(--accent);
-  border-radius: 7px;
-  padding: 8px;
-  font-size: 11px;
 }
-.save-plan:hover {
+.save-plan:hover:not(:disabled) {
   background: var(--surface-hover);
 }
 .subtle-note {
@@ -1783,12 +1794,7 @@ button {
   flex: 1;
 }
 .input-action button {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 7px;
   white-space: nowrap;
-  padding: 8px 12px;
-  font-size: 11px;
 }
 .settings-grid {
   display: grid;
@@ -1880,14 +1886,17 @@ input[type='checkbox'] {
   font-size: 11px;
   color: var(--subtle);
 }
-.primary-button {
+.primary-button,
+.permission-allow {
   background: var(--accent);
   color: var(--bg);
-  border-radius: 8px;
-  padding: 10px 17px;
+  border-color: var(--accent);
   font-weight: 600;
-  font-size: 12px;
-  white-space: nowrap;
+}
+.primary-button:hover:not(:disabled),
+.permission-allow:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 85%, var(--text));
+  border-color: color-mix(in srgb, var(--accent) 85%, var(--text));
 }
 .demo-notice {
   display: flex;
@@ -2144,12 +2153,6 @@ input[type='checkbox'] {
 .execution-panel input:not([type='checkbox']) {
   width: 100%;
   padding: 8px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-}
-.execution-panel button {
-  padding: 7px 10px;
-  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
 }
@@ -2594,15 +2597,6 @@ input[type='checkbox'] {
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 8px;
-}
-.integration-body button {
-  border-radius: 8px;
-  padding: 8px 12px;
-  background: var(--hover);
-}
-.integration-body button.primary-button {
-  background: var(--accent);
-  color: #10251a;
 }
 .integration-section {
   padding: 14px 0;

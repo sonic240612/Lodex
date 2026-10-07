@@ -67,7 +67,9 @@ export function DataManager({ onClose }: { onClose: () => void }) {
         </button>
       </div>
       <div className="settings-body">
-        {!nativeDesktop && <p className="demo-notice">백업은 데스크톱 앱에서 사용할 수 있습니다.</p>}
+        {!nativeDesktop && (
+          <p className="demo-notice">백업은 데스크톱 앱에서 사용할 수 있습니다.</p>
+        )}
         {!loaded && !error && <p role="status">백업 목록을 불러오는 중…</p>}
         <section>
           <h3>보존 정책</h3>
@@ -166,6 +168,7 @@ export function DataManager({ onClose }: { onClose: () => void }) {
                   </span>
                   <button
                     type="button"
+                    className="danger-button"
                     disabled={busy}
                     onClick={() =>
                       void operation(async () => setState(await deleteBackup(backup.name)))

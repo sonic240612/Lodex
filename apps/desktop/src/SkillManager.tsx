@@ -504,6 +504,7 @@ export function SkillManager({
                     폴더 다시 확인
                   </button>
                   <button
+                    className="danger-button"
                     type="button"
                     disabled={unavailable || busy}
                     onClick={() =>

@@ -168,6 +168,7 @@ export function McpOAuthPanel({ connected }: { connected: boolean }) {
             인증 정보 확인
           </button>
           <button
+            className="danger-button"
             disabled={!url.trim() || !clientId.trim()}
             onClick={() =>
               void operation(async () => {
