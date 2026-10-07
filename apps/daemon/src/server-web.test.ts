@@ -133,7 +133,34 @@ function webProvider(
 }
 
 describe('web tool agent integration', () => {
-  it('reviews the exact search query in Plan and resumes with source URLs after approval', async () => {
+  it('does not follow private redirects when public web requests are auto-approved', async () => {
+    const fetcher = vi.fn(
+      async () =>
+        new Response(null, { status: 302, headers: { Location: 'http://127.0.0.1/secrets' } }),
+    );
+    const app = await setup(
+      webProvider((result) => expect(result.error).toBe('WEB_URL_DENIED')),
+      fetcher,
+    );
+    const session = await app.create('auto', 'build');
+    await app.command(
+      makeCommand({
+        type: 'send_message',
+        sessionId: session.id,
+        expectedVersion: session.version,
+        content: 'Read public docs',
+      }),
+    );
+    await expect
+      .poll(async () => (await app.store.session(session.id)).run?.status)
+      .toBe('completed');
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+  it.each([
+    ['ask', 'plan'],
+    ['auto', 'plan'],
+    ['auto', 'build'],
+  ] as const)('applies %s permissions to web search in %s', async (permissionMode, mode) => {
     const fetcher = vi.fn(
       async () =>
         new Response(
@@ -151,7 +178,7 @@ describe('web tool agent integration', () => {
       ),
       fetcher,
     );
-    const session = await app.create('ask', 'plan');
+    const session = await app.create(permissionMode, mode);
     await app.command(
       makeCommand({
         type: 'send_message',
@@ -160,18 +187,30 @@ describe('web tool agent integration', () => {
         content: 'Search public documentation',
       }),
     );
-    const pending = await app.pending(session.id);
-    expect(new URL(pending.approval!.target!).searchParams.get('q')).toBe('public documentation');
-    expect(fetcher).not.toHaveBeenCalled();
-    await app.decide(session.id, pending.id, 'approve');
+    if (permissionMode === 'ask') {
+      const pending = await app.pending(session.id);
+      expect(new URL(pending.approval!.target!).searchParams.get('q')).toBe('public documentation');
+      expect(fetcher).not.toHaveBeenCalled();
+      await app.decide(session.id, pending.id, 'approve');
+    }
     await expect
       .poll(async () => (await app.store.session(session.id)).run?.status)
       .toBe('completed');
     expect(fetcher).toHaveBeenCalledOnce();
+    const final = await app.store.session(session.id);
+    expect(
+      final.messages.at(-1)?.activities?.find((activity) => activity.label === 'web_search')
+        ?.approval,
+    ).toMatchObject({
+      status: 'approved',
+      decidedBy: permissionMode === 'auto' ? 'policy' : 'user',
+      risk: 'low',
+    });
   });
   it.each([
     ['ask', 'plan', 'approve'],
     ['auto', 'build', 'approve'],
+    ['auto', 'plan', 'approve'],
     ['ask', 'build', 'reject'],
     ['full', 'plan', 'approve'],
   ] as const)(
@@ -195,7 +234,7 @@ describe('web tool agent integration', () => {
           content: 'Read https://example.com/docs',
         }),
       );
-      if (permissionMode !== 'full') {
+      if (permissionMode === 'ask') {
         const activity = await app.pending(session.id);
         expect(activity.approval).toMatchObject({
           kind: 'web',
@@ -216,50 +255,65 @@ describe('web tool agent integration', () => {
           ?.approval,
       ).toMatchObject({
         status: action === 'reject' ? 'rejected' : 'approved',
-        decidedBy: permissionMode === 'full' ? 'full_access' : 'user',
+        decidedBy:
+          permissionMode === 'full' ? 'full_access' : permissionMode === 'auto' ? 'policy' : 'user',
       });
     },
   );
 
-  it('retains a distinct approval record and pauses before a redirected URL', async () => {
-    const fetcher = vi
-      .fn(
-        async () =>
-          new Response('Redirected source', { headers: { 'Content-Type': 'text/plain' } }),
-      )
-      .mockResolvedValueOnce(
-        new Response(null, { status: 302, headers: { Location: 'https://docs.example.com/api' } }),
+  it.each(['ask', 'auto'] as const)(
+    'audits redirected URLs under %s permissions',
+    async (permissionMode) => {
+      const fetcher = vi
+        .fn(
+          async () =>
+            new Response('Redirected source', { headers: { 'Content-Type': 'text/plain' } }),
+        )
+        .mockResolvedValueOnce(
+          new Response(null, {
+            status: 302,
+            headers: { Location: 'https://docs.example.com/api' },
+          }),
+        );
+      const app = await setup(
+        webProvider((result) => expect(result.finalUrl).toBe('https://docs.example.com/api')),
+        fetcher,
       );
-    const app = await setup(
-      webProvider((result) => expect(result.finalUrl).toBe('https://docs.example.com/api')),
-      fetcher,
-    );
-    const session = await app.create('ask', 'plan');
-    await app.command(
-      makeCommand({
-        type: 'send_message',
-        sessionId: session.id,
-        expectedVersion: session.version,
-        content: 'Read docs',
-      }),
-    );
-    const first = await app.pending(session.id);
-    await app.decide(session.id, first.id, 'approve');
-    const second = await app.pending(session.id);
-    expect(second.id).not.toBe(first.id);
-    expect(second.approval?.target).toBe('https://docs.example.com/api');
-    expect(fetcher).toHaveBeenCalledTimes(1);
-    await app.decide(session.id, second.id, 'approve');
-    await vi.waitFor(async () =>
-      expect((await app.store.session(session.id)).run?.status).toBe('completed'),
-    );
-    const final = await app.store.session(session.id);
-    expect(
-      final.messages
-        .at(-1)
-        ?.activities?.filter((activity) => activity.approval?.kind === 'web')
-        .map((activity) => activity.approval?.target),
-    ).toEqual(['https://example.com/docs', 'https://docs.example.com/api']);
-    expect(fetcher).toHaveBeenCalledTimes(2);
-  });
+      const session = await app.create(permissionMode, 'plan');
+      await app.command(
+        makeCommand({
+          type: 'send_message',
+          sessionId: session.id,
+          expectedVersion: session.version,
+          content: 'Read docs',
+        }),
+      );
+      if (permissionMode === 'ask') {
+        const first = await app.pending(session.id);
+        await app.decide(session.id, first.id, 'approve');
+        const second = await app.pending(session.id);
+        expect(second.id).not.toBe(first.id);
+        expect(second.approval?.target).toBe('https://docs.example.com/api');
+        expect(fetcher).toHaveBeenCalledTimes(1);
+        await app.decide(session.id, second.id, 'approve');
+      }
+      await vi.waitFor(async () =>
+        expect((await app.store.session(session.id)).run?.status).toBe('completed'),
+      );
+      const final = await app.store.session(session.id);
+      expect(
+        final.messages
+          .at(-1)
+          ?.activities?.filter((activity) => activity.approval?.kind === 'web')
+          .map((activity) => activity.approval?.target),
+      ).toEqual(['https://example.com/docs', 'https://docs.example.com/api']);
+      expect(fetcher).toHaveBeenCalledTimes(2);
+      expect(
+        final.messages
+          .at(-1)
+          ?.activities?.filter((activity) => activity.approval?.kind === 'web')
+          .map((activity) => activity.approval?.decidedBy),
+      ).toEqual(permissionMode === 'auto' ? ['policy', 'policy'] : ['user', 'user']);
+    },
+  );
 });

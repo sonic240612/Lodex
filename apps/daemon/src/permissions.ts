@@ -185,9 +185,9 @@ export function permissionDecision(
       target: request.target,
       actor,
       mode,
-      risk: 'high',
-      reason: '이 공개 URL로 GET 요청을 보냅니다. URL 경로와 쿼리가 해당 웹사이트에 전달됩니다.',
-      action: 'prompt',
+      risk: 'low',
+      reason: '공개 웹 검색·페이지 GET 조회입니다. URL 경로와 쿼리가 해당 웹사이트에 전달됩니다.',
+      action: mode === 'auto' ? 'allow' : 'prompt',
     };
 
   const safeRead = request.readOnly && !request.destructive && !request.openWorld;

@@ -116,7 +116,7 @@ Action Fusion과 ObservationPack은 [NVIDIA SoL-Pi](https://github.com/NVlabs/So
 
 `web_search`는 API 키 없이 DuckDuckGo 공개 HTML 검색의 제목·URL·발췌를 제공합니다. 추가 확인이 나오면 우회하지 않고 오류를 표시합니다. 전체 페이지는 `web_fetch`로 읽습니다.
 
-`web_fetch`는 Plan·Build에서 사용할 수 있습니다. 승인 요청·대신 승인에서는 URL과 리디렉션마다 검토하고 전체 접근에서는 바로 실행합니다. 공개 HTTP(S) 기본 포트를 사용하며 쿠키·인증 정보·JavaScript를 전달하거나 실행하지 않습니다. 출력은 24 KiB, Eco에서는 8 KiB까지입니다. 대화형 브라우징은 별도로 등록한 MCP 도구를 사용할 수 있습니다.
+`web_fetch`는 Plan·Build에서 사용할 수 있습니다. 승인 요청에서는 URL과 리디렉션마다 검토합니다. 대신 승인·전체 접근에서는 공개 웹 검색·페이지 조회·리디렉션을 바로 실행합니다. 공개 HTTP(S) 기본 포트를 사용하며 쿠키·인증 정보·JavaScript를 전달하거나 실행하지 않습니다. 출력은 24 KiB, Eco에서는 8 KiB까지입니다. 대화형 브라우징은 별도로 등록한 MCP 도구를 사용할 수 있습니다.
 
 ## 스킬과 MCP
 

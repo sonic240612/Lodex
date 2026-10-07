@@ -115,7 +115,7 @@ Action Fusion and ObservationPack adapt [NVIDIA SoL-Pi](https://github.com/NVlab
 
 `web_search` uses public DuckDuckGo HTML search without an API key and returns titles, URLs, and snippets. Search service challenges are reported without bypassing them; full pages require `web_fetch`.
 
-`web_fetch` works in Plan and Build. Ask and Approve for me review each URL and redirect; Full Access runs directly. It uses public HTTP(S) default ports without cookies, credentials, or JavaScript. Output is capped at 24 KiB, or 8 KiB in Eco mode. Interactive browsing can use separately configured MCP tools.
+`web_fetch` works in Plan and Build. Ask reviews each URL and redirect. Approve for me and Full Access run public web searches, page reads, and redirects directly. It uses public HTTP(S) default ports without cookies, credentials, or JavaScript. Output is capped at 24 KiB, or 8 KiB in Eco mode. Interactive browsing can use separately configured MCP tools.
 
 ## Skills and MCP
 

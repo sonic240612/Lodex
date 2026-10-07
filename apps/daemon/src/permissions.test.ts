@@ -104,7 +104,7 @@ describe('permission policy', () => {
     ).toMatchObject({ action: 'allow', mode: 'full', risk: 'high' });
   });
 
-  it.each(['ask', 'auto', 'full'] as const)('reviews a public URL in %s mode', (mode) => {
+  it.each(['ask', 'auto', 'full'] as const)('applies the public web policy in %s mode', (mode) => {
     expect(
       permissionDecision(
         mode,
@@ -115,7 +115,7 @@ describe('permission policy', () => {
       kind: 'web',
       target: 'https://example.com/docs?q=api',
       actor: 'telegram',
-      action: mode === 'full' ? 'allow' : 'prompt',
+      action: mode === 'ask' ? 'prompt' : 'allow',
     });
   });
 });
