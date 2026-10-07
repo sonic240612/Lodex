@@ -958,6 +958,9 @@ describe('authenticated daemon integration', () => {
         calls++;
         expect(request.tools?.some((tool) => tool.function.name === 'complete_goal')).toBe(true);
         expect(JSON.stringify(request.messages)).toContain('Ship the fixture');
+        expect(JSON.stringify(request.messages)).not.toContain('Unrelated saved plan');
+        expect(JSON.stringify(request.messages)).toContain('Keep the public API stable.');
+        expect(request.config.model).toBe('build-fixture');
         if (calls === 1) {
           yield { type: 'text_delta', text: '먼저 상태를 확인했습니다.' };
           yield { type: 'finished', reason: 'stop' };
@@ -983,6 +986,44 @@ describe('authenticated daemon integration', () => {
             sessionId: session.id,
             expectedVersion: session.version,
             mode: 'plan',
+          }),
+        )
+        .then((response) => response.json())
+    ).session;
+    session = (
+      await app
+        .command(
+          makeCommand({
+            type: 'save_plan',
+            sessionId: session.id,
+            expectedVersion: session.version,
+            plan: {
+              ...defaultPlan(),
+              goal: 'Unrelated saved plan',
+              instructions: 'Keep the public API stable.',
+              includeInContext: true,
+            },
+          }),
+        )
+        .then((response) => response.json())
+    ).session;
+    session = (
+      await app
+        .command(
+          makeCommand({
+            type: 'configure_routing',
+            sessionId: session.id,
+            expectedVersion: session.version,
+            routing: {
+              subagentsEnabled: false,
+              plan: {
+                ...defaultModelConfig(),
+                provider: 'openrouter',
+                model: 'unused-cloud-plan',
+                cloudConsent: false,
+              },
+              build: { ...defaultModelConfig(), model: 'build-fixture' },
+            },
           }),
         )
         .then((response) => response.json())

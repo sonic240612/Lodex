@@ -1366,6 +1366,31 @@ button {
 .plan-editor {
   padding: 24px 21px 22px;
 }
+.goal-mode-switch {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  margin-bottom: 20px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.goal-mode-switch button {
+  flex: 1;
+  padding: 8px 10px;
+  border-radius: 7px;
+  font-size: 14px;
+}
+.goal-mode-switch button[aria-pressed='true'] {
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: 0 1px 4px #0002;
+}
+.plan-editor > .autopilot-panel {
+  padding: 20px 0 0;
+  margin-top: 20px;
+  font-size: 13px;
+}
 .section-label {
   font-size: 11px;
   letter-spacing: 0.65px;

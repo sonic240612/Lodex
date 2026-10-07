@@ -792,13 +792,13 @@ export async function startServer(options: ServerOptions) {
       command.type === 'resume_goal'
     ) {
       const stored = await store.session(command.sessionId);
-      const session = {
+      const modeSession = {
         ...stored,
-        config: resolveModelConfig(stored),
         ...(command.type === 'start_goal' || command.type === 'start_autopilot'
           ? { mode: 'build' as const }
           : {}),
       };
+      const session = { ...modeSession, config: resolveModelConfig(modeSession) };
       const configs = [session.config];
       const childConfig = session.routing?.subagent ?? stored.config;
       if (session.routing?.subagentsEnabled) configs.push(childConfig);
@@ -986,16 +986,37 @@ export async function startServer(options: ServerOptions) {
           ),
         );
       let content: string;
+      let contextSession = session;
       if (command.type === 'start_autopilot') {
         const autopilot = prepareAutopilot(session, command.taskIds, command.limits);
         tools.push(...verificationTools);
         content = autopilotPrompt(autopilot);
       } else if (command.type === 'start_goal') {
         const goal = prepareGoal(session, command.goal, command.limits);
+        contextSession = {
+          ...session,
+          plan: {
+            ...goal.plan,
+            instructions:
+              session.plan.includeInContext && session.plan.instructions
+                ? session.plan.instructions
+                : goal.plan.instructions,
+          },
+        };
         tools.push(goalCompletionTool);
         content = goalPrompt(goal);
       } else if (command.type === 'resume_goal') {
         const goal = resumeGoal(session);
+        contextSession = {
+          ...session,
+          plan: {
+            ...goal.plan,
+            instructions:
+              session.plan.includeInContext && session.plan.instructions
+                ? session.plan.instructions
+                : goal.plan.instructions,
+          },
+        };
         tools.push(goalCompletionTool);
         content = goalPrompt(goal);
       } else content = command.content;
@@ -1003,7 +1024,9 @@ export async function startServer(options: ServerOptions) {
         ? await observations.projectHistory(session)
         : undefined;
       context = compileContext(
-        observationPreview?.session ?? session,
+        observationPreview
+          ? { ...observationPreview.session, plan: contextSession.plan }
+          : contextSession,
         content,
         tools,
         selectedSkills.length

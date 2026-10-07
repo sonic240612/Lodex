@@ -19,6 +19,7 @@
 - URL별 승인과 출력 제한을 사용하는 `web_fetch`로 공개 HTML·텍스트·JSON 조회
 - 대화별 **승인 요청**·**대신 승인**·**전체 접근** 권한. Plan 모드는 항상 읽기 전용
 - `/goal` 목표 실행과 선행 작업·완료 기준·검증 명령·예산을 사용하는 저장 계획 실행
+- 목표만 입력해 실행하는 **Simple**, 세부 계획을 편집·실행하는 **Advanced** 목표 추진 모드
 - 알려진 사용자·프로젝트 Skills 위치 검색, Agent Skills·Codex·Claude Code·pi·OpenCode·OpenClaw·Hermes 형식과 Hermes 운영체제 제한을 반영하는 로컬 `SKILL.md` 가져오기
 - stdio·Streamable HTTP·기존 SSE MCP, 도구 선택, 리소스·프롬프트 미리보기와 첨부, Sampling·Elicitation, OAuth PKCE 로그인
 - 원격 메시지·상태·계획 조회·중지·허용된 Build 작업을 위한 Telegram 봇

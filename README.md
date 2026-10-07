@@ -19,6 +19,7 @@ Desktop agent harness for local LLMs and OpenRouter.
 - Read known public web URLs with `web_fetch`, including HTML, text, and JSON, with per-URL approval and bounded output.
 - Choose **Ask**, **Approve for me**, or **Full Access** per conversation. Plan mode remains read-only.
 - Use `/goal` for goal-driven runs, or run saved plan tasks with dependencies, completion criteria, verification commands, and budgets.
+- Choose **Simple** in the goal panel to run from a goal alone, or **Advanced** to edit and execute a detailed plan.
 - Discover documented user and project skill folders, then import local `SKILL.md` packages using Agent Skills, Codex, Claude Code, pi, OpenCode, OpenClaw, or Hermes metadata, including Hermes operating-system restrictions.
 - Connect stdio, Streamable HTTP, and legacy SSE MCP servers; select tools, preview resources and prompts, attach reviewed content, handle Sampling and Elicitation, and sign in with OAuth PKCE.
 - Pair a Telegram bot for remote messages, status, plan inspection, cancellation, and approved Build access.
