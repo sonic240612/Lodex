@@ -64,6 +64,62 @@ afterEach(async () => {
   }
 });
 describe('durable worker storage', () => {
+  it('keeps raw tool results and a running checkpoint across daemon recovery', async () => {
+    let { store, path } = await db();
+    let session = await create(store);
+    session = (
+      await store.apply(
+        makeCommand({
+          type: 'send_message',
+          sessionId: session.id,
+          expectedVersion: session.version,
+          content: 'Continue this goal.',
+        }),
+      )
+    ).session;
+    const continuation = [
+      {
+        role: 'assistant' as const,
+        content: '',
+        toolCalls: [{ id: 'read-1', name: 'read_file', arguments: '{}' }],
+      },
+      {
+        role: 'tool' as const,
+        content: 'Exact tool evidence: 한글',
+        toolCallId: 'read-1',
+        toolName: 'read_file',
+      },
+    ];
+    const checkpoint = {
+      summary: 'Completed read-1; exact evidence remains stored.',
+      throughContinuationCount: 2,
+      historyCompacted: true,
+      createdAt: new Date().toISOString(),
+      count: 1,
+      originalEstimateTokens: 5000,
+      compactedEstimateTokens: 2000,
+    };
+    await store.updateRun({
+      sessionId: session.id,
+      runId: session.run!.id,
+      continuation,
+      runContextCompaction: checkpoint,
+    });
+    await expect(
+      store.updateRun({
+        sessionId: session.id,
+        runId: session.run!.id,
+        runContextCompaction: { ...checkpoint, throughContinuationCount: 3 },
+      }),
+    ).rejects.toThrow('범위');
+    await close(store);
+    store = await open(path);
+    const restored = await store.session(session.id);
+    expect(restored.run?.status).toBe('interrupted');
+    expect(restored.messages.at(-1)?.runContextCompaction).toEqual(checkpoint);
+    expect(restored.messages.at(-1)?.continuation).toEqual(continuation);
+  });
+
   it('persists role model identity and interrupts child work after reopening without replay', async () => {
     let { store, path } = await db();
     const config = { ...defaultModelConfig(), model: 'base' };

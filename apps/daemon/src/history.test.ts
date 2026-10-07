@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Message, Session } from '@lodex/contracts';
-import { historySearchTool, searchSessionHistory } from './history';
+import { historySearchTool, readStoredToolResult, searchSessionHistory } from './history';
 
 function message(
   id: string,
@@ -108,5 +108,63 @@ describe('searchSessionHistory', () => {
     ).toThrow();
     expect(historySearchTool.function.name).toBe('search_history');
     expect(historySearchTool.function.parameters).toMatchObject({ additionalProperties: false });
+  });
+});
+
+describe('stored tool result recall', () => {
+  const fixture = (text: string, call = 'read-1'): Message => ({
+    ...message(crypto.randomUUID(), 'assistant', 'working', 'streaming'),
+    continuation: [
+      { role: 'tool', toolCallId: call, toolName: 'read_file', content: text, isError: true },
+    ],
+  });
+  it('reads exact UTF-8 pages including active and failed results without executing anything', () => {
+    const text = '한글🙂\\"\n'.repeat(1000),
+      entry = fixture(text);
+    let offset = 0,
+      restored = '';
+    for (let page = 0; page < 100; page++) {
+      const output = readStoredToolResult(
+        session([entry]),
+        JSON.stringify({ toolCallId: 'read-1', offset, maxBytes: 512 }),
+      );
+      expect(Buffer.byteLength(output)).toBeLessThanOrEqual(512);
+      const result = JSON.parse(output);
+      expect(result.isError).toBe(true);
+      restored += result.text;
+      if (result.eof) break;
+      expect(result.nextOffset).toBeGreaterThan(offset);
+      offset = result.nextOffset;
+    }
+    expect(restored).toBe(text);
+  });
+  it('lists bounded results and requires message IDs when call IDs are ambiguous', () => {
+    const entries = Array.from({ length: 20 }, (_, index) => fixture('result-' + index));
+    const list = JSON.parse(readStoredToolResult(session(entries), '{"maxBytes":512}'));
+    expect(list.eof).toBe(false);
+    expect(list.results[0].messageId).toBe(entries.at(-1)!.id);
+    expect(list.nextIndex).toBeGreaterThan(0);
+    const ambiguous = JSON.parse(readStoredToolResult(session(entries), '{"toolCallId":"read-1"}'));
+    expect(ambiguous.error).toBe('TOOL_RESULT_AMBIGUOUS');
+    const exact = JSON.parse(
+      readStoredToolResult(
+        session(entries),
+        JSON.stringify({ toolCallId: 'read-1', messageId: entries[0]!.id }),
+      ),
+    );
+    expect(exact.text).toBe('result-0');
+  });
+  it('rejects cross-conversation IDs, split UTF-8 offsets, invalid ranges and unknown arguments', () => {
+    const entries = session([fixture('한글')]);
+    expect(() => readStoredToolResult(entries, '{"toolCallId":"other"}')).toThrow('찾을 수');
+    expect(() => readStoredToolResult(entries, '{"toolCallId":"read-1","offset":1}')).toThrow(
+      'UTF-8',
+    );
+    expect(() => readStoredToolResult(entries, '{"toolCallId":"read-1","offset":99}')).toThrow(
+      '범위',
+    );
+    expect(() =>
+      readStoredToolResult(entries, '{"toolCallId":"read-1","unexpected":true}'),
+    ).toThrow();
   });
 });

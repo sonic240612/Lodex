@@ -71,7 +71,7 @@ import {
 } from '@lodex/tools';
 import { runAgent } from './agent-runner';
 import { planningTool } from './planning';
-import { historySearchTool } from './history';
+import { historySearchTool, toolResultRecallTool } from './history';
 import { goalCompletionTool, verificationTools } from './autopilot';
 import { RuntimeManager } from '@lodex/local-runtime';
 import {
@@ -946,6 +946,7 @@ export async function startServer(options: ServerOptions) {
           : [];
       tools.push(planningTool);
       tools.push(historySearchTool);
+      tools.push(toolResultRecallTool);
       tools.push(webFetchTool);
       if (
         observations &&

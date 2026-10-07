@@ -84,6 +84,7 @@ Full Access is stored per conversation. File hashes, path checks, symlink checks
 - Eco mode compacts earlier and asks the model for shorter answers.
 - In Eco mode, ObservationPack archives successful text results larger than 10 KiB. The first two model requests receive the full result; later requests use a stable handle with a 1 KiB head/tail excerpt and exact paged recall. Original session history stays intact. Archive failures keep the original result, and recall verifies its hash.
 - The agent can search persisted text from the current conversation when compaction omits an older detail; search results are bounded and never cross conversation boundaries.
+- Running tool loops also compact completed exchanges when the input budget is exceeded. The current request and instructions stay intact; saved tool results can be listed and read in exact UTF-8 pages without running the tool again.
 - With current llama.cpp servers, the context meter uses the model's applied chat template and tokenizer. Older or remote providers show the conservative estimate or provider-reported usage.
 
 ## Projects and execution

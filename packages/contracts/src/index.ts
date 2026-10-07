@@ -437,7 +437,18 @@ export interface Message {
   usage: Usage | null;
   activities?: Activity[];
   continuation?: InferenceMessage[];
+  runContextCompaction?: RunContextCompaction;
 }
+export const runContextCompactionSchema = z.strictObject({
+  summary: z.string().trim().min(1).max(8000),
+  throughContinuationCount: z.number().int().nonnegative(),
+  historyCompacted: z.boolean(),
+  createdAt: z.iso.datetime(),
+  count: z.number().int().positive(),
+  originalEstimateTokens: z.number().int().nonnegative(),
+  compactedEstimateTokens: z.number().int().nonnegative(),
+});
+export type RunContextCompaction = z.infer<typeof runContextCompactionSchema>;
 export const contextCompactionSchema = z.strictObject({
   /** Complete messages at or before this message are replaced by the checkpoint for inference. */
   throughMessageId: idSchema,
@@ -669,6 +680,10 @@ export interface ContextManifest {
     reason: ContextCompaction['reason'];
     compactedMessageCount: number;
   };
+  runCompaction?: Pick<
+    RunContextCompaction,
+    'count' | 'throughContinuationCount' | 'historyCompacted'
+  >;
 }
 export interface Session {
   routing?: AgentRoutingConfig;

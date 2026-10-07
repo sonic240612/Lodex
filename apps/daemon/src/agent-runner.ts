@@ -14,12 +14,18 @@ import {
   type ModelConfig,
   type ModelPricing,
   type Usage,
+  type RunContextCompaction,
   readyAutopilotTasks,
   activityProposal,
   defaultPermissionMode,
   runCommandSchema,
 } from '@lodex/contracts';
-import { measureRequest, type CompiledContext } from '@lodex/context';
+import {
+  compactRunningContext,
+  projectRunningContext,
+  measureRequest,
+  type CompiledContext,
+} from '@lodex/context';
 import {
   runProjectTool,
   executeCommand,
@@ -37,7 +43,7 @@ import {
 } from '@lodex/tools';
 import type { Store } from '@lodex/storage';
 import { proposePlan } from './planning';
-import { searchSessionHistory } from './history';
+import { readStoredToolResult, searchSessionHistory } from './history';
 import { autopilotVerificationRequest, completeGoal, verifyAutopilot } from './autopilot';
 import { runSkillTool } from './skills';
 import type {
@@ -237,6 +243,8 @@ export async function runAgent(options: {
   const continuation: InferenceMessage[] = [];
   const rounds: Partial<Usage>[] = [];
   const usedIds = new Set<string>();
+  let runContextCompaction: RunContextCompaction | undefined;
+  let compactionActivity: Activity | undefined;
   let content = '',
     lastSave = 0,
     toolCount = 0,
@@ -274,6 +282,7 @@ export async function runAgent(options: {
       text: content,
       activities,
       continuation,
+      ...(runContextCompaction ? { runContextCompaction } : {}),
       usage: usage(),
       ...(autopilot ? { autopilot } : {}),
       ...(terminal ? { status: terminal } : {}),
@@ -649,43 +658,115 @@ export async function runAgent(options: {
   try {
     for (;;) {
       signal.throwIfAborted();
-      const request = {
+      let request = {
         ...context.request,
         messages: options.observations
           ? await options.observations.project(
               session.id,
-              [...context.request.messages, ...continuation],
-              { enabled: session.config.eco, requestId: `${runId}:${modelCount + 1}` },
+              projectRunningContext(context.request.messages, continuation, runContextCompaction),
+              { enabled: session.config.eco, advance: false },
             )
-          : [...context.request.messages, ...continuation],
+          : projectRunningContext(context.request.messages, continuation, runContextCompaction),
       };
-      const manifest: ContextManifest = {
-        ...context.manifest,
-        ...measureRequest(request),
-        messageCount: request.messages.length,
-      };
-      const exactInputTokens = await provider.countInputTokens?.(request, signal);
-      if (typeof exactInputTokens === 'number') {
-        manifest.inputTokens = exactInputTokens;
-        manifest.tokenCountSource = 'llama_cpp_chat_template';
-        const available =
-          manifest.contextBudgetTokens -
-          manifest.outputReserveTokens -
-          manifest.safetyReserveTokens;
-        if (exactInputTokens > available)
-          throw new AppError(
-            'CONTEXT_BUDGET',
-            `실제 입력 ${exactInputTokens.toLocaleString('en-US')} + 출력 예약 ${manifest.outputReserveTokens.toLocaleString('en-US')} + 여유 ${manifest.safetyReserveTokens.toLocaleString('en-US')}가 앱 컨텍스트 예산 ${manifest.contextBudgetTokens.toLocaleString('en-US')}을 초과합니다. 컨텍스트 압축 후 다시 시도하세요.`,
+      let manifest: ContextManifest;
+      let exactInputTokens: number | null | undefined;
+      let deliveryRecorded = false;
+      for (;;) {
+        signal.throwIfAborted();
+        let overflow: AppError | undefined;
+        try {
+          manifest = {
+            ...context.manifest,
+            ...measureRequest(request),
+            messageCount: request.messages.length,
+          };
+          delete manifest.inputTokens;
+          delete manifest.tokenCountSource;
+          exactInputTokens = await provider.countInputTokens?.(request, signal);
+          if (typeof exactInputTokens === 'number') {
+            if (!Number.isSafeInteger(exactInputTokens) || exactInputTokens < 0)
+              throw new AppError(
+                'TOKEN_COUNT_INVALID',
+                '모델 서버의 입력 토큰 계산 결과가 올바르지 않습니다.',
+              );
+            manifest.inputTokens = exactInputTokens;
+            manifest.tokenCountSource = 'llama_cpp_chat_template';
+            if (
+              exactInputTokens >
+              manifest.contextBudgetTokens -
+                manifest.outputReserveTokens -
+                manifest.safetyReserveTokens
+            )
+              overflow = new AppError(
+                'CONTEXT_BUDGET',
+                '실제 입력 토큰이 컨텍스트 예산을 초과했습니다.',
+              );
+          }
+        } catch (error) {
+          if (
+            !(error instanceof AppError) ||
+            !['CONTEXT_LIMIT', 'CONTEXT_BUDGET'].includes(error.code)
+          )
+            throw error;
+          overflow = error;
+        }
+        if (!overflow && options.observations && !deliveryRecorded) {
+          const delivered = await options.observations.project(
+            session.id,
+            projectRunningContext(context.request.messages, continuation, runContextCompaction),
+            { enabled: session.config.eco, requestId: `${runId}:${modelCount + 1}` },
           );
+          deliveryRecorded = true;
+          if (JSON.stringify(delivered) !== JSON.stringify(request.messages)) {
+            // Archive/ledger errors fail open to the original result. Recheck
+            // that actual payload before reserving cost or sending the model.
+            request.messages = delivered;
+            continue;
+          }
+        }
+        if (!overflow) break;
+        const compacted = compactRunningContext({
+          request: context.request,
+          continuation,
+          ...(runContextCompaction ? { previous: runContextCompaction } : {}),
+          force: true,
+        });
+        runContextCompaction = compacted.checkpoint;
+        request = compacted.request;
+        if (!compactionActivity) {
+          compactionActivity = {
+            id: randomUUID(),
+            kind: 'tool',
+            label: '컨텍스트 자동 빠른 압축',
+            status: 'completed',
+            text: '',
+          };
+          activities.push(compactionActivity);
+        }
+        compactionActivity.text = JSON.stringify({
+          method: 'fast',
+          count: runContextCompaction.count,
+          originalEstimateTokens: runContextCompaction.originalEstimateTokens,
+          compactedEstimateTokens: runContextCompaction.compactedEstimateTokens,
+          message:
+            '현재 요청과 지침을 유지하고 완료된 교환을 요약했습니다. 원문은 저장되어 있으며 read_tool_result로 다시 읽을 수 있습니다.',
+        });
+        await save();
       }
+      if (runContextCompaction)
+        manifest!.runCompaction = {
+          count: runContextCompaction.count,
+          throughContinuationCount: runContextCompaction.throughContinuationCount,
+          historyCompacted: runContextCompaction.historyCompacted,
+        };
       const costReservation = await reserveModelCall(
         session.config,
-        exactInputTokens ?? manifest.inputEstimateTokens,
+        exactInputTokens ?? manifest!.inputEstimateTokens,
       );
       await store.updateRun({
         sessionId: session.id,
         runId,
-        context: manifest,
+        context: manifest!,
         ...(autopilot ? { autopilot } : {}),
       });
       signal.throwIfAborted();
@@ -953,6 +1034,15 @@ export async function runAgent(options: {
           }
         } else if (call.name === 'search_history') {
           result = searchSessionHistory(session, call.arguments);
+        } else if (call.name === 'read_tool_result') {
+          try {
+            result = readStoredToolResult(await store.session(session.id), call.arguments);
+          } catch (error) {
+            result = JSON.stringify({
+              error: error instanceof AppError ? error.code : 'TOOL_RESULT_INPUT',
+              message: error instanceof Error ? error.message : '도구 결과 인자를 확인하세요.',
+            });
+          }
         } else if (call.name === 'web_fetch') {
           try {
             result = await fetchWebPage({

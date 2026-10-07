@@ -80,6 +80,229 @@ afterEach(async () => {
   for (const close of cleanup.splice(0)) await close();
 });
 describe('authenticated daemon integration', () => {
+  it('honors cancellation during a tokenizer recheck after automatic compaction', async () => {
+    let generated = 0,
+      waiting = false;
+    const provider: InferenceProvider = {
+      listModels: async () => [],
+      capabilities: async () => ({ tools: true, streaming: true }),
+      countInputTokens: async (request, signal) => {
+        if (!generated) return 3000;
+        if (request.messages.some((entry) => entry.role === 'tool')) return 11000;
+        waiting = true;
+        await new Promise<void>((_resolve, reject) => {
+          signal.throwIfAborted();
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+        return 3000;
+      },
+      async *generate() {
+        generated++;
+        yield {
+          type: 'tool_call_delta',
+          index: 0,
+          id: 'before-cancel',
+          name: 'search_history',
+          arguments: '{"query":"cancel"}',
+        };
+        yield { type: 'finished', reason: 'tool_calls' };
+      },
+    };
+    const app = await setup(provider);
+    const session = await app.create({
+      provider: 'llama-server',
+      model: 'fixture',
+      contextBudgetTokens: 12000,
+      maxTokens: 2400,
+      autoMaxTokens: true,
+    });
+    expect(
+      (
+        await app.command(
+          makeCommand({
+            type: 'send_message',
+            sessionId: session.id,
+            expectedVersion: session.version,
+            content: 'Wait for cancellation.',
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    await expect.poll(() => waiting, { timeout: 5000 }).toBe(true);
+    const running = await app.store.session(session.id);
+    expect(
+      (
+        await app.command(
+          makeCommand({ type: 'cancel_run', sessionId: session.id, runId: running.run!.id }),
+        )
+      ).status,
+    ).toBe(200);
+    await expect
+      .poll(async () => (await app.store.session(session.id)).run?.status)
+      .toBe('cancelled');
+    expect(generated).toBe(1);
+    expect(
+      (await app.store.session(session.id)).messages
+        .at(-1)
+        ?.continuation?.some((entry) => entry.toolCallId === 'before-cancel'),
+    ).toBe(true);
+  });
+
+  it('continues the same run after an exact tokenizer overflow and recalls an omitted tool result', async () => {
+    let round = 0;
+    const requests: InferenceRequest[] = [];
+    const provider: InferenceProvider = {
+      listModels: async () => [],
+      capabilities: async () => ({ tools: true, streaming: true }),
+      countInputTokens: async (request) =>
+        request.messages.some(
+          (entry) => entry.role === 'tool' && entry.toolCallId === 'history-first',
+        )
+          ? 11000
+          : 3000,
+      async *generate(request) {
+        requests.push(structuredClone(request));
+        if (round === 0 || round === 1) {
+          yield {
+            type: 'tool_call_delta',
+            index: 0,
+            id: round === 0 ? 'history-first' : 'recall-history',
+            name: round === 0 ? 'search_history' : 'read_tool_result',
+            arguments: round === 0 ? '{"query":"needle"}' : '{"toolCallId":"history-first"}',
+          };
+          round++;
+          yield { type: 'finished', reason: 'tool_calls' };
+        } else {
+          const recalled = JSON.parse(request.messages.at(-1)!.content);
+          expect(JSON.parse(recalled.text).query).toBe('needle');
+          yield { type: 'text_delta', text: 'Continued using saved evidence.' };
+          yield { type: 'finished', reason: 'stop' };
+        }
+      },
+    };
+    const app = await setup(provider);
+    const session = await app.create({
+      provider: 'llama-server',
+      model: 'fixture',
+      contextBudgetTokens: 12000,
+      maxTokens: 2400,
+      autoMaxTokens: true,
+    });
+    const response = await app.command(
+      makeCommand({
+        type: 'send_message',
+        sessionId: session.id,
+        expectedVersion: session.version,
+        content: 'Keep the needle requirement and continue the task.',
+      }),
+    );
+    expect(response.status, await response.clone().text()).toBe(200);
+    const started = ((await response.json()) as CommandResult).session;
+    await expect
+      .poll(async () => (await app.store.session(session.id)).run?.status)
+      .toBe('completed');
+    const finished = await app.store.session(session.id);
+    expect(finished.run?.id).toBe(started.run?.id);
+    expect(requests).toHaveLength(3);
+    expect(
+      requests[1]!.messages.some((entry) => entry.content.includes('running context checkpoint')),
+    ).toBe(true);
+    expect(
+      requests.every((request) =>
+        request.messages.some((entry) => entry.content.includes('needle requirement')),
+      ),
+    ).toBe(true);
+    const answer = finished.messages.at(-1)!;
+    expect(answer.runContextCompaction?.count).toBe(1);
+    expect(
+      answer.continuation?.find((entry) => entry.toolCallId === 'history-first')?.content,
+    ).toContain('needle');
+    expect(
+      answer.activities?.filter((entry) => entry.label === '컨텍스트 자동 빠른 압축'),
+    ).toHaveLength(1);
+    expect(finished.run?.context?.inputTokens).toBe(3000);
+  });
+
+  it('automatically compacts a large first tool result without discarding the stored original', async () => {
+    let round = 0;
+    const requests: InferenceRequest[] = [];
+    const provider: InferenceProvider = {
+      listModels: async () => [],
+      capabilities: async () => ({ tools: true, streaming: true }),
+      async *generate(request) {
+        requests.push(structuredClone(request));
+        if (round++ === 0) {
+          yield {
+            type: 'tool_call_delta',
+            index: 0,
+            id: 'large-first',
+            name: 'read_file',
+            arguments: '{"path":"large.txt","maxLines":200}',
+          };
+          yield { type: 'finished', reason: 'tool_calls' };
+        } else {
+          expect(
+            request.messages.some((entry) => entry.content.includes('running context checkpoint')),
+          ).toBe(true);
+          yield { type: 'text_delta', text: 'Inspected saved evidence.' };
+          yield { type: 'finished', reason: 'stop' };
+        }
+      },
+    };
+    const app = await setup(provider);
+    await writeFile(
+      join(app.dir, 'large.txt'),
+      Array.from({ length: 150 }, (_, index) => `KEEP_${index} ${'x'.repeat(65)}`).join('\n'),
+    );
+    const registered = await app.request('/v1/projects', {
+      method: 'POST',
+      body: JSON.stringify({ path: app.dir }),
+    });
+    const project = (await registered.json()).project;
+    let session = await app.create(
+      {
+        provider: 'llama-server',
+        model: 'fixture',
+        contextBudgetTokens: 18000,
+        maxTokens: 3600,
+        autoMaxTokens: true,
+      },
+      project.id,
+    );
+    session = (
+      await app.store.apply(
+        makeCommand({
+          type: 'set_mode',
+          sessionId: session.id,
+          expectedVersion: session.version,
+          mode: 'plan',
+        }),
+      )
+    ).session;
+    expect(
+      (
+        await app.command(
+          makeCommand({
+            type: 'send_message',
+            sessionId: session.id,
+            expectedVersion: session.version,
+            content: 'Inspect the large file; preserve the API.',
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    await expect
+      .poll(async () => (await app.store.session(session.id)).run?.status)
+      .toBe('completed');
+    const finished = await app.store.session(session.id);
+    expect(requests).toHaveLength(2);
+    expect(finished.messages.at(-1)?.runContextCompaction).toBeDefined();
+    expect(
+      finished.messages.at(-1)?.continuation?.find((entry) => entry.toolCallId === 'large-first')
+        ?.content,
+    ).toContain('KEEP_149');
+  });
+
   it('projects large tool results twice, then exposes a recallable ObservationPack handle', async () => {
     let round = 0;
     const provider: InferenceProvider = {
@@ -942,6 +1165,7 @@ describe('authenticated daemon integration', () => {
         expect(request.tools?.map((t) => t.function.name)).toEqual([
           'propose_plan',
           'search_history',
+          'read_tool_result',
           'web_fetch',
         ]);
         if (round++ === 0) {
@@ -1669,6 +1893,7 @@ describe('authenticated daemon integration', () => {
       'search_text',
       'propose_plan',
       'search_history',
+      'read_tool_result',
       'web_fetch',
     ]);
     expect(requests[1]!.messages.at(-1)).toMatchObject({ role: 'tool', toolCallId: 'read-1' });

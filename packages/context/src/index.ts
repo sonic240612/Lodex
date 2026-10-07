@@ -13,6 +13,8 @@ import {
   type Session,
   type ToolDefinition,
 } from '@lodex/contracts';
+import { projectRunningContext } from './running';
+export { compactRunningContext, projectRunningContext } from './running';
 
 const SYSTEM = [
   'You are Lodex, a conversation and planning assistant.',
@@ -103,6 +105,10 @@ function buildCheckpoint(
         (message.role === 'user' ? 'User' : 'Assistant') +
         ': ' +
         compactLine(message.content, message.role === 'user' ? 1800 : 1400) +
+        (message.runContextCompaction
+          ? '\nEarlier running checkpoint: ' +
+            compactLine(message.runContextCompaction.summary, 1200)
+          : '') +
         ((message.continuation ?? []).some((entry) => entry.observationId)
           ? '\nStored tool evidence: ' +
             (message.continuation ?? [])
@@ -444,8 +450,9 @@ export function compileContext(
   const expand = (source: readonly Message[]): InferenceMessage[] =>
     source.flatMap((m) => {
       if (!m.continuation?.length) return [{ role: m.role, content: m.content }];
-      if (sameModelIdentity(m.inferenceConfig ?? session.config, config)) return m.continuation;
-      return m.continuation.map(
+      const projected = projectRunningContext([], m.continuation, m.runContextCompaction);
+      if (sameModelIdentity(m.inferenceConfig ?? session.config, config)) return projected;
+      return projected.map(
         ({ reasoningDetails: _details, reasoningContent: _content, ...message }) => message,
       );
     });

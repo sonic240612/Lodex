@@ -47,6 +47,8 @@ import {
   type ElicitationAction,
   type ContextCompaction,
   contextCompactionSchema,
+  runContextCompactionSchema,
+  type RunContextCompaction,
 } from '@lodex/contracts';
 
 // Additive JSON fields are defaulted on all read paths, including old SSE events.
@@ -87,6 +89,9 @@ function hydrate(session: Session): Session {
     config: modelConfigSchema.parse(session.config),
     messages: session.messages.map((message) => ({
       ...message,
+      ...(message.runContextCompaction
+        ? { runContextCompaction: runContextCompactionSchema.parse(message.runContextCompaction) }
+        : {}),
       ...(message.inferenceConfig
         ? { inferenceConfig: modelConfigSchema.parse(message.inferenceConfig) }
         : {}),
@@ -106,6 +111,7 @@ export interface RunUpdate {
   activities?: Activity[];
   continuation?: InferenceMessage[];
   context?: ContextManifest;
+  runContextCompaction?: RunContextCompaction;
 }
 export class StorageEngine {
   private db: DatabaseSync;
@@ -963,6 +969,15 @@ export class StorageEngine {
       if (update.text !== undefined) message.content = update.text;
       if (update.activities) message.activities = update.activities;
       if (update.continuation) message.continuation = update.continuation;
+      if (update.runContextCompaction) {
+        const checkpoint = runContextCompactionSchema.parse(update.runContextCompaction);
+        if (checkpoint.throughContinuationCount > (message.continuation?.length ?? 0))
+          throw new AppError(
+            'CONTEXT_CHECKPOINT',
+            '실행 컨텍스트 체크포인트 범위가 잘못되었습니다.',
+          );
+        message.runContextCompaction = checkpoint;
+      }
       if (update.context) session.run.context = update.context;
       if (update.autopilot && update.autopilot.runId === update.runId)
         session.autopilot = update.autopilot;
