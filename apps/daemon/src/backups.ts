@@ -44,9 +44,9 @@ export class Backups {
     this.operation = task.catch(() => undefined);
     return task;
   }
-  private async saveSettings() {
+  private async saveSettings(settings = this.settings) {
     const temporary = join(this.root, settingsName + '.tmp');
-    await writeFile(temporary, JSON.stringify(this.settings), { encoding: 'utf8', mode: 0o600 });
+    await writeFile(temporary, JSON.stringify(settings), { encoding: 'utf8', mode: 0o600 });
     await rename(temporary, join(this.root, settingsName));
   }
   private async records(): Promise<(BackupRecord & { path: string })[]> {
@@ -84,8 +84,9 @@ export class Backups {
   }
   configure(value: BackupSettings) {
     return this.serial(async () => {
-      this.settings = backupSettingsSchema.parse(value);
-      await this.saveSettings();
+      const next = backupSettingsSchema.parse(value);
+      await this.saveSettings(next);
+      this.settings = next;
       await this.prune();
       return this.snapshot();
     });

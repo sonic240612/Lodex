@@ -64,7 +64,7 @@ Korean and English interface, light/dark themes, Liquid Glass or classic design,
 
 Closing the window keeps Lodex in the tray. Login startup is optional. Use **Quit Lodex** to stop the daemon and background work.
 
-Create, export, preview, and restore secret-free backups. Restore adds missing records and leaves existing ones intact; imported integrations require re-enabling or review. Model files, credentials, ObservationPack raw archives, and worktree folders are not included.
+Create, export, preview, and restore backups with saved credentials excluded. Conversation content is included. Restore adds missing records and leaves existing ones intact; imported integrations require re-enabling or review. Model files, ObservationPack raw archives, and worktree folders are not included.
 
 ## Development
 

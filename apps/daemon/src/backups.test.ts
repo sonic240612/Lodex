@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Backups } from './backups';
@@ -10,6 +10,24 @@ afterEach(async () => {
 });
 
 describe('data backups', () => {
+  it('keeps the saved retention policy when a new policy cannot be written', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lodex-backups-settings-'));
+    const backups = await Backups.open(root, async () => ({ sessions: [] }));
+    cleanups.push(async () => {
+      await backups.close();
+      if (dirname(resolve(root)) !== resolve(tmpdir())) throw new Error('Unsafe fixture');
+      await rm(root, { recursive: true, force: true });
+    });
+    await expect.poll(() => backups.snapshot().then((value) => value.backups.length)).toBe(1);
+    const saved = { automatic: false, retentionCount: 5, retentionDays: 30 };
+    await backups.configure(saved);
+    // Deterministic write failure, independent of root/admin permissions.
+    await mkdir(join(root, 'settings.json.tmp'));
+    await expect(backups.configure({ ...saved, retentionCount: 1 })).rejects.toBeDefined();
+    expect((await backups.snapshot()).settings).toEqual(saved);
+    expect(JSON.parse(await readFile(join(root, 'settings.json'), 'utf8'))).toEqual(saved);
+    expect((await backups.create()).snapshot.backups).toHaveLength(2);
+  });
   it('reports automatic backup failures without exposing exception contents and clears after recovery', async () => {
     const root = await mkdtemp(join(tmpdir(), 'lodex-backup-failure-'));
     let fail = true;
