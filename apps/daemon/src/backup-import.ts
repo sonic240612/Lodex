@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { lstat, open, realpath } from 'node:fs/promises';
-import { basename, isAbsolute } from 'node:path';
+import { basename } from 'node:path';
 import { z } from 'zod';
 import {
   AppError,
@@ -98,6 +98,7 @@ const session = z.object({
   projectId: id.nullable().optional(),
   hasMcpHistory: z.boolean().optional(),
   hasSkillHistory: z.boolean().optional(),
+  hasProjectHistory: z.boolean().optional(),
   autopilot: z
     .object({
       plan: planSchema,
@@ -141,9 +142,57 @@ const labels = {
 };
 const pathKey = (path: string) => (process.platform === 'win32' ? path.toLowerCase() : path);
 
+/** Validate syntax before any filesystem access, which could authenticate a Windows share. */
+export function isLocalBackupImportPath(
+  path: string,
+  platform: NodeJS.Platform = process.platform,
+) {
+  if (!path || /[\x00-\x1f\x7f]/.test(path) || /^[\\/]{2}/.test(path)) return false;
+  if (platform !== 'win32') return path.startsWith('/');
+  // Only ordinary drive-rooted paths: reject UNC, device namespaces, drive-relative
+  // paths and alternate streams. Extended-length local paths can be selected again
+  // through the file picker, which supplies ordinary drive paths.
+  if (!/^[A-Za-z]:[\\/]/.test(path) || /[<>:"|?*]/.test(path.slice(2))) return false;
+  return !path
+    .slice(3)
+    .split(/[\\/]/)
+    .some((part) => /^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)/i.test(part.trimEnd()));
+}
+
+function requireLocalPath(path: string) {
+  if (!isLocalBackupImportPath(path))
+    throw new AppError(
+      'BACKUP_PATH',
+      '네트워크·장치 경로 대신 로컬 파일의 절대 경로를 선택하세요.',
+    );
+}
+
+function checkItemPaths(kind: Exclude<(typeof kinds)[number], 'sessions'>, raw: unknown) {
+  if (kind === 'projects') requireLocalPath(z.object({ path: z.string() }).parse(raw).path);
+  else if (kind === 'skills')
+    requireLocalPath(
+      z.object({ source: z.object({ rootPath: z.string() }) }).parse(raw).source.rootPath,
+    );
+  else if (kind === 'profiles') {
+    const paths = z
+      .object({
+        enginePath: z.string(),
+        modelPath: z.string(),
+        modelFiles: z.array(z.object({ path: z.string() })).optional(),
+      })
+      .parse(raw);
+    // Check the whole group before even inspecting its first local file.
+    for (const path of [
+      paths.enginePath,
+      paths.modelPath,
+      ...(paths.modelFiles ?? []).map((file) => file.path),
+    ])
+      requireLocalPath(path);
+  }
+}
+
 async function readDocument(path: string) {
-  if (!isAbsolute(path) || /[\0\r\n]/.test(path))
-    throw new AppError('BACKUP_PATH', '백업 파일의 절대 경로가 필요합니다.');
+  requireLocalPath(path);
   const handle = await open(path, 'r');
   try {
     const before = await handle.stat();
@@ -275,6 +324,7 @@ function restoredSession(
     mcpCloudConsent: false,
     hasMcpHistory: parsed.hasMcpHistory ?? true,
     hasSkillHistory: parsed.hasSkillHistory ?? true,
+    hasProjectHistory: parsed.hasProjectHistory ?? !!parsed.projectId,
     messages: parsed.messages.map((item) => {
       if (item.finalResponseOffset !== undefined && item.finalResponseOffset > item.content.length)
         throw new Error('Invalid offset');
@@ -361,8 +411,10 @@ async function restoredProfile(value: unknown): Promise<LocalProfile> {
     [input.enginePath, stored.engineIdentity],
     [input.modelPath, stored.modelIdentity],
   ] as const) {
-    if (!isAbsolute(path)) throw new Error('Invalid path');
-    const info = await lstat(await realpath(path));
+    requireLocalPath(path);
+    const canonical = await realpath(path);
+    requireLocalPath(canonical);
+    const info = await lstat(canonical);
     if (!info.isFile() || `${info.dev}:${info.ino}:${info.size}:${info.mtimeMs}` !== identity)
       throw new Error('Changed local model');
   }
@@ -420,6 +472,7 @@ async function prepare(
         const { id: entryId } = z.object({ id }).parse(raw);
         if (seen.has(entryId)) throw new Error('Duplicate ID');
         seen.add(entryId);
+        checkItemPaths(kind, raw);
         const existing = catalog[kind].find((entry) => entry.id === entryId);
         if (existing) {
           stats.conflicts++;
@@ -544,7 +597,7 @@ async function prepare(
   }
   if (items.some((item) => item.skipped))
     warnings.push(
-      '건너뛴 항목은 파일이 없거나 교체되었거나 형식이 호환되지 않습니다. 대화 자체는 프로젝트 연결 없이 복원될 수 있습니다.',
+      '건너뛴 항목은 로컬 경로가 아니거나 파일이 없거나 교체되었거나 형식이 호환되지 않습니다. 대화 자체는 프로젝트 연결 없이 복원될 수 있습니다.',
     );
   const integrationStats = items.find((item) => item.kind === 'integrations')!;
   const sessions = new Set([...catalog.sessionIds, ...data.sessions.map((session) => session.id)]);

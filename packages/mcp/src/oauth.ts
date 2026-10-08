@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import { AppError } from '@lodex/contracts';
-import { privateServerFetch } from '@lodex/providers';
+import { privateServerFetch, publicWebFetch, publicWebUrl } from '@lodex/providers';
 
 export interface OAuthBinding {
   resourceUrl: string;
@@ -244,10 +244,27 @@ export class McpOAuthManager {
   private assertOpen() {
     if (this.closed) fail('CLOSED', 'OAuth 연결 관리자가 종료되었습니다.');
   }
-  private async request(url: string, init: RequestInit, signal?: AbortSignal): Promise<Response> {
+  private async request(
+    url: string,
+    init: RequestInit,
+    signal?: AbortSignal,
+    discoveryOrigin?: string,
+  ): Promise<Response> {
     const target = endpoint(url);
+    const publicOnly = discoveryOrigin !== undefined && target.origin !== discoveryOrigin;
+    if (publicOnly) {
+      try {
+        publicWebUrl(target.href, { allowPort: true });
+      } catch {
+        return fail(
+          'DISCOVERY_ADDRESS',
+          '선택한 MCP 서버가 다른 로컬·사설 주소로 인증 조회를 요청했습니다. 해당 주소에는 연결하지 않았습니다.',
+        );
+      }
+    }
     const fetcher =
-      this.options.fetch ?? (target.protocol === 'http:' ? privateServerFetch : fetch);
+      this.options.fetch ??
+      (publicOnly ? publicWebFetch : target.protocol === 'http:' ? privateServerFetch : fetch);
     try {
       return await fetcher(target.href, {
         ...init,
@@ -263,8 +280,9 @@ export class McpOAuthManager {
     url: string,
     init: RequestInit = {},
     signal?: AbortSignal,
+    discoveryOrigin?: string,
   ): Promise<Record<string, unknown> | null> {
-    const response = await this.request(url, init, signal);
+    const response = await this.request(url, init, signal, discoveryOrigin);
     if (response.status === 404 && (!init.method || init.method === 'GET')) {
       await response.body?.cancel();
       return null;
@@ -340,7 +358,7 @@ export class McpOAuthManager {
           ];
       let protectedResource: Record<string, unknown> | null = null;
       for (const url of metadataUrls) {
-        protectedResource = await this.json(url, {}, signal);
+        protectedResource = await this.json(url, {}, signal, resource.origin);
         if (protectedResource) break;
       }
       if (!protectedResource || endpoint(protectedResource.resource).href !== resource.href)
@@ -362,7 +380,7 @@ export class McpOAuthManager {
       ];
       let metadata: Record<string, unknown> | null = null;
       for (const url of discovery) {
-        metadata = await this.json(url, {}, signal);
+        metadata = await this.json(url, {}, signal, resource.origin);
         if (metadata) break;
       }
       if (!metadata || metadata.issuer !== issuer)

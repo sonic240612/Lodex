@@ -25,6 +25,7 @@ import type { TelegramFormattedChunk } from './telegram-markdown';
 import { resolveSkillInvocation } from '@lodex/skills';
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
+const isAnswerInput = (text: string) => /^\/answer(?:\s|$)/.test(text.trim());
 const peerSchema = z.object({
   id: z.number().int().positive().safe(),
   is_bot: z.literal(false),
@@ -63,6 +64,7 @@ type Inbox = {
   epoch: number;
   date: number;
   text: string;
+  answerInput?: true;
   sessionId?: string | null;
   status: 'queued' | 'prepared' | 'waiting' | 'done';
   command?: Command;
@@ -144,6 +146,8 @@ export class Telegram {
   private wakePending = false;
   private task: Promise<void> | undefined;
   private operations: Promise<unknown> = Promise.resolve();
+  // Form values must never enter the durable Telegram journal, even before validation.
+  private answerInputs = new Map<number, string>();
   private constructor(private options: Options) {}
   static async open(options: Options) {
     const channel = new Telegram(options),
@@ -187,9 +191,18 @@ export class Telegram {
     };
   }
   private async save() {
+    // Also scrub legacy records on startup/reload. Lost transient inputs require resubmission.
+    for (const item of this.state.inbox)
+      if (item.answerInput || isAnswerInput(item.text)) {
+        item.answerInput = true;
+        item.text = '/answer [redacted]';
+      }
     const active = this.state.inbox.filter((item) => item.status !== 'done'),
       done = this.state.inbox.filter((item) => item.status === 'done').slice(-64);
     this.state.inbox = [...done, ...active].sort((a, b) => a.id - b.id);
+    const retainedInputs = new Set(active.map((item) => item.id));
+    for (const id of this.answerInputs.keys())
+      if (!retainedInputs.has(id)) this.answerInputs.delete(id);
     const keep = (item: Outbox) =>
       ['queued', 'sending'].includes(item.status) || !!(item.approval && !item.approval.resolved);
     this.state.outbox = [
@@ -446,6 +459,7 @@ export class Telegram {
     const abort = new AbortController();
     this.abort = abort;
     this.task = this.loop(abort.signal).catch((error) => {
+      this.answerInputs.clear();
       if (!abort.signal.aborted)
         this.error = error instanceof AppError ? error.message : 'Telegram 처리가 중단되었습니다.';
       abort.abort();
@@ -459,6 +473,7 @@ export class Telegram {
   private async stop() {
     this.abort?.abort();
     await this.task;
+    this.answerInputs.clear();
     this.abort = undefined;
     this.task = undefined;
   }
@@ -594,12 +609,15 @@ export class Telegram {
           this.enqueue('대기 중인 요청이 많습니다. 잠시 후 다시 요청하세요.');
           continue;
         }
+        const answerInput = isAnswerInput(message.text);
+        if (answerInput) this.answerInputs.set(id.data.update_id, message.text);
         this.state.inbox.push({
           id: id.data.update_id,
           epoch: this.state.epoch,
           sessionId: this.state.config.sessionId,
           date: message.date,
-          text: message.text,
+          text: answerInput ? '/answer [redacted]' : message.text,
+          ...(answerInput ? { answerInput: true as const } : {}),
           status: 'queued',
         });
       }
@@ -651,9 +669,16 @@ export class Telegram {
           throw new AppError('TELEGRAM_SCOPE', '연결한 대화가 없습니다.');
         const session = await this.options.store.session(this.state.config.sessionId);
         if (!item.command) {
+          const inputText = item.answerInput ? this.answerInputs.get(item.id) : item.text;
+          this.answerInputs.delete(item.id);
+          if (inputText === undefined)
+            throw new AppError(
+              'TELEGRAM_INPUT_REENTER',
+              'MCP 입력값은 저장하지 않습니다. 연결이 다시 시작되어 이전 입력을 복원할 수 없습니다. 대기 중인 요청을 확인하고 /answer 명령으로 다시 입력하세요.',
+            );
           if (item.date < Math.floor(Date.now() / 1000) - 300)
             throw new AppError('TELEGRAM_EXPIRED', '요청이 만료되었습니다. 다시 보내세요.');
-          const text = item.text.trim();
+          const text = inputText.trim();
           if (text === '/approve' || text === '/deny') {
             const approval = this.pendingApproval(session);
             if (!this.state.config.allowBuild && approval?.approval?.kind !== 'verification')
@@ -675,7 +700,7 @@ export class Telegram {
             await this.save();
             continue;
           }
-          if (text === '/decline' || text === '/cancel-input' || text.startsWith('/answer ')) {
+          if (text === '/decline' || text === '/cancel-input' || isAnswerInput(text)) {
             if (!this.state.config.allowBuild)
               throw new AppError(
                 'TELEGRAM_BUILD',
@@ -689,7 +714,7 @@ export class Telegram {
             let content: Record<string, string | number | boolean | string[]> | undefined;
             if (action === 'accept') {
               try {
-                const parsed: unknown = JSON.parse(text.slice('/answer '.length));
+                const parsed: unknown = JSON.parse(text.slice('/answer'.length).trim());
                 if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
                   throw new Error();
                 content = parsed as Record<string, string | number | boolean | string[]>;
@@ -704,7 +729,6 @@ export class Telegram {
               action,
               ...(content ? { content } : {}),
             });
-            if (action === 'accept') item.text = '/answer [redacted]';
             item.status = 'done';
             this.enqueue(
               action === 'accept'
@@ -992,7 +1016,14 @@ export class Telegram {
           ['STORAGE_EXIT', 'STORAGE_ERROR', 'INTEGRATION_STATE'].includes(error.code)
         )
           throw error;
-        this.enqueue(error instanceof AppError ? error.message : '요청 처리에 실패했습니다.');
+        this.enqueue(
+          item.answerInput &&
+            !(error instanceof AppError && error.code === 'TELEGRAM_INPUT_REENTER')
+            ? 'MCP 입력을 처리하지 못했습니다. 대기 중인 요청, 원격 Build 허용 설정과 입력 형식을 확인하고 /answer 명령으로 다시 입력하세요.'
+            : error instanceof AppError
+              ? error.message
+              : '요청 처리에 실패했습니다.',
+        );
         item.status = 'done';
         await this.save();
       }

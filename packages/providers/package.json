@@ -6,6 +6,7 @@
   "exports": "./src/index.ts",
   "dependencies": {
     "@lodex/contracts": "0.1.0",
+    "ipaddr.js": "2.5.0",
     "undici": "8.10.2"
   }
 }

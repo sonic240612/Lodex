@@ -37,6 +37,28 @@ afterEach(async () => {
   }
 });
 describe('project read tools', () => {
+  it.each([
+    '.npmrc',
+    '.netrc',
+    '_netrc',
+    '.git-credentials',
+    '.pypirc',
+    '.yarnrc.yml',
+    '.docker/config.json',
+    '.kube/config',
+    '.azure/accessTokens.json',
+  ])('omits credential file %s from reads, listing and search', async (name) => {
+    const { path, run } = await setup();
+    await mkdir(dirname(join(path, name)), { recursive: true });
+    await writeFile(join(path, name), 'FAKE_CREDENTIAL_TEST_VALUE');
+    await expect(run('read_file', { path: name })).resolves.toMatchObject({ error: 'PATH_DENIED' });
+    expect(JSON.stringify(await run('list_files', { path: '.' }))).not.toContain(
+      name.split('/')[0],
+    );
+    expect(
+      JSON.stringify(await run('search_text', { query: 'FAKE_CREDENTIAL_TEST_VALUE' })),
+    ).not.toContain('FAKE_CREDENTIAL_TEST_VALUE');
+  });
   it.each(['', 'same', '한글\n둘째 줄'])(
     'undoes exact bytes even for empty/repeated replacement %j',
     async (replacement) => {

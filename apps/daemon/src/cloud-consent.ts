@@ -1,22 +1,10 @@
-import { AppError, type ModelConfig, type Session } from '@lodex/contracts';
-import { isProjectReadTool } from '@lodex/tools';
+import { AppError, hasProjectMaterial, type ModelConfig, type Session } from '@lodex/contracts';
 
 /** Both chat and summarization transmit historical material, including removed selections. */
 export function validateCloudTransmission(session: Session, configs: ModelConfig[]): void {
   if (!configs.some((config) => config.provider === 'openrouter')) return;
-  const hasProjectHistory = session.messages.some((message) =>
-    message.activities?.some(
-      (activity) =>
-        activity.subagents?.length ||
-        activity.execution ||
-        activity.edit ||
-        activity.changes ||
-        isProjectReadTool(activity.label),
-    ),
-  );
   if (
-    session.projectId &&
-    (session.routing?.subagentsEnabled || hasProjectHistory) &&
+    ((session.projectId && session.routing?.subagentsEnabled) || hasProjectMaterial(session)) &&
     configs.some((config) => config.provider === 'openrouter' && !config.projectCloudConsent)
   )
     throw new AppError(

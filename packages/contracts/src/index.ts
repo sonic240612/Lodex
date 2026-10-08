@@ -1,5 +1,6 @@
 import { z } from 'zod';
 export * from './browser';
+export * from './project-history';
 export * from './automations';
 import type { SecretSource } from './integrations';
 import { taskListSchema, type TaskList } from './task-list';
@@ -801,6 +802,8 @@ export interface ContextManifest {
   >;
 }
 export interface Session {
+  /** Sticky data provenance; independent of the currently selected model or project. */
+  hasProjectHistory?: boolean;
   taskList?: TaskList;
   routing?: AgentRoutingConfig;
   mcpAttachments?: McpContextAttachment[];

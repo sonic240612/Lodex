@@ -17,6 +17,7 @@ import { OllamaProvider } from './ollama';
 export { OllamaProvider } from './ollama';
 export { decodeSse } from './sse';
 export { privateServerFetch } from './network';
+export * from './public-network';
 export { openRouterAccount } from './account';
 type Fetch = (input: string, init: RequestInit) => Promise<Response>;
 type RetryWait = (milliseconds: number, signal: AbortSignal) => Promise<void>;

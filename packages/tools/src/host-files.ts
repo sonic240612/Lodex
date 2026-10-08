@@ -1,14 +1,15 @@
 import { createHash, randomUUID } from 'node:crypto';
+import type { Stats } from 'node:fs';
 import {
   lstat,
   mkdir,
+  open,
   readFile,
   readdir,
   realpath,
   rename,
   rm,
   stat,
-  writeFile,
 } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import {
@@ -129,9 +130,11 @@ export async function runHostFileTool(
   const requested = join(parent, basename(input.path));
   let target = requested;
   let current: Buffer | null = null;
+  let original: Stats | undefined;
   try {
     const link = await lstat(requested);
     target = link.isSymbolicLink() ? await realpath(requested) : requested;
+    original = await stat(target);
     current = await readBounded(target);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
@@ -150,7 +153,20 @@ export async function runHostFileTool(
     );
   const temporary = join(dirname(target), `.lodex-${randomUUID()}.tmp`);
   try {
-    await writeFile(temporary, input.content, { encoding: 'utf8', flag: 'wx' });
+    // Keep new and in-progress secret files private regardless of the process umask.
+    const handle = await open(temporary, 'wx', 0o600);
+    try {
+      await handle.writeFile(input.content, 'utf8');
+      if (original && process.platform !== 'win32') {
+        const created = await handle.stat();
+        if (created.uid !== original.uid || created.gid !== original.gid)
+          await handle.chown(original.uid, original.gid);
+        await handle.chmod(original.mode & 0o777);
+      }
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
     const latest = await readFile(target).catch((error: NodeJS.ErrnoException) => {
       if (error.code === 'ENOENT') return null;
       throw error;
@@ -161,6 +177,22 @@ export async function runHostFileTool(
         '파일이 쓰기 직전에 변경되었습니다. 다시 읽어 주세요.',
         409,
       );
+    if (original) {
+      const metadata = await lstat(target);
+      if (
+        metadata.isSymbolicLink() ||
+        metadata.dev !== original.dev ||
+        metadata.ino !== original.ino ||
+        metadata.mode !== original.mode ||
+        metadata.uid !== original.uid ||
+        metadata.gid !== original.gid
+      )
+        throw new AppError(
+          'HOST_FILE_CONFLICT',
+          '파일 또는 접근 권한이 변경되었습니다. 다시 읽어 주세요.',
+          409,
+        );
+    }
     await rename(temporary, target);
   } finally {
     await rm(temporary, { force: true }).catch(() => undefined);

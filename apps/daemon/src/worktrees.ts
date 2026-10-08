@@ -7,6 +7,7 @@ import { AppError, type Project, type WorktreeRecord } from '@lodex/contracts';
 import { inspectProject, resolveTarget } from '@lodex/tools';
 import type { Store } from '@lodex/storage';
 import { byteHash, readWorktreeFile, MAX_WORKTREE_BYTES } from './worktree-files';
+import { resolveGitExecutable, worktreeGitArguments, worktreeGitEnvironment } from './worktree-git';
 
 const run = promisify(execFile);
 export class Worktrees {
@@ -183,6 +184,17 @@ export class Worktrees {
   private async save() {
     this.version = await this.store.saveIntegration('worktrees', this.version, this.records);
   }
+  async gitContext(cwd: string, extraEnv: NodeJS.ProcessEnv = {}) {
+    const emptyConfig = join(await this.checkedRoot(), 'disabled-hooks');
+    const info = await lstat(emptyConfig);
+    if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.size !== 0)
+      throw new AppError('WORKTREE_HOOKS', 'Git 훅 비활성 경로가 변경되었습니다.');
+    return {
+      executable: await resolveGitExecutable(cwd),
+      env: worktreeGitEnvironment(emptyConfig, extraEnv),
+      args: worktreeGitArguments(emptyConfig),
+    };
+  }
   private async git(
     cwd: string,
     args: string[],
@@ -191,17 +203,7 @@ export class Worktrees {
     extraEnv: NodeJS.ProcessEnv = {},
     encoding: 'utf8' | 'latin1' = 'utf8',
   ) {
-    const env: NodeJS.ProcessEnv = {
-      GIT_CONFIG_NOSYSTEM: '1',
-      // Git for Windows does not consistently accept the NUL device as a
-      // config file. Use the checked empty regular file on every platform.
-      GIT_CONFIG_GLOBAL: join(this.root, 'disabled-hooks'),
-      GIT_TERMINAL_PROMPT: '0',
-      GIT_OPTIONAL_LOCKS: '0',
-      ...extraEnv,
-    };
-    for (const key of ['PATH', 'Path', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP'])
-      if (process.env[key]) env[key] = process.env[key];
+    const context = await this.gitContext(cwd, extraEnv);
     if (args[0] !== 'config' && filters.length === 0) {
       const keys = (
         await this.git(cwd, ['config', '--name-only', '--get-regexp', '^filter[.]'], signal)
@@ -220,32 +222,15 @@ export class Worktrees {
     }
     try {
       return (
-        await run(
-          'git',
-          [
-            '-c',
-            'core.hooksPath=' + join(this.root, 'disabled-hooks'),
-            '-c',
-            'core.fsmonitor=false',
-            '-c',
-            'core.autocrlf=false',
-            '-c',
-            'core.symlinks=false',
-            '-c',
-            'core.sparseCheckout=false',
-            ...filters,
-            ...args,
-          ],
-          {
-            cwd,
-            env,
-            signal,
-            timeout: 60000,
-            maxBuffer: encoding === 'latin1' ? MAX_WORKTREE_BYTES + 1 : 4 * 1024 * 1024,
-            windowsHide: true,
-            encoding,
-          },
-        )
+        await run(context.executable, [...context.args, ...filters, ...args], {
+          cwd,
+          env: context.env,
+          signal,
+          timeout: 60000,
+          maxBuffer: encoding === 'latin1' ? MAX_WORKTREE_BYTES + 1 : 4 * 1024 * 1024,
+          windowsHide: true,
+          encoding,
+        })
       ).stdout;
     } catch (error) {
       if (signal.aborted) throw signal.reason;

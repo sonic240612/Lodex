@@ -5,6 +5,7 @@ import type { McpRegistration } from '@lodex/mcp';
 import type { BackupImportData, BackupImportCatalog } from './backup-import';
 import {
   AppError,
+  hasProjectMaterial,
   emptyUsage,
   defaultPlan,
   taskListSchema,
@@ -145,6 +146,7 @@ function hydrate(session: Session): Session {
   return {
     ...stored,
     permissionMode,
+    hasProjectHistory: hasProjectMaterial(session),
     ...(session.contextCompaction
       ? { contextCompaction: contextCompactionSchema.parse(session.contextCompaction) }
       : {}),
@@ -1236,6 +1238,7 @@ export class StorageEngine {
             if (context?.skillCatalog?.includedIds.length) session.hasSkillHistory = true;
             if (context?.mcpTools?.length) session.hasMcpHistory = true;
             if (context?.mcpAttachmentIds?.length) session.hasMcpHistory = true;
+            if (context?.projectInstructions?.length) session.hasProjectHistory = true;
             const messageId = randomUUID();
             const runId = randomUUID();
             if (command.type === 'send_message' && command.mode) {
@@ -1346,6 +1349,7 @@ export class StorageEngine {
         message.runContextCompaction = checkpoint;
       }
       if (update.context) session.run.context = update.context;
+      if (hasProjectMaterial(session)) session.hasProjectHistory = true;
       if (update.autopilot && update.autopilot.runId === update.runId) {
         const previous = session.autopilot;
         session.autopilot = {

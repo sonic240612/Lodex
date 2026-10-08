@@ -56,7 +56,22 @@ const ignored = new Set([
 ]);
 const blocked = (name: string) =>
   ignored.has(name.toLowerCase()) ||
-  ['secrets.json', 'credentials.json'].includes(name.toLowerCase()) ||
+  [
+    'secrets.json',
+    'credentials.json',
+    '.npmrc',
+    '.yarnrc',
+    '.yarnrc.yml',
+    '.netrc',
+    '_netrc',
+    '.git-credentials',
+    '.pypirc',
+    '.dockercfg',
+    '.docker',
+    '.kube',
+    '.azure',
+    'application_default_credentials.json',
+  ].includes(name.toLowerCase()) ||
   /^\.env(?:\.|$)|^\.lodex-edit-|\.(?:pem|key|p12|pfx)$/i.test(name);
 const dotenvName = (name: string) => /^\.env(?:\.|$)/i.test(name);
 const pathSchema = z.string().min(1).max(4096).default('.');

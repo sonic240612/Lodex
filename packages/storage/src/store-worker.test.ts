@@ -14,6 +14,7 @@ import {
   engineSettingsSchema,
   resolveModelConfig,
 } from '@lodex/contracts';
+import { compileContext } from '@lodex/context';
 import { Store } from './index';
 import { inspectSkillDirectory, readSkill } from '@lodex/skills';
 import {
@@ -65,6 +66,137 @@ afterEach(async () => {
   }
 });
 describe('durable worker storage', () => {
+  it('retains project provenance after LSP details are summarized, the model changes and storage restarts', async () => {
+    const { store, path } = await db();
+    let session = await create(store);
+    session = (
+      await store.apply(
+        makeCommand({
+          type: 'send_message',
+          sessionId: session.id,
+          expectedVersion: session.version,
+          mode: 'plan',
+          content: 'Inspect fixture source.',
+        }),
+      )
+    ).session;
+    session = await store.updateRun({
+      sessionId: session.id,
+      runId: session.run!.id,
+      continuation: [
+        {
+          role: 'assistant',
+          content: '',
+          toolCalls: [{ id: 'hover', name: 'lsp_hover', arguments: '{}' }],
+        },
+        {
+          role: 'tool',
+          toolCallId: 'hover',
+          toolName: 'lsp_hover',
+          content: 'Fixture project source.',
+        },
+      ],
+    });
+    expect(session.hasProjectHistory).toBe(true);
+    session = await store.updateRun({
+      sessionId: session.id,
+      runId: session.run!.id,
+      continuation: [],
+      activities: [],
+      text: 'Summary derived from fixture source.',
+      status: 'completed',
+    });
+    const complete = session.messages.filter((message) => message.status === 'complete');
+    session = (
+      await store.apply(
+        makeCommand({
+          type: 'quick_compact_context',
+          sessionId: session.id,
+          expectedVersion: session.version,
+        }),
+        undefined,
+        undefined,
+        {
+          throughMessageId: complete.at(-1)!.id,
+          summary: 'Fixture source summary.',
+          createdAt: new Date().toISOString(),
+          reason: 'manual',
+          compactedMessageCount: complete.length,
+          originalEstimateTokens: 1200,
+          compactedEstimateTokens: 200,
+        },
+      )
+    ).session;
+    session = (
+      await store.apply(
+        makeCommand({
+          type: 'configure_session',
+          sessionId: session.id,
+          expectedVersion: session.version,
+          config: {
+            ...defaultModelConfig(),
+            provider: 'openrouter',
+            model: 'fixture-cloud',
+            cloudConsent: true,
+          },
+        }),
+      )
+    ).session;
+    expect(session.projectId).toBeNull();
+    expect(session.messages.flatMap((message) => message.continuation ?? [])).toEqual([]);
+    await close(store);
+    const reopened = await open(path);
+    const restored = await reopened.session(session.id);
+    expect(restored.hasProjectHistory).toBe(true);
+    expect(restored.config.provider).toBe('openrouter');
+    expect(restored.contextCompaction?.summary).toBe('Fixture source summary.');
+  });
+
+  it('retains project instruction provenance when later runs no longer include the project catalog', async () => {
+    const { store, path } = await db();
+    let session = await create(store);
+    const context = compileContext(session, 'Read instructions.').manifest;
+    context.projectInstructions = [{ path: 'AGENTS.md', scope: '.', sha256: 'a'.repeat(64) }];
+    session = (
+      await store.apply(
+        makeCommand({
+          type: 'send_message',
+          sessionId: session.id,
+          expectedVersion: session.version,
+          content: 'Read instructions.',
+        }),
+        context,
+      )
+    ).session;
+    expect(session.hasProjectHistory).toBe(true);
+    session = await store.updateRun({
+      sessionId: session.id,
+      runId: session.run!.id,
+      status: 'completed',
+      text: 'Instructions reviewed.',
+    });
+    session = (
+      await store.apply(
+        makeCommand({
+          type: 'send_message',
+          sessionId: session.id,
+          expectedVersion: session.version,
+          content: 'Continue without project tools.',
+        }),
+      )
+    ).session;
+    session = await store.updateRun({
+      sessionId: session.id,
+      runId: session.run!.id,
+      status: 'completed',
+      text: 'Continued.',
+    });
+    expect(session.run?.context).toBeUndefined();
+    await close(store);
+    const reopened = await open(path);
+    expect((await reopened.session(session.id)).hasProjectHistory).toBe(true);
+  });
+
   it('changes mode atomically with a request and keeps a running Plan read-only', async () => {
     const { store } = await db();
     let session = await create(store);
@@ -1294,6 +1426,7 @@ describe('durable worker storage', () => {
             delete session.skills;
             delete session.skillCloudConsent;
             delete session.hasSkillHistory;
+            delete session.hasProjectHistory;
             delete session.permissionMode;
             session.autoApprove = true;
             db.prepare('UPDATE ' + table + ' SET ' + column + '=? WHERE ' + column + '=?').run(JSON.stringify(value), row.body);
@@ -1322,8 +1455,60 @@ describe('durable worker storage', () => {
       expect(session.skills).toEqual([]);
       expect(session.skillCloudConsent).toBe(false);
       expect(session.hasSkillHistory).toBe(false);
+      expect(session.hasProjectHistory).toBe(false);
       expect(session.permissionMode).toBe('auto');
       expect(session.autoApprove).toBeUndefined();
+    }
+  });
+  it('recovers project provenance from legacy LSP transcripts on every stored read path', async () => {
+    const { store, path } = await db();
+    const original = makeCommand({
+      type: 'create_session',
+      sessionId: crypto.randomUUID(),
+      title: 'legacy LSP fixture',
+      config: defaultModelConfig(),
+    });
+    await store.apply(original);
+    await close(store);
+    await new Promise<void>((resolve, reject) => {
+      const worker = new Worker(
+        `
+        const { DatabaseSync } = require('node:sqlite');
+        const { workerData } = require('node:worker_threads');
+        const db = new DatabaseSync(workerData);
+        for (const [table, column] of [['sessions','document'],['events','document'],['commands','result']]) {
+          for (const row of db.prepare('SELECT ' + column + ' AS body FROM ' + table).all()) {
+            const value = JSON.parse(row.body);
+            const session = table === 'sessions' ? value : value.session;
+            delete session.hasProjectHistory;
+            session.projectId = null;
+            session.messages = [{
+              id: 'fixture-message', role: 'assistant', content: 'Legacy local research.',
+              createdAt: session.createdAt, status: 'complete', error: null, usage: null,
+              continuation: [{ role: 'tool', toolName: 'lsp_diagnostics', toolCallId: 'fixture-call', content: 'Fixture source excerpt.' }],
+            }];
+            db.prepare('UPDATE ' + table + ' SET ' + column + '=? WHERE ' + column + '=?').run(JSON.stringify(value), row.body);
+          }
+        }
+        db.close();
+      `,
+        { eval: true, workerData: path },
+      );
+      worker.once('error', reject);
+      worker.once('exit', (code) =>
+        code === 0 ? resolve() : reject(new Error('Fixture worker failed')),
+      );
+    });
+    const reopened = await open(path);
+    const sources = [
+      await reopened.session(original.sessionId),
+      (await reopened.snapshot()).sessions[0]!,
+      (await reopened.events(0)).filter((event) => event.type === 'session_changed')[0]!.session,
+      (await reopened.receipt(original))!.session,
+    ];
+    for (const session of sources) {
+      expect(session.projectId).toBeNull();
+      expect(session.hasProjectHistory).toBe(true);
     }
   });
   it('persists the selected permission mode across restart', async () => {

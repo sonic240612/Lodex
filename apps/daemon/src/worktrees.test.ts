@@ -1,12 +1,13 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm, unlink } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Store } from '@lodex/storage';
 import { inspectProject } from '@lodex/tools';
 import { Worktrees } from './worktrees';
+import { resolveGitExecutable } from './worktree-git';
 const exec = promisify(execFile),
   cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -24,9 +25,10 @@ async function setup(git = true) {
     if (dirname(resolve(dir)) !== resolve(tmpdir())) throw new Error('Unsafe fixture');
     await rm(dir, { recursive: true, force: true });
   });
+  const executable = await resolveGitExecutable(repo);
   const run = (...args: string[]) =>
     exec(
-      'git',
+      executable,
       ['-c', 'core.hooksPath=' + join(dir, 'no-hooks'), '-c', 'core.autocrlf=false', ...args],
       { cwd: repo, windowsHide: true },
     );
@@ -48,6 +50,36 @@ async function setup(git = true) {
   return { dir, repo, store, manager, project, run };
 }
 describe('isolated worktree projects', () => {
+  it('ignores inert git executables in the source project and denies implicit transports', async () => {
+    const app = await setup();
+    await writeFile(join(app.repo, 'git.exe'), 'Not an executable: never select project files.');
+    await writeFile(join(app.repo, 'git'), 'Not an executable: never select project files.');
+    const result = await app.manager.create(app.project, new AbortController().signal);
+    const context = await app.manager.gitContext(app.repo);
+    expect(context.executable).not.toBe(join(app.repo, 'git.exe'));
+    expect(context.executable).not.toBe(join(app.repo, 'git'));
+    expect(context.env).toMatchObject({ GIT_NO_LAZY_FETCH: '1', GIT_ALLOW_PROTOCOL: '' });
+    expect(result.record.status).toBe('ready');
+    expect(await readFile(join(result.project.path, 'file.txt'), 'utf8')).toBe('committed\n');
+  });
+  it('fails missing promisor blob reads locally instead of fetching from a local fixture remote', async () => {
+    const app = await setup();
+    await app.manager.create(app.project, new AbortController().signal);
+    // A filesystem-only bare repository is the safe transport fixture: no server,
+    // network URL, remote helper script or credential is involved.
+    const remote = join(app.dir, 'fixture-remote.git');
+    await app.run('clone', '--bare', '--no-hardlinks', app.repo, remote);
+    await app.run('config', 'remote.fixture.url', remote);
+    await app.run('config', 'remote.fixture.promisor', 'true');
+    const blob = (await app.run('rev-parse', 'HEAD:file.txt')).stdout.trim();
+    expect(blob).toMatch(/^[a-f0-9]{40,64}$/);
+    const object = join(app.repo, '.git', 'objects', blob.slice(0, 2), blob.slice(2));
+    await unlink(object);
+    await expect(
+      app.manager.readBlob(app.repo, blob, new AbortController().signal),
+    ).rejects.toMatchObject({ code: 'WORKTREE_GIT' });
+    await expect(readFile(object)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
   it('starts from committed HEAD and preserves original dirty and untracked files', async () => {
     const app = await setup();
     await writeFile(join(app.repo, 'file.txt'), 'user edits\n');

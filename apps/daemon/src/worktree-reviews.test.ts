@@ -18,6 +18,7 @@ import { Store } from '@lodex/storage';
 import { inspectProject } from '@lodex/tools';
 import { Worktrees } from './worktrees';
 import { WorktreeReviews } from './worktree-reviews';
+import { resolveGitExecutable } from './worktree-git';
 const run = promisify(execFile),
   close: (() => Promise<void>)[] = [],
   signal = () => new AbortController().signal;
@@ -36,9 +37,10 @@ async function setup() {
     if (dirname(resolve(dir)) !== resolve(tmpdir())) throw Error('unsafe');
     await rm(dir, { recursive: true, force: true });
   });
+  const executable = await resolveGitExecutable(repo);
   const git = (...args: string[]) =>
     run(
-      'git',
+      executable,
       ['-c', 'core.hooksPath=' + join(dir, 'none'), '-c', 'core.autocrlf=false', ...args],
       { cwd: repo, windowsHide: true },
     );
@@ -61,6 +63,21 @@ async function setup() {
     reviews = new WorktreeReviews(store, worktrees);
   return { dir, repo, source, child, store, worktrees, reviews, git };
 }
+it('uses the installed Git for three-way merges when a worktree contains inert git files', async () => {
+  const app = await setup();
+  await writeFile(join(app.repo, 'file.txt'), 'ONE\ntwo\nthree\nfour\nfive\nsix\n');
+  await writeFile(join(app.child.project.path, 'file.txt'), 'one\ntwo\nthree\nfour\nfive\nSIX\n');
+  for (const name of ['git.exe', 'git'])
+    await writeFile(
+      join(app.child.project.path, name),
+      'Not an executable: never select project files.',
+    );
+  const preview = await app.reviews.preview(app.child.record.id, signal(), { paths: ['file.txt'] });
+  expect(preview.files[0]).toMatchObject({
+    conflict: false,
+    merged: 'ONE\ntwo\nthree\nfour\nfive\nSIX\n',
+  });
+});
 it('three-way merges disjoint user edits, creates/deletes files, and leaves the source index untouched', async () => {
   const app = await setup();
   await writeFile(join(app.repo, 'file.txt'), 'ONE\ntwo\nthree\nfour\nfive\nsix\n');

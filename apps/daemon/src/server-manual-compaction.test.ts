@@ -36,7 +36,7 @@ afterEach(async () => {
 async function fixture(
   options: {
     config?: Partial<ModelConfig>;
-    consentHistory?: 'project' | 'skill' | 'mcp';
+    consentHistory?: 'project' | 'skill' | 'mcp' | 'lsp';
     provider?: InferenceProvider;
     key?: boolean;
   } = {},
@@ -136,6 +136,23 @@ async function fixture(
             ],
           }
         : {}),
+      ...(options.consentHistory === 'lsp'
+        ? {
+            continuation: [
+              {
+                role: 'assistant' as const,
+                content: '',
+                toolCalls: [{ id: `hover-${i}`, name: 'lsp_hover', arguments: '{}' }],
+              },
+              {
+                role: 'tool' as const,
+                toolCallId: `hover-${i}`,
+                toolName: 'lsp_hover',
+                content: 'Fixture private project source.',
+              },
+            ],
+          }
+        : {}),
     });
   }
   return {
@@ -204,6 +221,7 @@ describe('manual LLM compaction boundaries and billing', () => {
     { config: { cloudConsent: false }, code: 'CLOUD_CONSENT' },
     { key: false, code: 'KEY_REQUIRED' },
     { consentHistory: 'project' as const, code: 'PROJECT_CLOUD_CONSENT' },
+    { consentHistory: 'lsp' as const, code: 'PROJECT_CLOUD_CONSENT' },
     { consentHistory: 'skill' as const, code: 'SKILL_CLOUD_CONSENT' },
     { consentHistory: 'mcp' as const, code: 'MCP_CLOUD_CONSENT' },
   ])('blocks $code before generation or any billing reservation', async ({ code, ...options }) => {

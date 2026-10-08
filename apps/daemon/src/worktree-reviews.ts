@@ -91,17 +91,20 @@ async function mergeText(
   theirs: string,
   folder: string,
   signal: AbortSignal,
+  worktrees: Worktrees,
 ) {
   const names = [0, 1, 2].map((index) => join(folder, `.lodex-merge-${randomUUID()}-${index}.tmp`));
   try {
     for (const [index, value] of [current, base, theirs].entries())
       await writeFile(names[index]!, value, { flag: 'wx', mode: 0o600 });
+    const context = await worktrees.gitContext(folder);
     try {
       return {
         merged: (
           await run(
-            'git',
+            context.executable,
             [
+              ...context.args,
               'merge-file',
               '--diff3',
               '-p',
@@ -115,6 +118,7 @@ async function mergeText(
             ],
             {
               cwd: folder,
+              env: context.env,
               signal,
               windowsHide: true,
               maxBuffer: MAX_WORKTREE_TEXT * 4,
@@ -263,7 +267,14 @@ export class WorktreeReviews {
       if (!binary && beforeHash !== baseHash) {
         if (theirsHash === baseHash) merged = before ?? null;
         else if (before !== null && theirs !== null && base !== null) {
-          const result = await mergeText(before!, base!, theirs!, child.path, signal);
+          const result = await mergeText(
+            before!,
+            base!,
+            theirs!,
+            child.path,
+            signal,
+            this.worktrees,
+          );
           merged = result.merged;
           conflict = result.conflict;
         } else conflict = true;

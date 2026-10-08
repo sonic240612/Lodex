@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
+  AppError,
   defaultModelConfig,
   makeCommand,
   commandSchema,
@@ -223,6 +224,65 @@ async function fixture(
       manager = await Telegram.open(options());
     },
   };
+}
+
+async function elicitationFixture() {
+  const app = await fixture();
+  await app.pair();
+  await app.manager.configure({
+    enabled: true,
+    sessionId: app.session.id,
+    allowBuild: true,
+    transmissionConsent: true,
+  });
+  const session = await app.store.session(app.session.id);
+  const sent = await app.store.apply(
+    makeCommand({
+      type: 'send_message',
+      sessionId: session.id,
+      expectedVersion: session.version,
+      content: '입력 테스트',
+    }),
+  );
+  const activityId = crypto.randomUUID();
+  await app.store.updateRun({
+    sessionId: session.id,
+    runId: sent.session.run!.id,
+    activities: [
+      {
+        id: activityId,
+        kind: 'tool',
+        label: 'MCP 사용자 입력',
+        status: 'running',
+        text: '',
+        elicitation: {
+          source: 'fixture',
+          mode: 'form',
+          message: '프로젝트 이름을 입력하세요.',
+          status: 'pending',
+          requestedAt: new Date().toISOString(),
+          fields: [{ name: 'name', type: 'string', title: '이름', required: true }],
+        },
+      },
+    ],
+  });
+  app.manager.wake();
+  await expect
+    .poll(() =>
+      app.bot.sent.some((message) => message.text.includes('MCP 사용자 입력이 필요합니다.')),
+    )
+    .toBe(true);
+  return { app, session, activityId };
+}
+
+function captureTelegramWrites(app: Awaited<ReturnType<typeof fixture>>) {
+  const writes: string[] = [];
+  const save = app.store.saveIntegration.bind(app.store);
+  vi.spyOn(app.store, 'saveIntegration').mockImplementation((name, version, document) => {
+    if (name === 'telegram') writes.push(JSON.stringify(document));
+    return save(name, version, document);
+  });
+  return writes;
 }
 
 async function approvalButtonFixture(
@@ -1109,51 +1169,8 @@ describe('durable Telegram channel', () => {
   });
 
   it('notifies and submits MCP elicitation JSON without persisting answer values', async () => {
-    const app = await fixture();
-    await app.pair();
-    await app.manager.configure({
-      enabled: true,
-      sessionId: app.session.id,
-      allowBuild: true,
-      transmissionConsent: true,
-    });
-    const session = await app.store.session(app.session.id);
-    const sent = await app.store.apply(
-      makeCommand({
-        type: 'send_message',
-        sessionId: session.id,
-        expectedVersion: session.version,
-        content: '입력 테스트',
-      }),
-    );
-    const activityId = crypto.randomUUID();
-    await app.store.updateRun({
-      sessionId: session.id,
-      runId: sent.session.run!.id,
-      activities: [
-        {
-          id: activityId,
-          kind: 'tool',
-          label: 'MCP 사용자 입력',
-          status: 'running',
-          text: '',
-          elicitation: {
-            source: 'fixture',
-            mode: 'form',
-            message: '프로젝트 이름을 입력하세요.',
-            status: 'pending',
-            requestedAt: new Date().toISOString(),
-            fields: [{ name: 'name', type: 'string', title: '이름', required: true }],
-          },
-        },
-      ],
-    });
-    app.manager.wake();
-    await expect
-      .poll(() =>
-        app.bot.sent.some((message) => message.text.includes('MCP 사용자 입력이 필요합니다.')),
-      )
-      .toBe(true);
+    const { app, session, activityId } = await elicitationFixture();
+    const writes = captureTelegramWrites(app);
     app.bot.push([update(2, '/answer {"name":"private fixture"}')]);
     await expect.poll(() => app.decideElicitation.mock.calls.length).toBe(1);
     expect(app.decideElicitation.mock.calls[0]![0]).toMatchObject({
@@ -1167,6 +1184,127 @@ describe('durable Telegram channel', () => {
       .poll(async () => JSON.stringify((await app.store.integration('telegram'))?.document))
       .not.toContain('private fixture');
     expect(recorded.messages.at(-1)?.activities?.[0]?.elicitation?.status).toBe('accepted');
+    expect(writes.length).toBeGreaterThan(0);
+    expect(writes.every((value) => !value.includes('private fixture'))).toBe(true);
+  });
+
+  it.each(['malformed', 'rejected', 'no-pending', 'build-disabled'])(
+    'never journals MCP form values when the submission is %s',
+    async (scenario) => {
+      const { app, activityId } = await elicitationFixture();
+      if (scenario === 'rejected')
+        app.decideElicitation.mockRejectedValueOnce(
+          new AppError('MCP_INPUT', 'invalid private failure fixture'),
+        );
+      if (scenario === 'no-pending') {
+        const session = await app.store.session(app.session.id);
+        await app.store.decideElicitation({
+          sessionId: session.id,
+          expectedVersion: session.version,
+          activityId,
+          action: 'cancel',
+        });
+      }
+      if (scenario === 'build-disabled')
+        await app.manager.configure({
+          enabled: true,
+          sessionId: app.session.id,
+          allowBuild: false,
+          transmissionConsent: true,
+        });
+      const writes = captureTelegramWrites(app);
+      app.bot.push([
+        update(
+          2,
+          scenario === 'malformed'
+            ? '  /answer {"name":"private failure fixture"'
+            : '/answer\n{"name":"private failure fixture"}',
+        ),
+      ]);
+      await expect
+        .poll(async () => {
+          const state = (await app.store.integration('telegram'))?.document as {
+            inbox: { id: number; status: string }[];
+          };
+          return state.inbox.find((item) => item.id === 2)?.status;
+        })
+        .toBe('done');
+      expect(writes.length).toBeGreaterThan(0);
+      expect(writes.every((value) => !value.includes('private failure fixture'))).toBe(true);
+      expect(JSON.stringify(app.bot.sent)).not.toContain('private failure fixture');
+      expect(app.decideElicitation).toHaveBeenCalledTimes(scenario === 'rejected' ? 1 : 0);
+    },
+  );
+
+  it('scrubs old form values and requests resubmission after losing transient input on restart', async () => {
+    const { app } = await elicitationFixture();
+    await app.manager.close();
+    const saved = (await app.store.integration('telegram'))!;
+    const document = saved.document as { epoch: number; offset: number; inbox: unknown[] };
+    document.offset = 4;
+    document.inbox.push(
+      {
+        id: 2,
+        epoch: document.epoch,
+        sessionId: app.session.id,
+        date: Math.floor(Date.now() / 1000),
+        text: '/answer {"name":"legacy private fixture"}',
+        status: 'done',
+      },
+      {
+        id: 3,
+        epoch: document.epoch,
+        sessionId: app.session.id,
+        date: Math.floor(Date.now() / 1000),
+        text: '/answer {"name":"pending private fixture"}',
+        status: 'queued',
+      },
+    );
+    await app.store.saveIntegration('telegram', saved.version, document);
+    const writes = captureTelegramWrites(app);
+    await app.reopenChannel();
+    await expect
+      .poll(() =>
+        app.bot.sent.some((message) => message.text.includes('이전 입력을 복원할 수 없습니다')),
+      )
+      .toBe(true);
+    expect(app.decideElicitation).not.toHaveBeenCalled();
+    expect(writes.every((value) => !value.includes('private fixture'))).toBe(true);
+    expect(JSON.stringify((await app.store.integration('telegram'))?.document)).not.toContain(
+      'private fixture',
+    );
+    app.bot.push([update(4, '/answer {"name":"resubmitted fixture"}')]);
+    await expect.poll(() => app.decideElicitation.mock.calls.length).toBe(1);
+    expect(app.decideElicitation.mock.calls[0]![0].content).toEqual({
+      name: 'resubmitted fixture',
+    });
+    expect(writes.every((value) => !value.includes('resubmitted fixture'))).toBe(true);
+  });
+
+  it('discards in-flight and queued form values on cancellation without replaying them', async () => {
+    const { app } = await elicitationFixture();
+    const writes = captureTelegramWrites(app);
+    let finish!: () => void;
+    app.decideElicitation.mockImplementationOnce(
+      async () =>
+        await new Promise((_resolve, reject) => {
+          finish = () => reject(new Error('cancelled private input fixture'));
+        }),
+    );
+    app.bot.push([
+      update(2, '/answer {"name":"in-flight private input fixture"}'),
+      update(3, '/answer {"name":"queued private input fixture"}'),
+    ]);
+    await expect.poll(() => app.decideElicitation.mock.calls.length).toBe(1);
+    const closing = app.manager.close();
+    finish();
+    await closing;
+    expect(writes.every((value) => !value.includes('private input fixture'))).toBe(true);
+    await app.reopenChannel();
+    await expect.poll(() => app.manager.status().pending).toBe(0);
+    expect(app.decideElicitation).toHaveBeenCalledTimes(1);
+    expect(writes.every((value) => !value.includes('private input fixture'))).toBe(true);
+    expect(JSON.stringify(app.bot.sent)).not.toContain('private input fixture');
   });
 
   it('records uncertain sends without replay and retries only an explicit rate-limit rejection', async () => {
