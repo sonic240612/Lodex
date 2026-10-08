@@ -18,7 +18,7 @@ const untilAborted = (signal: AbortSignal) =>
     signal.throwIfAborted();
     signal.addEventListener('abort', () => reject(signal.reason), { once: true });
   });
-async function fixture(provider: InferenceProvider, webFetcher?: typeof fetch) {
+async function fixture(provider: InferenceProvider, webFetcher?: typeof fetch, eco = false) {
   const dir = await mkdtemp(join(tmpdir(), 'lodex-steering-'));
   const store = await Store.open(join(dir, 'state.sqlite'), resolve('apps/daemon/dist/worker.cjs'));
   const token = 's'.repeat(64),
@@ -41,7 +41,7 @@ async function fixture(provider: InferenceProvider, webFetcher?: typeof fetch) {
         title: 'live input',
         sessionId: crypto.randomUUID(),
         mode: 'plan',
-        config: { ...defaultModelConfig(), provider: 'demo', contextBudgetTokens: 65536 },
+        config: { ...defaultModelConfig(), provider: 'demo', contextBudgetTokens: 65536, eco },
       }),
     )
   ).session;
@@ -229,87 +229,98 @@ it('retains the original task and every earlier instruction across successive st
   }
 });
 
-it('interrupts automatic summarization to include steering without replacing the saved transcript', async () => {
-  const ready = deferred();
-  let summaries = 0,
-    responses = 0;
-  const app = await fixture({
-    listModels: async () => [],
-    capabilities: async () => ({ tools: true, streaming: true }),
-    countInputTokens: async (request) =>
-      request.messages.some(
-        (message) =>
-          message.content.includes('Automatic compaction:') ||
-          message.content.includes('running context checkpoint') ||
-          message.content.includes('NEW REQUIREMENT'),
-      )
-        ? 5000
-        : 60000,
-    async *generate(request, signal) {
-      if (request.messages[0]?.content.includes('Automatic compaction:')) {
-        summaries++;
-        yield { type: 'text_delta', text: 'Incomplete summary, not to be saved.' };
-        ready.release();
-        await untilAborted(signal);
-      } else {
-        responses++;
-        expect(JSON.stringify(request.messages)).toContain('NEW REQUIREMENT');
-        expect(JSON.stringify(request.messages)).toContain('Original investigation');
-        yield { type: 'text_delta', text: 'Applied the new requirement.' };
-        yield { type: 'finished', reason: 'stop' };
-      }
-    },
-  });
-  try {
-    let session = (
-      await app.store.apply(
-        makeCommand({
-          type: 'send_message',
-          sessionId: app.session.id,
-          expectedVersion: app.session.version,
-          content: 'Original investigation',
-        }),
-      )
-    ).session;
-    session = await app.store.updateRun({
-      sessionId: session.id,
-      runId: session.run!.id,
-      text: 'Verified findings',
-      status: 'completed',
-    });
-    await app.request({
-      type: 'send_message',
-      sessionId: session.id,
-      expectedVersion: session.version,
-      content: 'Continue',
-    });
-    await ready.promise;
-    session = await app.store.session(session.id);
-    expect(
-      (
-        await app.request({
-          type: 'steer_run',
-          sessionId: session.id,
-          runId: session.run!.id,
-          content: 'NEW REQUIREMENT: preserve the public API.',
-        })
-      ).status,
-    ).toBe(200);
-    await expect
-      .poll(async () => (await app.store.session(session.id)).run?.status)
-      .toBe('completed');
-    session = await app.store.session(session.id);
-    const response = session.messages.find((message) => message.id === session.run!.messageId)!;
-    expect(response.runContextCompaction).toBeUndefined();
-    expect(
-      response.activities?.find((activity) => activity.label === '컨텍스트 자동 LLM 압축')?.status,
-    ).toBe('interrupted');
-    expect(summaries).toBe(1);
-    expect(responses).toBe(1);
-  } finally {
-    await app.close();
-  }
-});
+it.each([false, true])(
+  'interrupts automatic summarization without losing steering (incremental=%s)',
+  async (eco) => {
+    const ready = deferred();
+    let summaries = 0,
+      responses = 0;
+    const app = await fixture(
+      {
+        listModels: async () => [],
+        capabilities: async () => ({ tools: true, streaming: true }),
+        countInputTokens: async (request) =>
+          request.messages.some(
+            (message) =>
+              message.content.includes('Automatic compaction:') ||
+              message.content.includes('running context checkpoint') ||
+              message.content.includes('NEW REQUIREMENT'),
+          )
+            ? 5000
+            : eco
+              ? 12000
+              : 60000,
+        async *generate(request, signal) {
+          if (request.messages[0]?.content.includes('Automatic compaction:')) {
+            summaries++;
+            yield { type: 'text_delta', text: 'Incomplete summary, not to be saved.' };
+            ready.release();
+            await untilAborted(signal);
+          } else {
+            responses++;
+            expect(JSON.stringify(request.messages)).toContain('NEW REQUIREMENT');
+            expect(JSON.stringify(request.messages)).toContain('Original investigation');
+            yield { type: 'text_delta', text: 'Applied the new requirement.' };
+            yield { type: 'finished', reason: 'stop' };
+          }
+        },
+      },
+      undefined,
+      eco,
+    );
+    try {
+      let session = (
+        await app.store.apply(
+          makeCommand({
+            type: 'send_message',
+            sessionId: app.session.id,
+            expectedVersion: app.session.version,
+            content: 'Original investigation' + (eco ? ' verified finding'.repeat(180) : ''),
+          }),
+        )
+      ).session;
+      session = await app.store.updateRun({
+        sessionId: session.id,
+        runId: session.run!.id,
+        text: 'Verified findings',
+        status: 'completed',
+      });
+      await app.request({
+        type: 'send_message',
+        sessionId: session.id,
+        expectedVersion: session.version,
+        content: 'Continue',
+      });
+      await ready.promise;
+      session = await app.store.session(session.id);
+      expect(
+        (
+          await app.request({
+            type: 'steer_run',
+            sessionId: session.id,
+            runId: session.run!.id,
+            content: 'NEW REQUIREMENT: preserve the public API.',
+          })
+        ).status,
+      ).toBe(200);
+      await expect
+        .poll(async () => (await app.store.session(session.id)).run?.status)
+        .toBe('completed');
+      session = await app.store.session(session.id);
+      const response = session.messages.find((message) => message.id === session.run!.messageId)!;
+      expect(response.runContextCompaction).toBeUndefined();
+      expect(
+        response.activities?.find(
+          (activity) => activity.label === (eco ? 'Eco 증분 LLM 압축' : '컨텍스트 자동 LLM 압축'),
+        )?.status,
+      ).toBe('interrupted');
+      expect(summaries).toBe(1);
+      expect(responses).toBe(1);
+    } finally {
+      await app.close();
+    }
+  },
+);
 
 it('finishes the active tool, skips the rest of its batch and applies live input before choosing further actions', async () => {
   const gate = deferred(),

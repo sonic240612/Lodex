@@ -150,6 +150,7 @@ function hydrate(session: Session): Session {
 }
 
 export interface RunUpdate {
+  finalResponseOffset?: number;
   taskList?: TaskList;
   autopilot?: AutopilotState;
   sessionId: string;
@@ -782,6 +783,7 @@ export class StorageEngine {
             const message = session.messages.find((m) => m.id === session.run?.messageId);
             if (message) {
               message.status = 'cancelled';
+              message.workFinishedAt = now;
               for (const activity of message.activities ?? []) {
                 if (activity.fusion?.status === 'pending') {
                   activity.fusion.status = activity.execution
@@ -1064,6 +1066,15 @@ export class StorageEngine {
       const message = session.messages.find((m) => m.id === session.run?.messageId);
       if (!message) throw new AppError('CORRUPT_RUN', '실행 메시지를 찾을 수 없습니다.', 500);
       if (update.text !== undefined) message.content = update.text;
+      if (update.finalResponseOffset !== undefined) {
+        if (
+          !Number.isSafeInteger(update.finalResponseOffset) ||
+          update.finalResponseOffset < 0 ||
+          update.finalResponseOffset > message.content.length
+        )
+          throw new AppError('DISPLAY_OFFSET', '답변 표시 위치가 올바르지 않습니다.');
+        message.finalResponseOffset = update.finalResponseOffset;
+      }
       if (update.taskList) session.taskList = taskListSchema.parse(update.taskList);
       if (update.activities) message.activities = update.activities;
       if (update.continuation) message.continuation = update.continuation;
@@ -1103,6 +1114,7 @@ export class StorageEngine {
       if (update.status && !(update.status === 'completed' && pendingInput)) {
         session.run.status = update.status;
         session.run.finishedAt = new Date().toISOString();
+        message.workFinishedAt = session.run.finishedAt;
         message.status = update.status === 'completed' ? 'complete' : update.status;
         message.error = update.error ?? null;
         if (update.status !== 'completed' && session.taskList?.active)

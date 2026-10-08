@@ -3009,3 +3009,63 @@ input[type='checkbox'] {
 .worktree-review-panel details {
   margin: 12px 0;
 }
+
+/* Assistant work is interleaved while live and folded ahead of the final answer. */
+.work-transcript {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+.work-transcript .activity-cards {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.work-commentary {
+  color: var(--text);
+}
+.work-commentary .message-body > :last-child {
+  margin-bottom: 0;
+}
+.work-history {
+  margin: 0 0 20px;
+  color: var(--muted);
+}
+.work-history > summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 9px;
+  cursor: pointer;
+  list-style: none;
+  font-size: 14px;
+  padding: 8px 0;
+}
+.work-history > summary::-webkit-details-marker {
+  display: none;
+}
+.work-history > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+  border-radius: 6px;
+}
+.work-history[open] > summary > svg {
+  transform: rotate(90deg);
+}
+.work-history[open] .work-transcript {
+  margin: 12px 0 20px;
+}
+.work-count {
+  font-size: 13px;
+}
+.work-live-status {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 14px;
+  color: var(--muted);
+  margin: 14px 0;
+}
+.assistant-transcript .activity-target {
+  text-overflow: ellipsis;
+}

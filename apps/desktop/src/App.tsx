@@ -28,7 +28,7 @@ import {
 } from './bridge';
 import { Icon, Logo } from './icons';
 import { useWorkspace } from './state';
-import { ActivityCards } from './ActivityCards';
+import { AssistantMessage } from './AssistantMessage';
 import { loadLastModelConfig } from './model-preference';
 import { submitComposerDraft } from './composer-submit';
 import { ProjectDialog } from './ProjectDialog';
@@ -947,9 +947,6 @@ export function App() {
               <div className="messages" aria-live="polite" aria-relevant="additions text">
                 {session.messages.map((message) => (
                   <article key={message.id} className={`message ${message.role}`}>
-                    {showActivities && message.activities?.length ? (
-                      <ActivityCards activities={message.activities} sessionId={session.id} />
-                    ) : null}
                     {!showActivities &&
                       message.activities?.some(
                         (a) =>
@@ -973,18 +970,26 @@ export function App() {
                           계획 제안·명령 결과 확인
                         </button>
                       )}
-                    <div className="message-body">
-                      {(message.content ? <Markdown text={message.content} /> : null) ||
-                        (message.status === 'streaming' ? (
-                          <span className="thinking">
-                            <i />
-                            <i />
-                            <i />
-                          </span>
-                        ) : (
-                          '응답 내용이 없습니다.'
-                        ))}
-                    </div>
+                    {message.role === 'assistant' ? (
+                      <AssistantMessage
+                        message={message}
+                        sessionId={session.id}
+                        showActivities={showActivities}
+                      />
+                    ) : (
+                      <div className="message-body">
+                        {(message.content ? <Markdown text={message.content} /> : null) ||
+                          (message.status === 'streaming' ? (
+                            <span className="thinking">
+                              <i />
+                              <i />
+                              <i />
+                            </span>
+                          ) : (
+                            '응답 내용이 없습니다.'
+                          ))}
+                      </div>
+                    )}
                     {message.runInput && (
                       <span className="message-status" role="status">
                         {message.runInput.status === 'queued'
@@ -1331,7 +1336,11 @@ export function App() {
                     빠른 압축
                   </button>
                 </div>
-                <small>자동 LLM 압축: 80% 초과 시 시작 · 25% 목표</small>
+                <small>
+                  {config.eco
+                    ? 'Eco: 작업 중 짧은 LLM 요약을 누적 · 최근 결과 유지'
+                    : '자동 LLM 압축: 80% 초과 시 시작 · 25% 목표'}
+                </small>
                 {session?.contextCompaction && (
                   <small>
                     최근 압축: {session.contextCompaction.compactedMessageCount}개 메시지 ·{' '}
@@ -2573,7 +2582,8 @@ function Settings({
                 <p>
                   반복과 군더더기를 줄이도록 모델에 요청합니다.
                   <br />
-                  오래된 대화는 압축하고 큰 도구 결과는 필요할 때만 다시 불러옵니다.
+                  작업 중 완료된 기록을 작은 단위로 LLM 요약합니다. 최근 결과와 원문은 유지하며 큰
+                  결과는 필요할 때 다시 불러옵니다.
                 </p>
               </div>
               <input

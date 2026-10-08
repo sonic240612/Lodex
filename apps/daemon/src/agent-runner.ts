@@ -26,6 +26,7 @@ import {
 } from '@lodex/contracts';
 import {
   compactRunningContextWithModel,
+  ecoCompactionBatch,
   AUTO_COMPACTION_TRIGGER,
   projectRunningContext,
   measureRequest,
@@ -281,6 +282,15 @@ export async function runAgent(options: {
     lastSave = 0,
     toolCount = 0,
     modelCount = 0;
+  let responseStart = 0;
+  let lastEcoAt = 0,
+    ecoRetryAfter = 0,
+    lastEcoThrough = -1;
+  const addActivity = (activity: Activity) => {
+    activity.contentOffset = content.length;
+    activity.startedAt = new Date().toISOString();
+    activities.push(activity);
+  };
   let emptyRounds = 0,
     repeatedResults = 0,
     previousResult = '';
@@ -307,10 +317,15 @@ export async function runAgent(options: {
     ttftMs: rounds[0]?.ttftMs ?? null,
   });
   const save = async (terminal?: 'completed' | 'failed' | 'cancelled', error?: string) => {
+    for (const activity of activities) {
+      if (activity.status !== 'running' && !activity.finishedAt)
+        activity.finishedAt = new Date().toISOString();
+    }
     const updated = await store.updateRun({
       sessionId: session.id,
       runId,
       text: content,
+      ...(terminal === 'completed' ? { finalResponseOffset: responseStart } : {}),
       ...(taskList ? { taskList } : {}),
       activities,
       continuation,
@@ -624,7 +639,7 @@ export async function runAgent(options: {
         includeContext: params.includeContext ?? 'none',
       }),
     };
-    activities.push(card);
+    addActivity(card);
     const nestedSignal = AbortSignal.any([signal, sampleSignal]);
     try {
       if (
@@ -766,7 +781,7 @@ export async function runAgent(options: {
       text: '',
       elicitation,
     };
-    activities.push(card);
+    addActivity(card);
     await save();
     const nestedSignal = AbortSignal.any([signal, elicitationSignal]);
     try {
@@ -860,19 +875,36 @@ export async function runAgent(options: {
           manifest.outputReserveTokens -
           manifest.safetyReserveTokens;
         const overflow = counted.tokens > available;
-        if (
-          !compactedThisRound &&
-          (overflow || counted.tokens > manifest.contextBudgetTokens * AUTO_COMPACTION_TRIGGER)
-        ) {
+        const urgent =
+          overflow || counted.tokens > manifest.contextBudgetTokens * AUTO_COMPACTION_TRIGGER;
+        const batch =
+          !urgent && session.config.eco && !compactedThisRound
+            ? ecoCompactionBatch(context.request, continuation, runContextCompaction)
+            : null;
+        const incremental =
+          batch &&
+          batch.through !== lastEcoThrough &&
+          Date.now() >= ecoRetryAfter &&
+          (Date.now() - lastEcoAt >= 15000 || batch.bytes >= 8192)
+            ? batch
+            : undefined;
+        if (!compactedThisRound && (urgent || incremental)) {
+          if (incremental) {
+            lastEcoThrough = incremental.through;
+            lastEcoAt = Date.now();
+          }
           const card: Activity = {
             id: randomUUID(),
             kind: 'tool',
-            label: '컨텍스트 자동 LLM 압축',
+            label: incremental ? 'Eco 증분 LLM 압축' : '컨텍스트 자동 LLM 압축',
             status: 'running',
-            text: '현재 모델로 요약 중 · 컨텍스트 25% 목표',
+            text: incremental
+              ? '완료된 기록을 작은 단위로 요약 중 · 최근 결과 유지'
+              : '현재 모델로 요약 중 · 컨텍스트 25% 목표',
           };
-          activities.push(card);
+          addActivity(card);
           await save();
+          const ecoDeadline = incremental ? AbortSignal.timeout(20_000) : undefined;
           try {
             const compacted = await compactRunningContextWithModel({
               request: context.request,
@@ -881,6 +913,7 @@ export async function runAgent(options: {
               historyThroughMessageId: context.manifest.historyMessageIds.at(-1),
               suffix: withTaskProgress([]),
               signal,
+              ...(incremental ? { incremental } : {}),
               measure: async (candidate) => (await countInput(candidate)).tokens,
               summarize: async (candidate) => {
                 const input = (await countInput(candidate)).tokens;
@@ -897,7 +930,7 @@ export async function runAgent(options: {
                     started = false;
                   const summarySignal = AbortSignal.any([
                     summaryGeneration.signal,
-                    AbortSignal.timeout(120_000),
+                    ecoDeadline ?? AbortSignal.timeout(120_000),
                   ]);
                   try {
                     summarySignal.throwIfAborted();
@@ -973,7 +1006,7 @@ export async function runAgent(options: {
                 count: runContextCompaction.count,
                 originalInputTokens: runContextCompaction.originalInputTokens,
                 compactedInputTokens: runContextCompaction.compactedInputTokens,
-                targetRatio: 0.25,
+                ...(incremental ? { strategy: 'incremental' } : { targetRatio: 0.25 }),
                 targetLimited: runContextCompaction.targetLimited,
                 message: runContextCompaction.targetLimited
                   ? 'LLM 요약 완료. 현재 요청과 필수 지침을 유지하여 30% 이하로 줄이지 못했습니다. 원문은 보존됩니다.'
@@ -983,7 +1016,11 @@ export async function runAgent(options: {
               if (await includeInputs()) continue modelLoop;
               continue;
             }
-            activities.splice(activities.indexOf(card), 1);
+            if (incremental) {
+              card.status = 'completed';
+              card.text = '요약 이득이 없어 원문을 유지했습니다.';
+              await save();
+            } else activities.splice(activities.indexOf(card), 1);
           } catch (error) {
             if (error === steeringReason && !signal.aborted) {
               card.status = 'interrupted';
@@ -995,7 +1032,24 @@ export async function runAgent(options: {
             card.status = signal.aborted ? 'cancelled' : 'failed';
             card.text = error instanceof Error ? error.message : String(error);
             await save();
-            throw error;
+            if (
+              !incremental ||
+              signal.aborted ||
+              (error instanceof AppError &&
+                [
+                  'STEP_LIMIT',
+                  'OUTPUT_BUDGET',
+                  'COST_BUDGET',
+                  'COST_UNCONFIRMED',
+                  'MODEL_PRICING_UNAVAILABLE',
+                ].includes(error.code))
+            )
+              throw error;
+            // Opportunistic summaries must not stop useful work or replace the last valid checkpoint.
+            compactedThisRound = true;
+            ecoRetryAfter = Date.now() + 30000;
+            card.text += '\n원문과 이전 요약을 유지하고 작업을 계속합니다.';
+            await save();
           }
         }
         if (options.observations && !deliveryRecorded) {
@@ -1053,6 +1107,7 @@ export async function runAgent(options: {
       let streamCompleted = false;
       let steered = false;
       let providerStarted = false;
+      responseStart = content.length;
       try {
         generation.signal.throwIfAborted();
         providerStarted = true;
@@ -1072,7 +1127,7 @@ export async function runAgent(options: {
                 status: 'running',
                 text: '',
               };
-              activities.push(thinking);
+              addActivity(thinking);
             }
             if (event.type === 'reasoning_delta') {
               reasoning += event.text;
@@ -1100,7 +1155,7 @@ export async function runAgent(options: {
                 text: '',
               };
               cards.set(event.index, card);
-              activities.push(card);
+              addActivity(card);
             }
             card.label = call.name || '도구 요청 수신';
             card.arguments = call.arguments;
@@ -1330,7 +1385,7 @@ export async function runAgent(options: {
                         text: `Worktree: ${childProject.path}`,
                         arguments: call.arguments,
                       };
-                      activities.push(childCard);
+                      addActivity(childCard);
                       await save();
                       try {
                         const args = JSON.parse(call.arguments);
@@ -1729,7 +1784,7 @@ export async function runAgent(options: {
                       arguments: JSON.stringify({ url }),
                     }
                   : card;
-                if (redirect) activities.push(approvalCard);
+                if (redirect) addActivity(approvalCard);
                 const allowed = await authorize(approvalCard, { kind: 'web', target: url });
                 if (redirect) {
                   approvalCard.status = allowed ? 'completed' : 'cancelled';

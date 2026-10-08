@@ -507,12 +507,16 @@ export interface Message {
   error: string | null;
   usage: Usage | null;
   activities?: Activity[];
+  /** Display metadata; never substituted for the inference transcript. */
+  finalResponseOffset?: number;
+  workFinishedAt?: string;
   continuation?: InferenceMessage[];
   runContextCompaction?: RunContextCompaction;
 }
 export const runContextCompactionSchema = z.strictObject({
   summary: z.string().trim().min(1).max(262144),
   method: z.enum(['fast', 'semantic']).optional(),
+  strategy: z.enum(['threshold', 'incremental']).optional(),
   model: z.string().optional(),
   historyThroughMessageId: idSchema.optional(),
   preservedInputIndex: z.number().int().nonnegative().optional(),
@@ -681,6 +685,10 @@ export interface PermissionDecision {
   decidedAt?: string;
 }
 export interface Activity {
+  /** UTF-16 offset in Message.content at which this activity began. */
+  contentOffset?: number;
+  startedAt?: string;
+  finishedAt?: string;
   fusion?: {
     status: 'pending' | 'succeeded' | 'failed' | 'skipped';
     environment?: 'docker' | 'host';

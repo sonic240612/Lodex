@@ -9,6 +9,7 @@ import {
 } from '@lodex/contracts';
 import {
   compactRunningContextWithModel,
+  ecoCompactionBatch,
   compileContext,
   measureRequest,
   projectRunningContext,
@@ -28,6 +29,81 @@ const request = (): InferenceRequest => ({
     { role: 'user', content: 'Earlier investigation. ' + 'evidence '.repeat(1400) },
     { role: 'user', content: 'Implement the researched change.' },
   ],
+});
+
+it('incrementally summarizes only older exchanges below 80%, preserving the latest result and original input', async () => {
+  const base = request();
+  base.config.contextBudgetTokens = 65536;
+  base.messages.splice(1, 1);
+  const continuation = [0, 1, 2].flatMap((index) => [
+    {
+      role: 'assistant' as const,
+      content: '',
+      toolCalls: [{ id: `read-${index}`, name: 'read_file', arguments: '{}' }],
+    },
+    {
+      role: 'tool' as const,
+      content: `EVIDENCE_${index} ` + 'a'.repeat(5000),
+      toolCallId: `read-${index}`,
+    },
+  ]);
+  const untouched = structuredClone(continuation);
+  const incremental = ecoCompactionBatch(base, continuation)!;
+  const inputs: InferenceRequest[] = [];
+  const result = await compactRunningContextWithModel({
+    request: base,
+    continuation,
+    incremental,
+    measure,
+    signal: new AbortController().signal,
+    summarize: async (input) => {
+      inputs.push(input);
+      return 'Read both earlier files; preserve the API and exact recall IDs read-0 and read-1. Continue with the latest file.';
+    },
+  });
+  expect(inputs).toHaveLength(1);
+  expect(inputs[0]!.config.maxTokens).toBeLessThanOrEqual(512);
+  expect(inputs[0]!.tools).toBeUndefined();
+  expect(inputs[0]!.messages[1]!.content).not.toContain('EVIDENCE_2');
+  expect(result?.checkpoint).toMatchObject({
+    strategy: 'incremental',
+    method: 'semantic',
+    throughContinuationCount: 4,
+    historyCompacted: false,
+  });
+  expect(result?.checkpoint.targetRatio).toBeUndefined();
+  expect(result?.request.messages.at(-1)).toEqual(continuation.at(-1));
+  expect(result?.request.messages).toContainEqual(base.messages.at(-1));
+  expect(continuation).toEqual(untouched);
+  expect(ecoCompactionBatch(base, continuation, result!.checkpoint)).toBeNull();
+});
+
+it('keeps a large uncompressed history and rejects an incremental summary that saves no tokens', async () => {
+  const base = request();
+  base.config.contextBudgetTokens = 65536;
+  base.messages[1]!.content = 'Original history '.repeat(2000);
+  const continuation = [
+    { role: 'assistant' as const, content: 'old result '.repeat(500) },
+    { role: 'assistant' as const, content: 'latest result' },
+  ];
+  const incremental = ecoCompactionBatch(base, continuation)!;
+  expect(incremental.compactHistory).toBe(false);
+  const run = (summary: string) =>
+    compactRunningContextWithModel({
+      request: base,
+      continuation,
+      incremental,
+      historyThroughMessageId: crypto.randomUUID(),
+      measure,
+      signal: new AbortController().signal,
+      summarize: async () => summary,
+    });
+  expect(await run('Verbose '.repeat(1000))).toBeNull();
+  const result = await run(
+    'Preserve earlier work, current constraints and exact recall information.',
+  );
+  expect(result?.checkpoint.historyThroughMessageId).toBeUndefined();
+  expect(result?.request.messages).toContainEqual(base.messages[1]);
 });
 
 it('measures the generated summary and asks for a shorter handoff when it misses the target', async () => {

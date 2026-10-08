@@ -12,7 +12,15 @@ export function lastCompaction(session: Session | undefined) {
       : []),
     ...(session?.messages ?? []).flatMap((message) =>
       message.runContextCompaction
-        ? [{ ...message.runContextCompaction, kind: '실행 중 자동' }]
+        ? [
+            {
+              ...message.runContextCompaction,
+              kind:
+                message.runContextCompaction.strategy === 'incremental'
+                  ? 'Eco 증분'
+                  : '실행 중 자동',
+            },
+          ]
         : [],
     ),
   ];

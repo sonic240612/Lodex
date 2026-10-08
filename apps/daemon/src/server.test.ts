@@ -108,6 +108,121 @@ afterEach(async () => {
   for (const close of cleanup.splice(0)) await close();
 });
 describe('authenticated daemon integration', () => {
+  it.each(['eco', 'off', 'failed-summary'] as const)(
+    'maintains small LLM checkpoints below the threshold (%s)',
+    async (variant) => {
+      let round = 0;
+      const summaries: InferenceRequest[] = [],
+        requests: InferenceRequest[] = [];
+      const app = await setup({
+        listModels: async () => [],
+        capabilities: async () => ({ tools: true, streaming: true }),
+        countInputTokens: async (request) =>
+          1500 + Math.ceil(Buffer.byteLength(JSON.stringify(request.messages)) / 4),
+        async *generate(request) {
+          if (request.messages[0]?.content.includes('Automatic compaction:')) {
+            summaries.push(structuredClone(request));
+            if (variant === 'failed-summary') throw new Error('Summary provider unavailable');
+            yield {
+              type: 'text_delta',
+              text: 'Read earlier files; preserve all original requirements. Use read_tool_result to recall exact results. Continue with the latest file.',
+            };
+            yield { type: 'usage', usage: { inputTokens: 1000, outputTokens: 30 } };
+            yield { type: 'finished', reason: 'stop' };
+            return;
+          }
+          requests.push(structuredClone(request));
+          yield {
+            type: 'text_delta',
+            text: round < 4 ? `Inspecting file ${round}.` : 'All four files inspected.',
+          };
+          if (round < 4) {
+            yield {
+              type: 'tool_call_delta',
+              index: 0,
+              id: `read-${round}`,
+              name: 'read_file',
+              arguments: JSON.stringify({ path: 'evidence.txt', maxLines: 140 }),
+            };
+            round++;
+            yield { type: 'usage', usage: { inputTokens: 1000, outputTokens: 20 } };
+            yield { type: 'finished', reason: 'tool_calls' };
+          } else {
+            yield { type: 'usage', usage: { inputTokens: 1000, outputTokens: 20 } };
+            yield { type: 'finished', reason: 'stop' };
+          }
+        },
+      });
+      await writeFile(
+        join(app.dir, 'evidence.txt'),
+        Array.from({ length: 140 }, (_, index) => `EVIDENCE_${index} ${'a'.repeat(65)}`).join('\n'),
+      );
+      const { project } = await app
+        .request('/v1/projects', { method: 'POST', body: JSON.stringify({ path: app.dir }) })
+        .then((response) => response.json());
+      const session = await app.create(
+        {
+          provider: 'llama-server',
+          model: 'fixture',
+          eco: variant !== 'off',
+          contextBudgetTokens: 131072,
+          maxTokens: 1000,
+          autoMaxTokens: false,
+        },
+        project.id,
+      );
+      await app.command(
+        makeCommand({
+          type: 'send_message',
+          sessionId: session.id,
+          expectedVersion: session.version,
+          content: 'Inspect four files, retaining the existing API.',
+        }),
+      );
+      await expect
+        .poll(async () => (await app.store.session(session.id)).run?.status)
+        .toBe('completed');
+      const final = await app.store.session(session.id),
+        response = final.messages.find((m) => m.id === final.run!.messageId)!;
+      expect(requests).toHaveLength(5);
+      for (const request of requests) {
+        expect(JSON.stringify(request.messages)).toContain('retaining the existing API');
+        expect(
+          1500 + Math.ceil(Buffer.byteLength(JSON.stringify(request.messages)) / 4),
+        ).toBeLessThan(131072 * 0.8);
+      }
+      expect(summaries.length).toBe(variant === 'eco' ? 3 : variant === 'off' ? 0 : 1);
+      for (const summary of summaries) {
+        expect(summary.tools).toBeUndefined();
+        expect(summary.config.maxTokens).toBeLessThanOrEqual(512);
+        expect(summary.messages[0]?.content).toContain('Eco incremental');
+      }
+      if (variant === 'eco') {
+        expect(response.runContextCompaction).toMatchObject({ strategy: 'incremental', count: 3 });
+        expect(
+          requests
+            .at(-1)
+            ?.messages.some((m) => m.toolCallId === 'read-3' && m.content.includes('EVIDENCE_139')),
+        ).toBe(true);
+        expect(response.usage?.outputTokens).toBe(190);
+      } else expect(response.runContextCompaction).toBeUndefined();
+      expect(
+        response.continuation?.filter(
+          (m) => m.role === 'tool' && m.content.includes('EVIDENCE_139'),
+        ),
+      ).toHaveLength(4);
+      expect(response.content.slice(response.finalResponseOffset)).toBe(
+        'All four files inspected.',
+      );
+      expect(response.workFinishedAt).toBe(final.run?.finishedAt);
+      expect(
+        response.activities
+          ?.filter((a) => a.label === 'read_file')
+          .every((a) => Number.isInteger(a.contentOffset) && a.startedAt && a.finishedAt),
+      ).toBe(true);
+    },
+  );
+
   it.each([1, 5])(
     'charges automatic LLM summaries to OpenRouter goal budgets with %i allowed calls',
     async (limit) => {

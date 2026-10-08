@@ -18,6 +18,7 @@ import { planningHandoff, researchEvidence } from './handoff';
 export { compactRunningContext, projectRunningContext } from './running';
 export {
   compactRunningContextWithModel,
+  ecoCompactionBatch,
   AUTO_COMPACTION_TRIGGER,
   AUTO_COMPACTION_TARGET,
 } from './semantic-running';
@@ -331,7 +332,10 @@ export function compileContext(
   const plan = planSchema.parse(session.plan);
   let history = session.messages.filter((message) => message.status === 'complete');
   if (!options.forceCompaction) {
-    const saved = history.findLast((m) => m.runContextCompaction?.historyThroughMessageId);
+    const saved = history.findLast(
+      (m) =>
+        m.runContextCompaction?.historyCompacted && m.runContextCompaction.historyThroughMessageId,
+    );
     const boundary = history.findIndex(
       (m) => m.id === saved?.runContextCompaction?.historyThroughMessageId,
     );

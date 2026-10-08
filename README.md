@@ -31,7 +31,7 @@ Desktop agent harness for local LLMs and OpenRouter.
 - Keep the daemon, Telegram, and active agent runs alive when the window is closed; reopen or quit Lodex from the system tray.
 - Use Eco mode, automatic LLM compaction, bounded current-conversation history search, local ObservationPack archives, and on-demand recall for large tool results.
 - Choose LLM-based **Context compaction** or deterministic **Quick compaction**. Automatic compaction displays before/after token estimates and the reduction percentage. Full transcripts stay in SQLite.
-- View Markdown/GFM messages, a compact, collapsible activity timeline with thinking, file targets, commands, and attention indicators, active context usage, generation metrics, and a jump-to-latest button.
+- Follow commentary interleaved with expandable commands, file work, and thinking. Completed work folds into an elapsed-time row above the final answer. Markdown/GFM, context usage, generation metrics, and jump-to-latest are included.
 - Manage models, skills, MCP, Telegram, worktrees, and backups in **Settings**. Type `/` in chat for commands; use arrow keys and Tab to select, or type a command directly.
 - Create daily or manual secret-free JSON backups, apply count/age retention, and export them through the native save dialog.
 
@@ -92,7 +92,8 @@ OpenRouter requests retain their IDs and cost reservations across interruption. 
 
 - **Context compaction** calls the active model to create a structured handoff with goals, constraints, progress, decisions, files, verification, failures, and next steps.
 - **Quick compaction** uses the local deterministic extractor without another model call.
-- Automatic compaction starts above 80% of the configured context window and targets 25% (roughly 20–30%). It runs before requests and between tool rounds, with or without Eco. Large transcripts are summarized in chunks; originals are not deleted.
+- Eco adds incremental LLM summaries during ordinary work, below 80%. It batches older completed exchanges, keeps the latest tool result, and merges each batch into a saved handoff. Small batches wait 15 seconds between attempts; batches over 8 KiB can run sooner. Summary output is capped at 512 tokens, with a 20-second attempt deadline. Failed or unhelpful summaries keep the original context. Actual latency depends on the model; cloud summaries count toward cost.
+- Above 80% of the configured context window, the larger automatic compaction still targets 25% (roughly 20–30%), with or without Eco. Checks run before requests and between tool rounds. Large transcripts are summarized in chunks; originals are not deleted.
 - Current instructions, the latest live input, and task progress remain intact. If those fixed parts prevent reaching 30%, the UI shows the resulting usage. A smaller input allowance can require compaction before 80%.
 - In Eco mode, ObservationPack archives successful text results larger than 10 KiB. The first two model requests receive the full result; later requests use a stable handle with a 1 KiB head/tail excerpt and exact paged recall. Original session history stays intact. Archive failures keep the original result, and recall verifies its hash.
 - The agent can search persisted text from the current conversation when compaction omits an older detail; search results are bounded and never cross conversation boundaries.
