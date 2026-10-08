@@ -636,7 +636,14 @@ export class ModelDownloads {
     const record = this.records.get(id);
     if (!record)
       throw new AppError('MODEL_DOWNLOAD_NOT_FOUND', '다운로드 작업을 찾을 수 없습니다.', 404);
-    const job = this.jobs.get(id);
+    let job = this.jobs.get(id);
+    // Terminal status can be observed while its manifest write is still pending.
+    // Finish that exact job before accepting a new action; a resumed job must not
+    // race the previous job's persistence or be removed by its final cleanup.
+    if (job && record.status !== 'downloading') {
+      await job.promise;
+      job = this.jobs.get(id);
+    }
     if (action === 'cancel') {
       if (!job) throw new AppError('MODEL_DOWNLOAD_FINISHED', '이미 끝난 다운로드입니다.', 409);
       job.controller.abort();

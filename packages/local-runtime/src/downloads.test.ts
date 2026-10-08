@@ -81,6 +81,75 @@ async function pause(instance: ModelDownloads, id: string) {
   await instance.action(id, 'cancel');
 }
 
+it.each(['failed', 'completed'] as const)(
+  'waits for %s manifest persistence before accepting the next action',
+  async (terminal) => {
+    const root = await directory(),
+      data = gguf();
+    let requests = 0;
+    const instance = manager(root, (async () => {
+      requests += 1;
+      return terminal === 'failed' && requests === 1
+        ? new Response('', { status: 503 })
+        : new Response(data);
+    }) as typeof fetch);
+    // Delay only the final durable write, after snapshot() exposes terminal state.
+    // This reproduces a slow filesystem without depending on OS timings or sleeps.
+    const persistence = instance as unknown as { persist(): Promise<void> };
+    const persist = persistence.persist.bind(instance);
+    let entered!: () => void, release!: () => void;
+    const terminalWrite = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let delayed = false;
+    const spy = vi.spyOn(persistence, 'persist').mockImplementation(async () => {
+      if (!delayed && (await instance.snapshot())[0]?.status === terminal) {
+        delayed = true;
+        entered();
+        await blocked;
+      }
+      await persist();
+    });
+    try {
+      const started = await instance.start(input);
+      await terminalWrite;
+      expect((await instance.snapshot())[0]?.status).toBe(terminal);
+      let outcome = 'pending';
+      const action = instance.action(started.id, terminal === 'failed' ? 'resume' : 'remove');
+      void action.then(
+        () => {
+          outcome = 'resolved';
+        },
+        () => {
+          outcome = 'rejected';
+        },
+      );
+      // Let the action reach the persistence barrier in this event-loop turn.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(outcome).toBe('pending');
+      expect(requests).toBe(1);
+      release();
+      await action;
+      if (terminal === 'completed') {
+        expect(await instance.snapshot()).toEqual([]);
+        expect(JSON.parse(await readFile(join(root, '.downloads.json'), 'utf8')).downloads).toEqual(
+          [],
+        );
+      } else {
+        await expect.poll(async () => (await instance.snapshot())[0]?.status).toBe('completed');
+        expect(requests).toBe(2);
+      }
+    } finally {
+      release();
+      await instance.close();
+      spy.mockRestore();
+    }
+  },
+);
+
 it('keeps partial files and SHA expectations across restart, then resumes at the exact byte with If-Range', async () => {
   const root = await directory(),
     data = gguf();

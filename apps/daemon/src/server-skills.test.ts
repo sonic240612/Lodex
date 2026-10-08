@@ -250,7 +250,8 @@ describe('skills daemon integration', () => {
     const direct = requests[1]!;
     expect(JSON.stringify(direct.messages)).toContain('Review source file using');
     expect(JSON.stringify(direct.messages)).toContain('Keep $ARGUMENTS literal.');
-    expect(direct.messages.some((message) => message.content.includes(app.root))).toBe(true);
+    const skillDirectory = await realpath(app.root);
+    expect(direct.messages.some((message) => message.content.includes(skillDirectory))).toBe(true);
     expect(
       direct.tools?.some((tool) =>
         /run_(host_)?command|propose_edit|propose_changes/.test(tool.function.name),

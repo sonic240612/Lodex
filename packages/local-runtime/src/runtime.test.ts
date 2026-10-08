@@ -75,7 +75,9 @@ function measuredMemory(freeVramMb = 128, freeRamMb = 8192): RuntimeResources {
     ],
   };
 }
-async function fixture(resourceProbe?: () => Promise<RuntimeResources>) {
+async function fixture(
+  resourceProbe: () => Promise<RuntimeResources> = async () => measuredMemory(),
+) {
   const dir = await mkdtemp(join(tmpdir(), 'lodex-engine 한글-'));
   dirs.push(dir);
   const script = join(dir, 'fixture.cjs');
@@ -137,11 +139,9 @@ server.listen(Number(arg('--port')),arg('--host'));`,
       settings = { ...value, version: settings.version + 1 };
     },
   };
-  const manager = new RuntimeManager(
-    repo,
-    resolve('apps/daemon/dist/supervisor.cjs'),
-    resourceProbe ? { resourceProbe } : {},
-  );
+  const manager = new RuntimeManager(repo, resolve('apps/daemon/dist/supervisor.cjs'), {
+    resourceProbe,
+  });
   managers.push(manager);
   return { profile, repo, manager, dir, script };
 }
@@ -327,6 +327,7 @@ describe('managed local engines', () => {
       saveRuntimeSettings: async () => {},
     };
     const manager = new RuntimeManager(repo, resolve('apps/daemon/dist/supervisor.cjs'), {
+      resourceProbe: async () => measuredMemory(),
       modelRoot: join(dir, 'models'),
       fetch: fetcher as typeof fetch,
     });
@@ -344,6 +345,7 @@ describe('managed local engines', () => {
     expect(await readFile(completed.modelPath!)).toEqual(header);
     await manager.close();
     const restored = new RuntimeManager(repo, resolve('apps/daemon/dist/supervisor.cjs'), {
+      resourceProbe: async () => measuredMemory(),
       modelRoot: join(dir, 'models'),
       fetch: (() => {
         throw new Error('completed downloads must not be fetched again');
@@ -634,7 +636,7 @@ engine.stdout.pipe(process.stdout);engine.stderr.pipe(process.stderr);
 engine.stdout.once('data',()=>setTimeout(()=>process.exit(1),100));
 });`,
     );
-    const manager = new RuntimeManager(repo, path);
+    const manager = new RuntimeManager(repo, path, { resourceProbe: async () => measuredMemory() });
     // The test uses a private stop file for its engine. The manager must never
     // guess which operating-system PID might still belong to a crashed supervisor.
     let pid: number | undefined;

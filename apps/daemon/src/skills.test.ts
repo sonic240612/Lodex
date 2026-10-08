@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -74,7 +74,8 @@ describe('session-selected skill tools', () => {
       expect(result.error).toBeUndefined();
       expect(activate).toHaveBeenCalledOnce();
       expect(activate.mock.calls[0]![0].allowed.has('read_file')).toBe(true);
-      if (name === 'read_skill') expect(result.content).toContain(`Read source.ts using ${root}`);
+      if (name === 'read_skill')
+        expect(result.content).toContain(`Read source.ts using ${await realpath(root)}`);
     }
   });
 

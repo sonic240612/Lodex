@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, writeFile, readFile, lstat, realpath, rm } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -9,9 +9,35 @@ import {
   type LocalProfile,
   type Session,
   type RuntimeSnapshot,
+  type RuntimeResources,
 } from '@lodex/contracts';
 import { Store } from '@lodex/storage';
 import { startServer } from './server';
+
+const memoryFixture = vi.hoisted(() => ({ freeRamMb: 16384 }));
+vi.mock('@lodex/local-runtime', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@lodex/local-runtime')>();
+  return {
+    ...actual,
+    RuntimeManager: class extends actual.RuntimeManager {
+      constructor(...args: ConstructorParameters<typeof actual.RuntimeManager>) {
+        super(args[0], args[1], {
+          ...args[2],
+          // Keep the real budget checks and engine lifecycle. Only physical
+          // measurements are fixtures; CI host RAM/GPU load must not affect them.
+          resourceProbe: async (): Promise<RuntimeResources> => ({
+            measuredAt: new Date().toISOString(),
+            systemRamTotalMb: 32768,
+            systemRamUsedMb: 32768 - memoryFixture.freeRamMb,
+            systemRamFreeMb: memoryFixture.freeRamMb,
+            gpuSource: 'unavailable',
+            gpus: [],
+          }),
+        });
+      }
+    },
+  };
+});
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -19,6 +45,7 @@ afterEach(async () => {
 });
 
 async function fixture() {
+  memoryFixture.freeRamMb = 16384;
   const dir = await mkdtemp(join(tmpdir(), 'lodex-managed-api 한글-'));
   const store = await Store.open(join(dir, 'state.sqlite'), resolve('apps/daemon/dist/worker.cjs'));
   const app = await startServer({
@@ -131,6 +158,26 @@ http.createServer(async (req, res) => {
 }
 
 describe('managed model daemon integration', () => {
+  it('retains physical RAM admission checks and starts only after sufficient memory is measured', async () => {
+    const app = await fixture();
+    memoryFixture.freeRamMb = 2050;
+    const rejected = await app.request('/v1/runtime/action', {
+      profileId: app.profile.id,
+      action: 'load',
+    });
+    expect(rejected.status).toBe(409);
+    expect((await rejected.json()).error.code).toBe('RAM_AVAILABLE');
+    expect(
+      (await app.request('/v1/runtime').then((response) => response.json())).instances,
+    ).toEqual([]);
+    memoryFixture.freeRamMb = 16384;
+    const loaded = await app.request('/v1/runtime/action', {
+      profileId: app.profile.id,
+      action: 'load',
+    });
+    expect(loaded.status).toBe(200);
+    expect((await loaded.json()).instances[0]).toMatchObject({ status: 'ready', leases: 0 });
+  });
   it('loads its own authenticated engine, routes chat and releases the lease without changing stored configuration', async () => {
     const app = await fixture();
     expect((await app.send()).status).toBe(200);
