@@ -1,0 +1,540 @@
+/* Keep the original theme intact: every material override is opt-in. */
+.design-switch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.design-switch:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+@media (max-width: 480px) {
+  .app[data-design='classic'] .activity-toggle {
+    display: none;
+  }
+}
+
+.app[data-design='glass'] {
+  --bg: #111820;
+  --sidebar: #222e3be0;
+  --panel: #27323fef;
+  --surface: #ffffff0c;
+  --surface-hover: #ffffff16;
+  --text: #f0f4f9;
+  --muted: #b4c0ce;
+  --subtle: #9baabb;
+  --border: #ffffff17;
+  --accent: #9dcdff;
+  --accent-surface: #87bdff13;
+  --danger: #ffb4ab;
+  --shadow: #030a1640;
+  --glass-fill: #24313da8;
+  --glass-dialog: #25313efb;
+  --glass-edge: #ffffff25;
+  --glass-highlight: #ffffff12;
+  --glass-glint: #d9edff14;
+  --glass-shadow: 0 12px 36px #02091429, inset 0 1px 0 #ffffff14, inset 0 -1px 0 #00000012;
+  --glass-spring: cubic-bezier(0.2, 0.85, 0.25, 1.25);
+  background:
+    radial-gradient(ellipse at 10% 0%, #47799732, transparent 52%),
+    radial-gradient(ellipse at 90% 90%, #25578b24, transparent 55%), var(--bg);
+}
+.app[data-design='glass'].light {
+  --bg: #edf1f5;
+  --sidebar: #f8fbffe0;
+  --panel: #f8fbfff2;
+  --surface: #ffffff75;
+  --surface-hover: #ffffffbd;
+  --text: #1e2b3a;
+  --muted: #526274;
+  --subtle: #617183;
+  --border: #344d681b;
+  --accent: #2161b2;
+  --accent-surface: #337fe910;
+  --danger: #b63832;
+  --shadow: #31455e18;
+  --glass-fill: #ffffff80;
+  --glass-dialog: #f5f9fffb;
+  --glass-edge: #ffffffc9;
+  --glass-highlight: #ffffffa3;
+  --glass-glint: #ffffffb3;
+  --glass-shadow: 0 12px 36px #2d496810, inset 0 1px 0 #ffffffef, inset 0 -1px 0 #5167810a;
+  background:
+    radial-gradient(ellipse at 6% 0%, #b6d9eb70, transparent 52%),
+    radial-gradient(ellipse at 92% 92%, #c3d7ef75, transparent 55%), var(--bg);
+}
+
+/* A single material layer per floating surface, with light that follows input. */
+.app[data-design='glass'] :is(.sidebar, .plan-panel, .topbar, .composer) {
+  border: 1px solid var(--glass-edge);
+  background:
+    radial-gradient(
+      ellipse at var(--glass-pointer-x, 30%) var(--glass-pointer-y, 0%),
+      var(--glass-glint),
+      transparent 68%
+    ),
+    linear-gradient(145deg, var(--glass-highlight), transparent 42%), var(--glass-fill);
+  -webkit-backdrop-filter: blur(24px) saturate(145%);
+  backdrop-filter: blur(24px) saturate(145%);
+  box-shadow: var(--glass-shadow);
+}
+.app[data-design='glass'] .sidebar {
+  margin: 12px 4px 12px 12px;
+  padding: 20px 12px 12px;
+  border-radius: 24px;
+}
+.app[data-design='glass'] .brand {
+  padding-left: 5px;
+}
+.app[data-design='glass'] .sidebar-bottom {
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  background: transparent;
+}
+.app[data-design='glass'] .topbar {
+  height: 52px;
+  margin: 12px 14px 10px;
+  padding: 0 12px;
+  border-radius: 20px;
+}
+.app[data-design='glass'] .topbar-left {
+  flex: 1;
+}
+.app[data-design='glass'] .topbar-right {
+  flex-shrink: 0;
+  gap: 5px;
+}
+.app[data-design='glass'] .model-picker {
+  min-width: 0;
+  padding: 6px;
+  border-radius: 12px;
+}
+.app[data-design='glass'] .model-name {
+  color: var(--text);
+  font-size: 13px;
+}
+.app[data-design='glass'] .mode-badge {
+  max-width: 130px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border: 0;
+  color: var(--muted);
+}
+.app[data-design='glass'] .preview-banner {
+  margin: 0 20px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--subtle);
+}
+.app[data-design='glass'] .plan-panel {
+  margin: 12px 12px 12px 4px;
+  border-radius: 24px;
+}
+.app[data-design='glass'] .plan-header {
+  height: 64px;
+}
+.app[data-design='glass'] :is(.plan-editor, .todo-plan) {
+  padding-left: 18px;
+  padding-right: 18px;
+}
+.app[data-design='glass'] .welcome h1 {
+  font-weight: 600;
+  letter-spacing: -1.5px;
+}
+.app[data-design='glass'] .welcome-logo {
+  filter: drop-shadow(0 4px 12px var(--shadow));
+}
+.app[data-design='glass'] .suggestions button {
+  border-color: var(--glass-edge);
+  border-radius: 20px;
+  background: linear-gradient(145deg, var(--glass-highlight), transparent 70%), var(--surface);
+  box-shadow:
+    inset 0 1px 0 var(--glass-highlight),
+    0 4px 14px var(--shadow);
+}
+.app[data-design='glass'] .suggestions :is(strong, span) {
+  white-space: normal;
+}
+.app[data-design='glass'] .message.user .message-body {
+  border: 1px solid var(--glass-edge);
+  border-radius: 22px 22px 7px 22px;
+  background: var(--surface);
+}
+.app[data-design='glass'] .composer-area {
+  padding-top: 12px;
+}
+.app[data-design='glass'] .composer {
+  border-radius: 26px;
+  transition:
+    border-color 180ms ease,
+    box-shadow 180ms ease;
+}
+.app[data-design='glass'] .composer:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--glass-edge));
+  box-shadow:
+    var(--glass-shadow),
+    0 0 0 3px var(--accent-surface);
+}
+.app[data-design='glass'] .composer textarea {
+  font-size: 14px;
+  padding: 18px 20px 8px;
+}
+.app[data-design='glass'] .composer-toolbar {
+  gap: 6px;
+  padding: 6px 12px 12px;
+}
+.app[data-design='glass'] :is(.provider-tag, .autopilot-toggle) {
+  border-radius: 999px;
+  padding: 6px 9px;
+}
+.app[data-design='glass'] .send-button {
+  width: 36px;
+  height: 36px;
+  color: #fff;
+  background: linear-gradient(155deg, #579cf1, #2867b9);
+  box-shadow:
+    inset 0 1px 0 #ffffff50,
+    0 3px 10px #2362a82a;
+}
+.app[data-design='glass'] :is(.new-chat, .design-switch) {
+  background:
+    radial-gradient(
+      ellipse at var(--glass-pointer-x, 50%) var(--glass-pointer-y, 0%),
+      var(--glass-glint),
+      transparent 80%
+    ),
+    var(--surface);
+  border-color: var(--glass-edge);
+  box-shadow: inset 0 1px 0 var(--glass-highlight);
+  color: var(--text);
+}
+.app[data-design='glass'] :is(.icon-button, .activity-toggle, .design-switch) {
+  border-radius: 999px;
+}
+.app[data-design='glass'] :is(.new-chat, .nav-item, .history-item, .settings-nav-item) {
+  border-radius: 14px;
+}
+.app[data-design='glass'] :is(.nav-item.active, .history-item.selected, .settings-nav-item.active) {
+  background: var(--surface-hover);
+  box-shadow:
+    inset 0 1px 0 var(--glass-highlight),
+    0 2px 6px var(--shadow);
+  color: var(--text);
+}
+.app[data-design='glass']
+  :is(
+    .goal-mode-switch,
+    .goal-input,
+    .field input,
+    .field select,
+    .todo-add input,
+    .provider-options > button,
+    .key-section,
+    .context-report,
+    .command-jobs-panel
+  ) {
+  border-radius: 13px;
+}
+.app[data-design='glass'] :is(.goal-mode-switch button, .plan-mode-switch button) {
+  border-radius: 10px;
+}
+.app[data-design='glass'] :is(.goal-mode-switch .selected, .plan-mode-switch .selected) {
+  box-shadow:
+    inset 0 1px 0 var(--glass-highlight),
+    0 2px 6px var(--shadow);
+}
+.app[data-design='glass'] :is(.primary-button, .permission-allow) {
+  background: linear-gradient(155deg, #397fd3, #2161af);
+  border-color: #ffffff25;
+  color: #fff;
+  box-shadow: inset 0 1px 0 #ffffff26;
+}
+.app[data-design='glass']
+  :is(
+    .primary-button,
+    .secondary-button,
+    .permission-allow,
+    .permission-deny,
+    .compact-context-button
+  ) {
+  border-radius: 12px;
+}
+
+/* Menus remain opaque enough for text to stay readable over any conversation. */
+.app[data-design='glass']
+  :is(
+    dialog.settings-dialog,
+    .settings-screen,
+    .permission-menu,
+    .context-popover,
+    .slash-menu,
+    .permission-banner
+  ) {
+  border: 1px solid var(--glass-edge);
+  background:
+    radial-gradient(
+      ellipse at var(--glass-pointer-x, 30%) var(--glass-pointer-y, 0%),
+      var(--glass-glint),
+      transparent 68%
+    ),
+    linear-gradient(145deg, var(--glass-highlight), transparent 50%), var(--glass-dialog);
+  -webkit-backdrop-filter: blur(28px) saturate(150%);
+  backdrop-filter: blur(28px) saturate(150%);
+  box-shadow:
+    var(--glass-shadow),
+    0 24px 64px var(--shadow);
+  border-radius: 22px;
+}
+.app[data-design='glass'] :is(dialog.settings-dialog, .settings-screen)::backdrop {
+  background: #0715254d;
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+}
+.app[data-design='glass'] .settings-screen {
+  border-radius: 28px;
+}
+.app[data-design='glass'] .settings-screen-nav {
+  background: var(--surface);
+  padding: 14px;
+}
+.app[data-design='glass'] :is(.permission-menu button, .slash-option) {
+  border-radius: 13px;
+}
+.app[data-design='glass'] .permission-banner {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--glass-edge));
+  border-radius: 18px;
+}
+.app[data-design='glass'] .composer :is(.permission-menu, .slash-menu) {
+  /* A second backdrop inside the composer's filtered layer cannot sample the page. */
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+.app[data-design='glass'] .activity-feed {
+  border-radius: 16px;
+}
+.app[data-design='glass'] .scroll-to-bottom {
+  border-color: var(--glass-edge);
+  background: var(--panel);
+  box-shadow: var(--glass-shadow);
+}
+
+/* Subtle spring response on controls; the reading canvas never moves. */
+.app[data-design='glass'] button:not(.panel-scrim) {
+  transition:
+    scale 320ms var(--glass-spring),
+    background-color 180ms ease,
+    border-color 180ms ease,
+    box-shadow 180ms ease,
+    color 180ms ease;
+}
+.app[data-design='glass'] button:not(.panel-scrim):active:not(:disabled) {
+  scale: 0.96;
+  transition: scale 90ms ease-out;
+}
+@media (hover: hover) and (pointer: fine) {
+  .app[data-design='glass']
+    :is(.icon-button, .design-switch, .send-button, .suggestions button):hover:not(:disabled) {
+    scale: 1.025;
+    box-shadow:
+      inset 0 1px 0 var(--glass-highlight),
+      0 4px 16px var(--shadow);
+  }
+  .app[data-design='glass']
+    :is(.icon-button, .design-switch, .send-button, .suggestions button):active:not(:disabled) {
+    scale: 0.94;
+  }
+}
+.app[data-design='glass'] :is(.permission-menu, .slash-menu) {
+  transform-origin: bottom left;
+  animation: glass-menu-in 300ms var(--glass-spring);
+}
+.app[data-design='glass'] :is(.sidebar, .plan-panel) {
+  animation: glass-panel-in 320ms var(--glass-spring);
+}
+@keyframes glass-panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.99);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+.app[data-design='glass'] .context-popover {
+  transform-origin: bottom right;
+  transform: translateY(8px) scale(0.96);
+  transition:
+    opacity 180ms ease,
+    visibility 180ms ease,
+    transform 300ms var(--glass-spring);
+}
+.app[data-design='glass'] .context-meter:is(:hover, :focus-within) .context-popover {
+  transform: translateY(0) scale(1);
+}
+.app[data-design='glass'] :is(dialog.settings-dialog, .settings-screen)[open] {
+  animation: glass-dialog-in 340ms var(--glass-spring);
+}
+@keyframes glass-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+@keyframes glass-dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (max-width: 1399px) {
+  .app[data-design='glass'] .mode-badge {
+    display: none;
+  }
+}
+@media (max-width: 1179px) {
+  .app[data-design='glass'] .plan-panel {
+    top: 68px;
+  }
+  .app[data-design='glass'] .plan-scrim {
+    inset: 68px 0 0;
+  }
+}
+@media (max-width: 760px) {
+  .app[data-design='glass'] .topbar {
+    margin: 8px 8px 6px;
+    padding: 0 8px;
+    border-radius: 18px;
+  }
+  .app[data-design='glass'] .sidebar {
+    top: 60px;
+    margin: 8px;
+  }
+  .app[data-design='glass'] .plan-panel {
+    top: 60px;
+    margin: 8px;
+  }
+  .app[data-design='glass'] :is(.sidebar-scrim, .plan-scrim) {
+    inset: 60px 0 0;
+  }
+  .app[data-design='glass'] .activity-toggle {
+    display: none;
+  }
+  .app[data-design='glass'] .composer-toolbar {
+    gap: 3px;
+    flex-wrap: wrap;
+  }
+  .app[data-design='glass'] :is(.provider-tag, .autopilot-toggle) {
+    padding: 6px;
+  }
+  .app[data-design='glass'] .composer {
+    border-radius: 22px;
+  }
+  .app[data-design='glass'] .permission-control {
+    position: static;
+  }
+  .app[data-design='glass'] .permission-menu {
+    left: 10px;
+    right: 10px;
+    width: auto;
+    transform-origin: bottom center;
+  }
+}
+
+/* Accessibility and WebView fallbacks are independent of the selected palette. */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .app[data-design='glass']
+    :is(
+      .sidebar,
+      .plan-panel,
+      .topbar,
+      .composer,
+      dialog.settings-dialog,
+      .settings-screen,
+      .permission-menu,
+      .context-popover,
+      .slash-menu,
+      .permission-banner
+    ) {
+    background: var(--bg);
+  }
+}
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+  .app[data-design='glass']
+    :is(
+      .sidebar,
+      .plan-panel,
+      .topbar,
+      .composer,
+      dialog.settings-dialog,
+      .settings-screen,
+      .permission-menu,
+      .context-popover,
+      .slash-menu,
+      .permission-banner
+    ) {
+    background: var(--bg);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    border-color: var(--muted);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .app[data-design='glass'] *,
+  .app[data-design='glass'] *::before,
+  .app[data-design='glass'] *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+    scale: none !important;
+  }
+}
+@media (forced-colors: active) {
+  .app[data-design='glass'] {
+    --accent: Highlight;
+    --text: CanvasText;
+    --muted: CanvasText;
+    --subtle: CanvasText;
+    --bg: Canvas;
+    background: Canvas;
+  }
+  .app[data-design='glass']
+    :is(
+      .sidebar,
+      .plan-panel,
+      .topbar,
+      .composer,
+      dialog.settings-dialog,
+      .settings-screen,
+      .permission-menu,
+      .context-popover,
+      .slash-menu,
+      .permission-banner
+    ) {
+    background: Canvas;
+    border-color: CanvasText;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    box-shadow: none;
+  }
+}

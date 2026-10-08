@@ -30,6 +30,8 @@ import { Icon, Logo } from './icons';
 import { useWorkspace } from './state';
 import { AssistantMessage } from './AssistantMessage';
 import { loadLastModelConfig } from './model-preference';
+import { loadDesignPreference, saveDesignPreference } from './design-preference';
+import { useLiquidGlassEffects } from './useLiquidGlassEffects';
 import { submitComposerDraft } from './composer-submit';
 import { ProjectDialog } from './ProjectDialog';
 import { Markdown } from './Markdown';
@@ -143,6 +145,12 @@ export function App() {
   const [newMode, setNewMode] = useState<AgentMode>('plan');
   const mode = session?.mode ?? newMode;
   const [light, setLight] = useState(false);
+  const [design, setDesign] = useState(loadDesignPreference);
+  const appSurface = useRef<HTMLDivElement>(null);
+  useLiquidGlassEffects(appSurface, design === 'glass');
+  useEffect(() => {
+    saveDesignPreference(design);
+  }, [design]);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const conversation = useRef<HTMLDivElement>(null);
   const followLatest = useRef(true);
@@ -722,7 +730,9 @@ export function App() {
   );
   return (
     <div
+      ref={appSurface}
       className={`app ${light ? 'light' : ''} ${sidebarOpen ? '' : 'sidebar-closed'} ${planOpen ? '' : 'plan-closed'}`}
+      data-design={design}
     >
       <aside className="sidebar" aria-label="대화 탐색">
         <div className="brand">
@@ -873,6 +883,16 @@ export function App() {
               onClick={() => setLight(!light)}
             >
               <Icon name="moon" size={18} />
+            </button>
+            <button
+              className="design-switch"
+              aria-label={
+                design === 'glass' ? '기존 디자인으로 전환' : 'Liquid Glass 디자인으로 전환'
+              }
+              title={design === 'glass' ? '기존 디자인으로 전환' : 'Liquid Glass 디자인으로 전환'}
+              onClick={() => setDesign(design === 'glass' ? 'classic' : 'glass')}
+            >
+              {design === 'glass' ? '기존 디자인' : 'Liquid Glass'}
             </button>
             <button
               className={`icon-button ${planOpen ? 'is-active' : ''}`}
