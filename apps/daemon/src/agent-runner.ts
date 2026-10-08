@@ -283,6 +283,7 @@ export async function runAgent(options: {
     toolCount = 0,
     modelCount = 0;
   let responseStart = 0;
+  let ecoSummaryTokens = 512;
   let lastEcoAt = 0,
     ecoRetryAfter = 0,
     lastEcoThrough = -1;
@@ -896,7 +897,7 @@ export async function runAgent(options: {
           const card: Activity = {
             id: randomUUID(),
             kind: 'tool',
-            label: incremental ? 'Eco 증분 LLM 압축' : '컨텍스트 자동 LLM 압축',
+            label: incremental ? 'Eco 자동 요약' : '컨텍스트 자동 LLM 압축',
             status: 'running',
             text: incremental
               ? '완료된 기록을 작은 단위로 요약 중 · 최근 결과 유지'
@@ -913,9 +914,16 @@ export async function runAgent(options: {
               historyThroughMessageId: context.manifest.historyMessageIds.at(-1),
               suffix: withTaskProgress([]),
               signal,
-              ...(incremental ? { incremental } : {}),
+              ...(incremental
+                ? { incremental: { ...incremental, maxTokens: ecoSummaryTokens } }
+                : {}),
               measure: async (candidate) => (await countInput(candidate)).tokens,
               summarize: async (candidate) => {
+                if (incremental && candidate.config.maxTokens > ecoSummaryTokens) {
+                  ecoSummaryTokens = candidate.config.maxTokens;
+                  card.text = `요약 출력 한도를 ${ecoSummaryTokens.toLocaleString()}토큰으로 늘려 다시 시도합니다.`;
+                  await save();
+                }
                 const input = (await countInput(candidate)).tokens;
                 measureRequest(candidate, { inputTokens: input });
                 const summaryGeneration = interruptible();
@@ -986,8 +994,14 @@ export async function runAgent(options: {
                   }
                   if (finish !== 'stop')
                     throw new AppError(
-                      'CONTEXT_SUMMARY_FINISH',
-                      '자동 LLM 요약이 정상 완료되지 않았습니다. 원문은 보존했습니다. 다시 시도해 주세요.',
+                      finish === 'length' || finish === 'max_tokens'
+                        ? 'CONTEXT_SUMMARY_LENGTH'
+                        : 'CONTEXT_SUMMARY_FINISH',
+                      finish === 'length' || finish === 'max_tokens'
+                        ? `요약 출력 한도(${candidate.config.maxTokens.toLocaleString()}토큰)에 도달했습니다. 생성된 요약문은 ${summary.length.toLocaleString()}자입니다.`
+                        : finish === 'content_filter'
+                          ? '모델 제공자가 요약 응답을 차단했습니다.'
+                          : `모델이 요약을 정상적으로 끝내지 못했습니다. 종료 사유: ${(finish ?? '없음').slice(0, 64)}`,
                     );
                   return summary;
                 } finally {
@@ -1030,7 +1044,12 @@ export async function runAgent(options: {
               continue modelLoop;
             }
             card.status = signal.aborted ? 'cancelled' : 'failed';
-            card.text = error instanceof Error ? error.message : String(error);
+            card.text =
+              error instanceof Error && error.name === 'TimeoutError'
+                ? '요약 응답 대기 시간이 초과되었습니다.'
+                : error instanceof Error
+                  ? error.message
+                  : String(error);
             await save();
             if (
               !incremental ||
@@ -1048,7 +1067,7 @@ export async function runAgent(options: {
             // Opportunistic summaries must not stop useful work or replace the last valid checkpoint.
             compactedThisRound = true;
             ecoRetryAfter = Date.now() + 30000;
-            card.text += '\n원문과 이전 요약을 유지하고 작업을 계속합니다.';
+            card.text += '\n이번 요약은 적용하지 않고 원래 기록으로 작업을 계속합니다.';
             await save();
           }
         }

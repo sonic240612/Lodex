@@ -16,9 +16,7 @@ export function lastCompaction(session: Session | undefined) {
             {
               ...message.runContextCompaction,
               kind:
-                message.runContextCompaction.strategy === 'incremental'
-                  ? 'Eco 증분'
-                  : '실행 중 자동',
+                message.runContextCompaction.strategy === 'incremental' ? 'Eco' : '실행 중 자동',
             },
           ]
         : [],
@@ -49,7 +47,9 @@ export function CompactionSummary({ session }: { session: Session | undefined })
       }
     >
       <span>
-        {value.kind} {value.method === 'semantic' ? 'LLM ' : ''}압축
+        {value.kind === 'Eco'
+          ? 'Eco 자동 요약'
+          : `${value.kind} ${value.method === 'semantic' ? 'LLM 압축' : '압축'}`}
       </span>
       <span>
         {before.toLocaleString()} → {after.toLocaleString()} 토큰 · {reduction}% 감소

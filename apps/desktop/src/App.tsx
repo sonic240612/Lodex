@@ -1338,7 +1338,7 @@ export function App() {
                 </div>
                 <small>
                   {config.eco
-                    ? 'Eco: 작업 중 짧은 LLM 요약을 누적 · 최근 결과 유지'
+                    ? 'Eco: 작업 중 오래된 기록을 자동으로 요약합니다.'
                     : '자동 LLM 압축: 80% 초과 시 시작 · 25% 목표'}
                 </small>
                 {session?.contextCompaction && (

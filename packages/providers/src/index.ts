@@ -96,6 +96,7 @@ function messagesForTemplate(
 }
 
 function needsTemplateCapabilities(request: InferenceRequest) {
+  if (request.purpose === 'context_summary') return true;
   return (
     !!request.tools?.length ||
     request.messages.some(
@@ -169,6 +170,8 @@ async function openRouterHttpError(response: Response, toolsRequested: boolean):
     : 'OpenRouter 404: 모델 ID가 잘못되었거나 생성 설정·데이터 수집 금지 정책을 만족하는 제공자가 없습니다. 모델 연결의 목록 조회에서 모델을 다시 선택하세요.';
 }
 export class ChatCompletionProvider implements InferenceProvider {
+  private summaryReasoning = new Map<string, Record<string, unknown>>();
+  private summaryCatalogChecked = false;
   private baseUrl: string;
   private fetcher: Fetch;
   private templateCapabilitiesLoaded = false;
@@ -264,6 +267,14 @@ export class ChatCompletionProvider implements InferenceProvider {
     if (!Array.isArray(body.data))
       throw new AppError('CATALOG_FORMAT', '모델 목록 형식을 해석할 수 없습니다.', 502);
     const templateCapabilities = await this.templateCapabilities(signal);
+    if (this.kind === 'openrouter') {
+      for (const item of body.data) {
+        const model = object(item);
+        if (typeof model.id === 'string')
+          this.summaryReasoning.set(model.id, object(model.reasoning));
+      }
+      this.summaryCatalogChecked = true;
+    }
     return body.data.flatMap((item) => {
       const model = object(item);
       if (typeof model.id !== 'string') return [];
@@ -416,6 +427,15 @@ export class ChatCompletionProvider implements InferenceProvider {
       ...(config.useDefaultTemperature ? {} : { temperature: config.temperature }),
       ...(config.useDefaultTopP ? {} : { top_p: config.topP }),
       max_tokens: config.maxTokens,
+      ...(request.purpose === 'context_summary' &&
+      !request.tools?.length &&
+      this.kind === 'llama-server' &&
+      templateCapabilities
+        ? {
+            chat_template_kwargs: { enable_thinking: false },
+            ...(templateCapabilities.supportsReasoningEffort ? { reasoning_effort: 'none' } : {}),
+          }
+        : {}),
       ...(this.kind === 'openrouter'
         ? {
             usage: { include: true },
@@ -427,6 +447,33 @@ export class ChatCompletionProvider implements InferenceProvider {
           }
         : {}),
     };
+  }
+  private async summaryControls(request: InferenceRequest, signal: AbortSignal) {
+    if (
+      this.kind !== 'openrouter' ||
+      request.purpose !== 'context_summary' ||
+      request.tools?.length
+    )
+      return {};
+    if (!this.summaryCatalogChecked) {
+      this.summaryCatalogChecked = true;
+      try {
+        await this.listModels(AbortSignal.any([signal, AbortSignal.timeout(2000)]));
+      } catch {
+        signal.throwIfAborted();
+      }
+    }
+    const caps = this.summaryReasoning.get(request.config.model);
+    // Unknown/dynamic routers keep their defaults. Never disable mandatory reasoning.
+    if (!caps) return {};
+    if (caps.mandatory === false) return { reasoning: { enabled: false } };
+    const efforts = Array.isArray(caps.supported_efforts) ? caps.supported_efforts : [];
+    const order =
+      caps.mandatory === true
+        ? ['minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+        : ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+    const effort = order.find((value) => efforts.includes(value));
+    return effort ? { reasoning: { effort } } : {};
   }
   async countInputTokens(request: InferenceRequest, signal: AbortSignal): Promise<number | null> {
     if (this.kind !== 'llama-server') return null;
@@ -493,7 +540,10 @@ export class ChatCompletionProvider implements InferenceProvider {
         headers: this.headers(),
         signal,
         redirect: 'error',
-        body: JSON.stringify(this.requestBody(request, true, templateCapabilities)),
+        body: JSON.stringify({
+          ...this.requestBody(request, true, templateCapabilities),
+          ...(await this.summaryControls(request, signal)),
+        }),
       },
       signal,
     );

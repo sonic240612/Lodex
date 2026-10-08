@@ -30,12 +30,13 @@ const toolTitles: Record<string, string> = {
   update_task: '작업 상태 갱신',
 };
 export function activityTitle(activity: Activity) {
+  if (activity.label === 'Eco 증분 LLM 압축') return 'Eco 자동 요약';
   if (activity.kind === 'thinking') return activity.status === 'running' ? '생각 중' : '생각 과정';
   if (activity.mcpCall) return `MCP · ${activity.mcpCall.toolName}`;
   return toolTitles[activity.label] ?? activity.label;
 }
 function activityTarget(activity: Activity): string {
-  if (activity.label === 'Eco 증분 LLM 압축' || activity.label === '컨텍스트 자동 LLM 압축') {
+  if (['Eco 자동 요약', 'Eco 증분 LLM 압축', '컨텍스트 자동 LLM 압축'].includes(activity.label)) {
     try {
       const result = JSON.parse(activity.text);
       if (

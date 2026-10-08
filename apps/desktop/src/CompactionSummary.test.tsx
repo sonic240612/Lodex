@@ -84,4 +84,8 @@ it('shows LLM token counts and the resulting context percentage', () => {
   expect(html).toContain('LLM 압축');
   expect(html).toContain('81,000 → 25,000');
   expect(html).toContain('컨텍스트 25%');
+  value.messages[0]!.runContextCompaction!.strategy = 'incremental';
+  const eco = renderToStaticMarkup(<CompactionSummary session={value} />);
+  expect(eco).toContain('Eco 자동 요약');
+  expect(eco).not.toContain('증분');
 });

@@ -311,7 +311,7 @@ it.each([false, true])(
       expect(response.runContextCompaction).toBeUndefined();
       expect(
         response.activities?.find(
-          (activity) => activity.label === (eco ? 'Eco 증분 LLM 압축' : '컨텍스트 자동 LLM 압축'),
+          (activity) => activity.label === (eco ? 'Eco 자동 요약' : '컨텍스트 자동 LLM 압축'),
         )?.status,
       ).toBe('interrupted');
       expect(summaries).toBe(1);

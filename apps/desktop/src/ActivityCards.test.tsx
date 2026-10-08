@@ -2,6 +2,19 @@ import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { ActivityCards } from './ActivityCards';
 describe('activity disclosure', () => {
+  it('uses a plain Korean name for new and saved Eco summary activities', () => {
+    for (const label of ['Eco 증분 LLM 압축', 'Eco 자동 요약']) {
+      const html = renderToStaticMarkup(
+        <ActivityCards
+          activities={[
+            { id: 'eco', kind: 'tool', label, status: 'completed', text: '1000 → 500 토큰' },
+          ]}
+        />,
+      );
+      expect(html).toContain('Eco 자동 요약');
+      expect(html).not.toContain('증분');
+    }
+  });
   it('summarizes current work, shows targets, and keeps attention visible without opening the feed', () => {
     const html = renderToStaticMarkup(
       <ActivityCards

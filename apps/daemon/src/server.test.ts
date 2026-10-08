@@ -108,7 +108,7 @@ afterEach(async () => {
   for (const close of cleanup.splice(0)) await close();
 });
 describe('authenticated daemon integration', () => {
-  it.each(['eco', 'off', 'failed-summary'] as const)(
+  it.each(['eco', 'off', 'failed-summary', 'length', 'content-filter'] as const)(
     'maintains small LLM checkpoints below the threshold (%s)',
     async (variant) => {
       let round = 0;
@@ -123,6 +123,16 @@ describe('authenticated daemon integration', () => {
           if (request.messages[0]?.content.includes('Automatic compaction:')) {
             summaries.push(structuredClone(request));
             if (variant === 'failed-summary') throw new Error('Summary provider unavailable');
+            if (variant === 'content-filter') {
+              yield { type: 'finished', reason: 'content_filter' };
+              return;
+            }
+            if (variant === 'length' && summaries.length === 1) {
+              yield { type: 'reasoning_delta', text: 'Thinking about the handoff...' };
+              yield { type: 'usage', usage: { inputTokens: 1000, outputTokens: 512 } };
+              yield { type: 'finished', reason: 'length' };
+              return;
+            }
             yield {
               type: 'text_delta',
               text: 'Read earlier files; preserve all original requirements. Use read_tool_result to recall exact results. Continue with the latest file.',
@@ -187,25 +197,46 @@ describe('authenticated daemon integration', () => {
       expect(requests).toHaveLength(5);
       for (const request of requests) {
         expect(JSON.stringify(request.messages)).toContain('retaining the existing API');
+        expect(request.messages[0]?.content).toContain('give brief visible progress updates');
         expect(
           1500 + Math.ceil(Buffer.byteLength(JSON.stringify(request.messages)) / 4),
         ).toBeLessThan(131072 * 0.8);
       }
-      expect(summaries.length).toBe(variant === 'eco' ? 3 : variant === 'off' ? 0 : 1);
+      expect(summaries.length).toBe(
+        variant === 'eco' ? 3 : variant === 'length' ? 4 : variant === 'off' ? 0 : 1,
+      );
       for (const summary of summaries) {
         expect(summary.tools).toBeUndefined();
-        expect(summary.config.maxTokens).toBeLessThanOrEqual(512);
+        expect(summary.purpose).toBe('context_summary');
+        expect(summary.config.maxTokens).toBeLessThanOrEqual(1000);
         expect(summary.messages[0]?.content).toContain('Eco incremental');
       }
-      if (variant === 'eco') {
+      if (variant === 'eco' || variant === 'length') {
         expect(response.runContextCompaction).toMatchObject({ strategy: 'incremental', count: 3 });
         expect(
           requests
             .at(-1)
             ?.messages.some((m) => m.toolCallId === 'read-3' && m.content.includes('EVIDENCE_139')),
         ).toBe(true);
-        expect(response.usage?.outputTokens).toBe(190);
+        expect(response.usage?.outputTokens).toBe(variant === 'length' ? 702 : 190);
       } else expect(response.runContextCompaction).toBeUndefined();
+      if (variant === 'length') {
+        expect(summaries.map((summary) => summary.config.maxTokens)).toEqual([
+          512, 1000, 1000, 1000,
+        ]);
+        expect(summaries[1]?.messages).toEqual(summaries[0]?.messages);
+        expect(
+          response.activities
+            ?.filter((a) => a.label === 'Eco 자동 요약')
+            .every((a) => a.status === 'completed'),
+        ).toBe(true);
+      }
+      if (variant === 'content-filter') {
+        expect(response.activities?.find((a) => a.label === 'Eco 자동 요약')).toMatchObject({
+          status: 'failed',
+          text: expect.stringContaining('모델 제공자가 요약 응답을 차단했습니다.'),
+        });
+      }
       expect(
         response.continuation?.filter(
           (m) => m.role === 'tool' && m.content.includes('EVIDENCE_139'),

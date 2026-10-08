@@ -905,6 +905,8 @@ export interface ToolDefinition {
   function: { name: string; description: string; parameters: Record<string, unknown> };
 }
 export interface InferenceRequest {
+  /** Internal, tool-free summary request; providers may reduce supported reasoning settings. */
+  purpose?: 'context_summary';
   config: ModelConfig;
   messages: InferenceMessage[];
   tools?: ToolDefinition[];

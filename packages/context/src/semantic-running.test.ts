@@ -2,6 +2,7 @@ import { expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import {
   defaultModelConfig,
+  AppError,
   defaultPlan,
   RUN_INPUT_PREFIX,
   type InferenceRequest,
@@ -30,6 +31,54 @@ const request = (): InferenceRequest => ({
     { role: 'user', content: 'Implement the researched change.' },
   ],
 });
+
+it('retries a token-limited summary with room for reasoning, without accepting partial text', async () => {
+  const base = request();
+  base.config.contextBudgetTokens = 32768;
+  base.config.maxTokens = 4096;
+  const calls: InferenceRequest[] = [];
+  const result = await compactRunningContextWithModel({
+    request: base,
+    continuation: [],
+    incremental: { through: 0, compactHistory: true },
+    measure,
+    signal: new AbortController().signal,
+    summarize: async (input) => {
+      calls.push(structuredClone(input));
+      if (calls.length === 1) throw new AppError('CONTEXT_SUMMARY_LENGTH', 'limit');
+      return 'Verified findings and original constraints remain. Continue implementation; no tests have been run yet.';
+    },
+  });
+  expect(calls.map((call) => call.config.maxTokens)).toEqual([512, 2048]);
+  expect(calls.every((call) => call.purpose === 'context_summary' && !call.tools)).toBe(true);
+  expect(calls[1]?.messages).toEqual(calls[0]?.messages);
+  expect(result?.checkpoint.summary).toContain('Verified findings');
+});
+
+it.each(['CONTEXT_SUMMARY_FINISH', 'PROVIDER_CONNECTION', 'CONTEXT_SUMMARY_LENGTH'])(
+  'preserves the source and does not retry unknown outcomes or exceed an explicit output cap (%s)',
+  async (code) => {
+    const base = request();
+    base.config.maxTokens = 512;
+    const before = structuredClone(base);
+    let calls = 0;
+    await expect(
+      compactRunningContextWithModel({
+        request: base,
+        continuation: [],
+        incremental: { through: 0, compactHistory: true },
+        measure,
+        signal: new AbortController().signal,
+        summarize: async () => {
+          calls++;
+          throw new AppError(code, 'fixture');
+        },
+      }),
+    ).rejects.toMatchObject({ code });
+    expect(calls).toBe(1);
+    expect(base).toEqual(before);
+  },
+);
 
 it('incrementally summarizes only older exchanges below 80%, preserving the latest result and original input', async () => {
   const base = request();
