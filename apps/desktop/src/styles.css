@@ -2232,15 +2232,6 @@ input[type='checkbox'] {
     scroll-behavior: auto !important;
   }
 }
-.mode-select {
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 5px 8px;
-  background: var(--surface);
-  color: inherit;
-  font: inherit;
-  font-size: 12px;
-}
 .task-details {
   margin: 0 0 12px 28px;
   font-size: 12px;

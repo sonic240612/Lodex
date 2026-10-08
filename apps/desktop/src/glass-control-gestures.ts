@@ -170,11 +170,17 @@ export function attachGlassControlGestures(root: HTMLElement): () => void {
     );
   }
 
+  function endHover(element: HTMLElement) {
+    const record = lenses.get(element);
+    // Once the pointer leaves, even a finishing release must not leave a rim.
+    if (record && pressed?.element !== element) restore(record);
+  }
+
   function over(event: PointerEvent) {
     if (event.pointerType === 'touch') return;
     const control = controlAt(event.target);
     if (hovered === control) return;
-    if (hovered && hovered !== pressed?.element) spring(hovered, neutral, true);
+    if (hovered && hovered !== pressed?.element) endHover(hovered);
     hovered = control;
     if (control && control !== pressed?.element) spring(control, hovering);
   }
@@ -182,7 +188,7 @@ export function attachGlassControlGestures(root: HTMLElement): () => void {
   function out(event: PointerEvent) {
     const next = controlAt(event.relatedTarget);
     if (hovered === next) return;
-    if (hovered && hovered !== pressed?.element) spring(hovered, neutral, true);
+    if (hovered && hovered !== pressed?.element) endHover(hovered);
     hovered = null;
   }
 
@@ -196,7 +202,7 @@ export function attachGlassControlGestures(root: HTMLElement): () => void {
     }
   }
 
-  function finish(cancelled: boolean) {
+  function finish(cancelled: boolean, outside = false) {
     const current = pressed;
     if (!current) return;
     pressed = null;
@@ -208,7 +214,8 @@ export function attachGlassControlGestures(root: HTMLElement): () => void {
       };
     }
     releaseCapture(current);
-    spring(current.element, neutral, true);
+    if (outside) endHover(current.element);
+    else spring(current.element, neutral, true);
   }
 
   function pointerDown(event: PointerEvent) {
@@ -260,7 +267,8 @@ export function attachGlassControlGestures(root: HTMLElement): () => void {
   }
 
   function pointerUp(event: PointerEvent) {
-    if (pressed?.pointerId === event.pointerId) finish(false);
+    if (pressed?.pointerId === event.pointerId)
+      finish(false, controlAt(event.target) !== pressed.element);
   }
 
   function pointerCancel(event: PointerEvent) {
@@ -304,7 +312,7 @@ export function attachGlassControlGestures(root: HTMLElement): () => void {
   }
 
   function leave() {
-    if (hovered && hovered !== pressed?.element) spring(hovered, neutral, true);
+    if (hovered && hovered !== pressed?.element) endHover(hovered);
     hovered = null;
   }
 

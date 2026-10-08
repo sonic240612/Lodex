@@ -18,17 +18,22 @@ export function GlassEffectsSettings({
   onChange,
   systemReducedMotion,
   allowMotion,
+  transparency,
+  onTransparencyChange,
 }: {
   preference: GlassEffectsPreference;
   onChange: (value: GlassEffectsPreference) => void;
   systemReducedMotion: boolean;
   allowMotion: boolean;
+  transparency: number;
+  onTransparencyChange: (value: number) => void;
 }) {
   const [open, setOpen] = useState(false);
   const control = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const items = useRef<(HTMLButtonElement | null)[]>([]);
   const menuId = useId();
+  const transparencyId = useId();
   useEffect(() => {
     if (!open) return;
     items.current[choices.findIndex((choice) => choice.value === preference)]?.focus();
@@ -45,6 +50,8 @@ export function GlassEffectsSettings({
       trigger.current?.focus();
       return;
     }
+    // Keep native range-input keys (arrows, Home, End) available to the slider.
+    if (!(event.target as Element).closest('[role="menu"]')) return;
     if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
     event.preventDefault();
     const current = items.current.findIndex((item) => item === document.activeElement);
@@ -112,6 +119,30 @@ export function GlassEffectsSettings({
               <small>{choice.detail}</small>
             </button>
           ))}
+        </div>
+        <div className="glass-transparency-control">
+          <label htmlFor={transparencyId}>
+            <span>유리 투명도</span>
+            <output htmlFor={transparencyId}>{transparency}%</output>
+          </label>
+          <input
+            id={transparencyId}
+            type="range"
+            min="0"
+            max="100"
+            step="1"
+            value={transparency}
+            aria-valuetext={`${transparency}%`}
+            aria-describedby={`${transparencyId}-hint`}
+            onChange={(event) => onTransparencyChange(Number(event.target.value))}
+          />
+          <div className="glass-transparency-scale" aria-hidden="true">
+            <span>불투명</span>
+            <span>투명</span>
+          </div>
+          <small id={`${transparencyId}-hint`}>
+            설정·모델 연결 창은 항상 불투명하게 표시합니다.
+          </small>
         </div>
         <div className="glass-optics-preview">
           <div className="glass-optics-preview-lines" aria-hidden="true" />

@@ -149,6 +149,80 @@ function complete(group: Spring[]) {
 }
 
 describe('glass material gestures', () => {
+  it.each(['pointerout', 'pointerleave'])(
+    'removes hover decoration immediately on %s without waiting for spring frames',
+    (type) => {
+      const f = fixture();
+      const button = f.button();
+      const cleanup = attachGlassControlGestures(f.root);
+      f.dispatch('pointerover', button);
+      const hover = latestSpring();
+      sample(hover, 1);
+      f.flush();
+      expect(button.number('--glass-reflection')).toBeGreaterThan(0);
+      expect(button.hasAttribute('data-glass-lens')).toBe(true);
+      sample(hover, 0.8); // A queued animation frame must also be cancelled on exit.
+      const count = springs.length;
+      f.dispatch(type, button, { relatedTarget: null });
+      expect(springs.length).toBe(count);
+      expect(button.properties.size).toBe(0);
+      expect(button.hasAttribute('data-glass-lens')).toBe(false);
+      expect(f.frames.size).toBe(0);
+      expect(hover.every((spring) => spring.stop.mock.calls.length === 1)).toBe(true);
+      sample(hover, 1.05);
+      expect(f.frames.size).toBe(0);
+      expect(button.style.transform).toBe('rotate(2deg)');
+      cleanup();
+    },
+  );
+
+  it('keeps the release spring only until the pointer leaves the clicked control', () => {
+    const f = fixture();
+    const button = f.button();
+    const cleanup = attachGlassControlGestures(f.root);
+    f.dispatch('pointerover', button);
+    f.dispatch('pointerdown', button);
+    sample(latestSpring(), 1);
+    f.flush();
+    f.dispatch('pointerup', button, {}, f.view);
+    const release = latestSpring();
+    const count = springs.length;
+    sample(release, 0.5);
+    f.flush();
+    expect(button.number('--glass-pressure')).toBeGreaterThan(0);
+    f.dispatch('pointerout', button, { relatedTarget: null });
+    f.dispatch('pointerleave', null);
+    expect(springs.length).toBe(count);
+    expect(release.every((spring) => spring.stop.mock.calls.length === 1)).toBe(true);
+    expect(button.properties.size).toBe(0);
+    expect(button.hasAttribute('data-glass-lens')).toBe(false);
+    sample(release, 0.8);
+    f.flush();
+    expect(button.properties.size).toBe(0);
+    cleanup();
+  });
+
+  it('keeps a held drag active outside the control but clears it immediately when released outside', () => {
+    const f = fixture();
+    const button = f.button();
+    const cleanup = attachGlassControlGestures(f.root);
+    f.dispatch('pointerover', button);
+    f.dispatch('pointerdown', button);
+    f.dispatch('pointerout', button, { relatedTarget: null });
+    f.dispatch('pointerleave', null);
+    f.dispatch('pointermove', null, { clientX: 200 }, f.view);
+    sample(latestSpring(), 1);
+    f.flush();
+    expect(button.number('--glass-pressure')).toBe(1);
+    expect(button.number('--glass-lens-x')).toBeGreaterThan(0);
+    const count = springs.length;
+    f.dispatch('pointerup', null, {}, f.view);
+    expect(springs.length).toBe(count);
+    expect(button.properties.size).toBe(0);
+    expect(button.hasAttribute('data-glass-lens')).toBe(false);
+    cleanup();
+  });
+
   it.each([null, '', 'permanent'])(
     'restores the original lens marker (%s) after resetting the same target',
     (original) => {
@@ -202,7 +276,7 @@ describe('glass material gestures', () => {
     expect(button.number('--glass-lens-x')).toBeLessThanOrEqual(12);
     expect(button.number('--glass-lens-scale-x')).toBeCloseTo(1.13);
     expect(button.number('--glass-lens-scale-y')).toBeLessThan(1);
-    const up = f.dispatch('pointerup', null, {}, f.view);
+    const up = f.dispatch('pointerup', button, {}, f.view);
     const release = latestSpring();
     expect(release[0]?.options.damping! ** 2).toBeLessThan(
       4 * release[0]!.options.stiffness * release[0]!.options.mass,
@@ -311,7 +385,6 @@ describe('glass material gestures', () => {
     expect(preview.number('--glass-lens-scale-y')).toBeCloseTo(1.13);
     f.dispatch('pointerup', null, {}, f.view);
     expect(preview.releasePointerCapture).toHaveBeenCalledWith(1);
-    complete(latestSpring());
     expect(preview.properties.size).toBe(0);
     cleanup();
   });

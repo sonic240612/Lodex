@@ -1,4 +1,12 @@
-import { useEffect, useRef, useState, lazy, Suspense, type FormEvent } from 'react';
+import {
+  useEffect,
+  useRef,
+  useState,
+  lazy,
+  Suspense,
+  type FormEvent,
+  type CSSProperties,
+} from 'react';
 import { AnimatePresence } from 'motion/react';
 import {
   modelConfigSchema,
@@ -236,19 +244,6 @@ export function App() {
     window.addEventListener('keydown', shortcut);
     return () => window.removeEventListener('keydown', shortcut);
   }, []);
-
-  useEffect(() => {
-    const shortcut = (event: KeyboardEvent) => {
-      if (document.querySelector('dialog[open]')) return;
-      if (event.ctrlKey && !event.altKey && !event.shiftKey && event.code === 'Period') {
-        event.preventDefault();
-        if (!busy && !running && workspace.connected)
-          void changeMode(mode === 'plan' ? 'build' : 'plan');
-      }
-    };
-    window.addEventListener('keydown', shortcut);
-    return () => window.removeEventListener('keydown', shortcut);
-  }, [busy, mode, running, session?.id, session?.version, workspace.connected]);
 
   useEffect(() => {
     let disposed = false,
@@ -706,29 +701,6 @@ export function App() {
     workspace.upsert(result.session);
     setSettingsRevision((value) => value + 1);
   }
-  async function changeMode(value: AgentMode) {
-    if (!session) {
-      setNewMode(value);
-      return;
-    }
-    setBusy(true);
-    try {
-      workspace.upsert(
-        (
-          await sendCommand({
-            type: 'set_mode',
-            sessionId: session.id,
-            expectedVersion: session.version,
-            mode: value,
-          })
-        ).session,
-      );
-    } catch (failure) {
-      setError(messageError(failure));
-    } finally {
-      setBusy(false);
-    }
-  }
   const latestAssistant = session?.messages.filter((m) => m.role === 'assistant').at(-1);
   const latestUsage = latestAssistant?.usage;
   const compactionIsNewer =
@@ -751,6 +723,7 @@ export function App() {
       data-design={design}
       data-glass-effects={glassEffects.preference}
       data-glass-motion={glassMotion ? 'full' : 'reduced'}
+      style={{ '--glass-transparency': glassEffects.transparency / 100 } as CSSProperties}
     >
       <AnimatePresence initial={false}>
         {sidebarOpen && (
@@ -932,6 +905,8 @@ export function App() {
                 onChange={glassEffects.setPreference}
                 systemReducedMotion={glassEffects.systemReducedMotion}
                 allowMotion={glassEffects.allowMotion}
+                transparency={glassEffects.transparency}
+                onTransparencyChange={glassEffects.setTransparency}
               />
             )}
             <button
@@ -1205,17 +1180,6 @@ export function App() {
               }}
             />
             <div className="composer-toolbar">
-              <select
-                className="mode-select"
-                aria-label="에이전트 모드"
-                title="Ctrl + . 로 전환"
-                value={mode}
-                disabled={busy || running || !workspace.connected}
-                onChange={(event) => void changeMode(event.target.value as AgentMode)}
-              >
-                <option value="plan">Plan</option>
-                <option value="build">Build</option>
-              </select>
               <button type="button" className="provider-tag" onClick={() => setSettings(true)}>
                 <Icon name={config.provider === 'openrouter' ? 'cloud' : 'chip'} size={15} />
                 {providerName(config.provider)}
@@ -1275,7 +1239,7 @@ export function App() {
                 </span>
               )}
               <div className="composer-spacer" />
-              <span className="composer-hint">Ctrl + . 모드 전환 · Shift + Enter 줄바꿈</span>
+              <span className="composer-hint">Shift + Enter 줄바꿈</span>
               {running ? (
                 <>
                   <button
