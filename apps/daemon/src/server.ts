@@ -1081,12 +1081,13 @@ export async function startServer(options: ServerOptions) {
         session.projectId &&
           (session.config.provider !== 'openrouter' || session.config.projectCloudConsent)
           ? {
+              deferAutoCompaction: true,
               projectInstructions: await readProjectInstructions(
                 await store.project(session.projectId),
                 new AbortController().signal,
               ),
             }
-          : {},
+          : { deferAutoCompaction: true },
       );
       if (command.type === 'resume_goal') {
         const evidence = goalResumeEvidence(session);

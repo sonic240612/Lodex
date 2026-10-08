@@ -29,7 +29,7 @@ function excerpt(text: string, budget: number): string {
 }
 
 /** Cut only at complete tool exchanges. Never remove an unacknowledged call. */
-function exchangeEnds(messages: readonly InferenceMessage[]): number[] {
+export function exchangeEnds(messages: readonly InferenceMessage[]): number[] {
   const ends: number[] = [];
   for (let index = 0; index < messages.length; index++) {
     const message = messages[index]!;
@@ -53,7 +53,7 @@ function exchangeEnds(messages: readonly InferenceMessage[]): number[] {
   return ends;
 }
 
-function pinnedBase(base: readonly InferenceMessage[]) {
+export function pinnedBase(base: readonly InferenceMessage[]) {
   // The current user request includes the immutable goal/plan and app records.
   // Other system instructions stay intact; only our historical checkpoint is reducible.
   return base.filter(
@@ -78,9 +78,21 @@ export function projectRunningContext(
     !exchangeEnds(continuation).includes(checkpoint.throughContinuationCount)
   )
     throw new AppError('CONTEXT_TOOL_PENDING', '체크포인트가 완료된 도구 교환을 나눕니다.');
+  const preserved =
+    checkpoint.preservedInputIndex === undefined
+      ? undefined
+      : continuation[checkpoint.preservedInputIndex];
+  if (
+    checkpoint.preservedInputIndex !== undefined &&
+    (checkpoint.preservedInputIndex >= checkpoint.throughContinuationCount ||
+      preserved?.role !== 'user' ||
+      !preserved.content.startsWith(RUN_INPUT_PREFIX))
+  )
+    throw new AppError('CONTEXT_CHECKPOINT', '보존된 실행 중 입력 범위가 잘못되었습니다.');
   return [
     ...(checkpoint.historyCompacted ? pinnedBase(base) : base),
     { role: 'system', content: RUN_CHECKPOINT + '\n' + RUN_GUIDANCE + '\n' + checkpoint.summary },
+    ...(preserved ? [preserved] : []),
     ...continuation.slice(checkpoint.throughContinuationCount),
   ];
 }

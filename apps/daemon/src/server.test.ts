@@ -108,6 +108,234 @@ afterEach(async () => {
   for (const close of cleanup.splice(0)) await close();
 });
 describe('authenticated daemon integration', () => {
+  it.each([1, 5])(
+    'charges automatic LLM summaries to OpenRouter goal budgets with %i allowed calls',
+    async (limit) => {
+      let summaries = 0,
+        work = 0;
+      const app = await setup(
+        {
+          listModels: async () => [
+            {
+              id: 'fixture/cloud',
+              name: 'Fixture',
+              contextLength: 20000,
+              maxCompletionTokens: 4000,
+              defaultTemperature: null,
+              defaultTopP: null,
+              tools: true,
+              pricing: { prompt: 0, completion: 0.000001, request: 0 },
+            },
+          ],
+          capabilities: async () => ({ tools: true, streaming: true }),
+          countInputTokens: async (request) =>
+            request.messages[0]?.content.includes('Automatic compaction:')
+              ? 1000
+              : request.messages.some((m) => m.content.includes('running context checkpoint'))
+                ? 4000
+                : 17000,
+          async *generate(request) {
+            yield { type: 'usage', usage: { inputTokens: 1000, outputTokens: 40, costUsd: 0.002 } };
+            if (request.messages[0]?.content.includes('Automatic compaction:')) {
+              summaries++;
+              yield {
+                type: 'text_delta',
+                text: 'Earlier investigation verified the result. Continue the current goal and retain its completion criteria.',
+              };
+              yield { type: 'finished', reason: 'stop' };
+            } else {
+              work++;
+              yield {
+                type: 'tool_call_delta',
+                index: 0,
+                id: 'cloud-goal-done',
+                name: 'complete_goal',
+                arguments: JSON.stringify({ evidence: 'Verified task.' }),
+              };
+              yield { type: 'finished', reason: 'tool_calls' };
+            }
+          },
+        },
+        {
+          openrouterKey: 'fixture-key',
+          openrouterKeySource: 'environment',
+          envFilePath: join(tmpdir(), 'lodex-fixture.env'),
+        },
+      );
+      let session = await app.create({
+        provider: 'openrouter',
+        model: 'fixture/cloud',
+        cloudConsent: true,
+        contextBudgetTokens: 20000,
+        maxTokens: 4000,
+        autoMaxTokens: true,
+      });
+      session = (
+        await app.store.apply(
+          makeCommand({
+            type: 'send_message',
+            sessionId: session.id,
+            expectedVersion: session.version,
+            content: 'Earlier verified research.',
+          }),
+        )
+      ).session;
+      session = await app.store.updateRun({
+        sessionId: session.id,
+        runId: session.run!.id,
+        text: 'Research complete.',
+        status: 'completed',
+      });
+      expect(
+        (
+          await app.command(
+            makeCommand({
+              type: 'start_goal',
+              sessionId: session.id,
+              expectedVersion: session.version,
+              goal: 'Complete the researched task',
+              limits: autopilotLimitsSchema.parse({ costUsd: 0.01, modelCalls: limit }),
+            }),
+          )
+        ).status,
+      ).toBe(200);
+      if (limit > 1) await confirmPending(app, session.id);
+      await expect
+        .poll(async () => (await app.store.session(session.id)).run?.status)
+        .toBe(limit === 1 ? 'failed' : 'completed');
+      session = await app.store.session(session.id);
+      expect(summaries).toBe(1);
+      expect(work).toBe(limit === 1 ? 0 : 1);
+      expect(session.autopilot).toMatchObject({
+        modelCalls: limit === 1 ? 1 : 2,
+        spentCostUsd: limit === 1 ? 0.002 : 0.004,
+        reservedCostUsd: 0,
+        costUnconfirmed: false,
+      });
+      expect(session.messages.at(-1)?.runContextCompaction?.method).toBe('semantic');
+    },
+  );
+
+  it.each([
+    [false, 7900],
+    [false, 8000],
+    [false, 8100],
+    [true, 7900],
+    [true, 8000],
+    [true, 8100],
+  ] as const)(
+    'automatically summarizes above 80%% with Eco=%s and %i input tokens',
+    async (eco, inputTokens) => {
+      let summaries = 0;
+      const normal: InferenceRequest[] = [];
+      const app = await setup(
+        {
+          listModels: async () => [],
+          capabilities: async () => ({ tools: true, streaming: true }),
+          countInputTokens: async (request) =>
+            request.messages[0]?.content.includes('Automatic compaction:')
+              ? 1000
+              : request.messages.some((m) => m.content.includes('running context checkpoint'))
+                ? 2500
+                : inputTokens,
+          async *generate(request) {
+            if (request.messages[0]?.content.includes('Automatic compaction:')) {
+              summaries++;
+              expect(request.tools).toBeUndefined();
+              yield {
+                type: 'text_delta',
+                text: 'The investigation is complete. Preserve current constraints and continue the saved ordered tasks.',
+              };
+            } else {
+              normal.push(request);
+              expect(request.messages.at(-1)?.content).toContain('Saved ordered task list');
+              expect(request.messages.at(-1)?.content).toContain('fresh pending task');
+              yield { type: 'text_delta', text: 'Ready to continue.' };
+            }
+            yield { type: 'usage', usage: { inputTokens: 1000, outputTokens: 40 } };
+            yield { type: 'finished', reason: 'stop' };
+          },
+        },
+        undefined,
+        undefined,
+        true,
+      );
+      let session = await app.create({
+        provider: 'llama-server',
+        model: 'fixture',
+        eco,
+        contextBudgetTokens: 10000,
+        maxTokens: 1000,
+        autoMaxTokens: false,
+      });
+      session = (
+        await app.store.apply(
+          makeCommand({
+            type: 'send_message',
+            sessionId: session.id,
+            expectedVersion: session.version,
+            content: 'Earlier investigation of the project.',
+          }),
+        )
+      ).session;
+      session = await app.store.updateRun({
+        sessionId: session.id,
+        runId: session.run!.id,
+        text: 'Verified existing APIs.',
+        status: 'completed',
+      });
+      session = (
+        await app.store.apply(
+          makeCommand({
+            type: 'save_task_list',
+            sessionId: session.id,
+            expectedVersion: session.version,
+            taskList: {
+              active: false,
+              tasks: [
+                {
+                  id: crypto.randomUUID(),
+                  title: 'fresh pending task',
+                  status: 'pending',
+                  details: '',
+                  summary: '',
+                },
+              ],
+            },
+          }),
+        )
+      ).session;
+      expect(
+        (
+          await app.command(
+            makeCommand({
+              type: 'send_message',
+              sessionId: session.id,
+              expectedVersion: session.version,
+              content: 'Continue using the investigation.',
+            }),
+          )
+        ).status,
+      ).toBe(200);
+      await expect
+        .poll(async () => (await app.store.session(session.id)).run?.status)
+        .toBe('completed');
+      const saved = await app.store.session(session.id);
+      expect(summaries).toBe(inputTokens > 8000 ? 1 : 0);
+      expect(normal).toHaveLength(1);
+      if (inputTokens > 8000) {
+        expect(saved.messages.at(-1)?.runContextCompaction).toMatchObject({
+          method: 'semantic',
+          originalInputTokens: inputTokens,
+          compactedInputTokens: 2500,
+          targetRatio: 0.25,
+        });
+        expect(saved.run?.context?.inputTokens).toBe(2500);
+        expect(saved.messages.at(-1)?.usage?.outputTokens).toBe(80);
+      }
+    },
+  );
+
   it('honors cancellation during a tokenizer recheck after automatic compaction', async () => {
     let generated = 0,
       waiting = false;
@@ -189,6 +417,15 @@ describe('authenticated daemon integration', () => {
           ? 11000
           : 3000,
       async *generate(request) {
+        if (request.messages[0]?.content.includes('Automatic compaction:')) {
+          yield {
+            type: 'text_delta',
+            text: 'Preserve the current task and constraints. Prior file/history results remain saved for recall.',
+          };
+          yield { type: 'finished', reason: 'stop' };
+          return;
+        }
+
         requests.push(structuredClone(request));
         if (round === 0 || round === 1) {
           yield {
@@ -246,7 +483,7 @@ describe('authenticated daemon integration', () => {
       answer.continuation?.find((entry) => entry.toolCallId === 'history-first')?.content,
     ).toContain('needle');
     expect(
-      answer.activities?.filter((entry) => entry.label === '컨텍스트 자동 빠른 압축'),
+      answer.activities?.filter((entry) => entry.label === '컨텍스트 자동 LLM 압축'),
     ).toHaveLength(1);
     expect(finished.run?.context?.inputTokens).toBe(3000);
   });
@@ -258,6 +495,15 @@ describe('authenticated daemon integration', () => {
       listModels: async () => [],
       capabilities: async () => ({ tools: true, streaming: true }),
       async *generate(request) {
+        if (request.messages[0]?.content.includes('Automatic compaction:')) {
+          yield {
+            type: 'text_delta',
+            text: 'Preserve the current task and constraints. Prior file/history results remain saved for recall.',
+          };
+          yield { type: 'finished', reason: 'stop' };
+          return;
+        }
+
         requests.push(structuredClone(request));
         if (round++ === 0) {
           yield {
@@ -459,13 +705,13 @@ describe('authenticated daemon integration', () => {
     if (automaticResponse.status !== 200)
       throw new Error('Automatic compaction failed: ' + (await automaticResponse.clone().text()));
     session = ((await automaticResponse.json()) as CommandResult).session;
-    expect(session.contextCompaction?.reason).toBe('automatic');
-    await expect.poll(() => requests.length).toBe(1);
-    expect(JSON.stringify(requests[0]!.messages)).toContain('conversation checkpoint');
     await expect
       .poll(async () => (await app.store.session(session.id)).run?.status)
       .toBe('completed');
     session = await app.store.session(session.id);
+    expect(session.messages.at(-1)?.runContextCompaction?.method).toBe('semantic');
+    expect(JSON.stringify(requests.at(-1)!.messages)).toContain('running context checkpoint');
+    const automaticCallCount = requests.length;
     const manualResponse = await app.command(
       makeCommand({
         type: 'compact_context',
@@ -480,9 +726,9 @@ describe('authenticated daemon integration', () => {
       method: 'semantic',
       model: 'fixture',
     });
-    expect(requests).toHaveLength(2);
-    expect(requests[1]!.tools).toBeUndefined();
-    expect(requests[1]!.messages[0]?.content).toContain('## Critical context');
+    expect(requests).toHaveLength(automaticCallCount + 1);
+    expect(requests.at(-1)!.tools).toBeUndefined();
+    expect(requests.at(-1)!.messages[0]?.content).toContain('## Critical context');
     const quickResponse = await app.command(
       makeCommand({
         type: 'quick_compact_context',
@@ -497,7 +743,7 @@ describe('authenticated daemon integration', () => {
         method: 'fast',
       },
     );
-    expect(requests).toHaveLength(2);
+    expect(requests).toHaveLength(automaticCallCount + 1);
   });
 
   it.each(['pass', 'fail', 'budget', 'no_progress'] as const)(
@@ -2631,10 +2877,17 @@ describe('authenticated daemon integration', () => {
     expect(calls).toBeGreaterThan(6);
     expect((await app.store.session(session.id)).messages.at(-1)?.status).toBe('cancelled');
   });
-  it('rejects a context overflow before storing messages or invoking the provider', async () => {
-    const app = await setup();
+  it('preserves an oversized current request and fails before invoking the provider', async () => {
+    let calls = 0;
+    const app = await setup({
+      listModels: async () => [],
+      capabilities: async () => ({ tools: true, streaming: true }),
+      async *generate() {
+        calls++;
+        yield { type: 'finished', reason: 'stop' };
+      },
+    });
     const session = await app.create({ contextBudgetTokens: 2048, maxTokens: 1024 });
-    const before = await app.store.snapshot();
     const result = await app.command(
       makeCommand({
         type: 'send_message',
@@ -2643,9 +2896,12 @@ describe('authenticated daemon integration', () => {
         content: 'x'.repeat(1500),
       }),
     );
-    expect(result.status).toBe(400);
-    expect((await result.json()).error.code).toBe('CONTEXT_BUDGET');
-    expect(await app.store.snapshot()).toEqual(before);
+    expect(result.status).toBe(200);
+    await expect.poll(async () => (await app.store.session(session.id)).run?.status).toBe('failed');
+    const stored = await app.store.session(session.id);
+    expect(stored.messages.at(-2)?.content).toBe('x'.repeat(1500));
+    expect(stored.messages.at(-1)?.error).toContain('컨텍스트 예산');
+    expect(calls).toBe(0);
   });
   it('persists the compiled input manifest and pins the plan revision during generation', async () => {
     let captured: InferenceRequest | undefined;

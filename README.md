@@ -29,7 +29,7 @@ Desktop agent harness for local LLMs and OpenRouter.
 - Connect stdio, Streamable HTTP, and legacy SSE MCP servers; select tools, preview resources and prompts, attach reviewed content, handle Sampling and Elicitation, and sign in with OAuth PKCE.
 - Pair a Telegram bot for remote messages, status, plan inspection, cancellation, and approved Build access.
 - Keep the daemon, Telegram, and active agent runs alive when the window is closed; reopen or quit Lodex from the system tray.
-- Use Eco mode, automatic fast compaction, bounded current-conversation history search, local ObservationPack archives, and on-demand recall for large tool results.
+- Use Eco mode, automatic LLM compaction, bounded current-conversation history search, local ObservationPack archives, and on-demand recall for large tool results.
 - Choose LLM-based **Context compaction** or deterministic **Quick compaction**. Automatic compaction displays before/after token estimates and the reduction percentage. Full transcripts stay in SQLite.
 - View Markdown/GFM messages, collapsible thinking and tool activity, active context usage, generation metrics, and a jump-to-latest button.
 - Manage models, skills, MCP, Telegram, worktrees, and backups in **Settings**. Type `/` in chat for commands; use arrow keys and Tab to select, or type a command directly.
@@ -92,11 +92,11 @@ OpenRouter requests retain their IDs and cost reservations across interruption. 
 
 - **Context compaction** calls the active model to create a structured handoff with goals, constraints, progress, decisions, files, verification, failures, and next steps.
 - **Quick compaction** uses the local deterministic extractor without another model call.
-- The latest four complete messages normally remain verbatim. Original messages are not deleted.
-- Eco mode compacts earlier and asks the model for shorter answers.
+- Automatic compaction starts above 80% of the configured context window and targets 25% (roughly 20–30%). It runs before requests and between tool rounds, with or without Eco. Large transcripts are summarized in chunks; originals are not deleted.
+- Current instructions, the latest live input, and task progress remain intact. If those fixed parts prevent reaching 30%, the UI shows the resulting usage. A smaller input allowance can require compaction before 80%.
 - In Eco mode, ObservationPack archives successful text results larger than 10 KiB. The first two model requests receive the full result; later requests use a stable handle with a 1 KiB head/tail excerpt and exact paged recall. Original session history stays intact. Archive failures keep the original result, and recall verifies its hash.
 - The agent can search persisted text from the current conversation when compaction omits an older detail; search results are bounded and never cross conversation boundaries.
-- Running tool loops also compact completed exchanges when the input budget is exceeded. The current request and instructions stay intact; saved tool results can be listed and read in exact UTF-8 pages without running the tool again.
+- Automatic summaries use the active model and count toward usage and cost budgets. Failed or cancelled summaries do not replace the previous checkpoint. Saved tool results remain available for exact paged recall. Eco also asks for concise answers.
 - With current llama.cpp servers, the context meter uses the model's applied chat template and tokenizer. Older or remote providers show the conservative estimate or provider-reported usage.
 
 ## Projects and execution

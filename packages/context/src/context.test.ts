@@ -318,10 +318,12 @@ describe('context compiler', () => {
     expect(extended.compaction?.reason).toBe('automatic');
     expect(extended.compaction!.compactedMessageCount).toBeGreaterThan(first.compactedMessageCount);
   });
-  it('includes current system and plan content in the independent byte cap', () => {
+  it('allows large input when it fits the configured model context', () => {
     const source = session();
     source.config.contextBudgetTokens = 2097152;
     source.plan = { ...defaultPlan(), includeInContext: true, goal: '한'.repeat(4000) };
-    expect(() => compileContext(source, 'x'.repeat(251000))).toThrow('256 KiB');
+    expect(compileContext(source, 'x'.repeat(251000)).manifest.serializedBytes).toBeGreaterThan(
+      262144,
+    );
   });
 });

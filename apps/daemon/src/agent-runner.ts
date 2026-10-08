@@ -8,6 +8,7 @@ import {
   type McpElicitationField,
   type ContextManifest,
   type InferenceMessage,
+  type InferenceRequest,
   type InferenceProvider,
   type Project,
   type Session,
@@ -24,7 +25,8 @@ import {
   taskListPrompt,
 } from '@lodex/contracts';
 import {
-  compactRunningContext,
+  compactRunningContextWithModel,
+  AUTO_COMPACTION_TRIGGER,
   projectRunningContext,
   measureRequest,
   type CompiledContext,
@@ -261,7 +263,6 @@ export async function runAgent(options: {
   const usedIds = new Set<string>();
   const callRecords = new Map<string, ModelCallRecord>();
   let runContextCompaction: RunContextCompaction | undefined;
-  let compactionActivity: Activity | undefined;
   let content = '',
     lastSave = 0,
     toolCount = 0,
@@ -807,88 +808,168 @@ export async function runAgent(options: {
       request.messages = withTaskProgress(request.messages);
       let exactInputTokens: number | null | undefined;
       let deliveryRecorded = false;
-      for (;;) {
+      let compactedThisRound = false;
+      const countInput = async (candidate: InferenceRequest) => {
         signal.throwIfAborted();
-        let overflow: AppError | undefined;
-        try {
-          manifest = {
-            ...context.manifest,
-            ...measureRequest(request),
-            messageCount: request.messages.length,
-          };
-          delete manifest.inputTokens;
-          delete manifest.tokenCountSource;
-          exactInputTokens = await provider.countInputTokens?.(request, signal);
-          if (typeof exactInputTokens === 'number') {
-            if (!Number.isSafeInteger(exactInputTokens) || exactInputTokens < 0)
-              throw new AppError(
-                'TOKEN_COUNT_INVALID',
-                '모델 서버의 입력 토큰 계산 결과가 올바르지 않습니다.',
-              );
-            manifest.inputTokens = exactInputTokens;
-            manifest.tokenCountSource = 'llama_cpp_chat_template';
-            if (
-              exactInputTokens >
-              manifest.contextBudgetTokens -
-                manifest.outputReserveTokens -
-                manifest.safetyReserveTokens
-            )
-              overflow = new AppError(
-                'CONTEXT_BUDGET',
-                '실제 입력 토큰이 컨텍스트 예산을 초과했습니다.',
-              );
-          }
-        } catch (error) {
-          if (
-            !(error instanceof AppError) ||
-            !['CONTEXT_LIMIT', 'CONTEXT_BUDGET'].includes(error.code)
-          )
-            throw error;
-          overflow = error;
+        const exact = await provider.countInputTokens?.(candidate, signal);
+        signal.throwIfAborted();
+        if (typeof exact === 'number' && (!Number.isSafeInteger(exact) || exact < 0))
+          throw new AppError(
+            'TOKEN_COUNT_INVALID',
+            '모델 서버의 입력 토큰 계산 결과가 올바르지 않습니다.',
+          );
+        return {
+          exact,
+          tokens: exact ?? measureRequest(candidate, { enforce: false }).inputEstimateTokens,
+        };
+      };
+      for (;;) {
+        const counted = await countInput(request);
+        exactInputTokens = counted.exact;
+        manifest = {
+          ...context.manifest,
+          ...measureRequest(request, { enforce: false }),
+          messageCount: request.messages.length,
+        };
+        delete manifest.inputTokens;
+        delete manifest.tokenCountSource;
+        if (typeof exactInputTokens === 'number') {
+          manifest.inputTokens = exactInputTokens;
+          manifest.tokenCountSource = 'llama_cpp_chat_template';
         }
-        if (!overflow && options.observations && !deliveryRecorded) {
-          const delivered = await options.observations.project(
-            session.id,
-            projectRunningContext(context.request.messages, continuation, runContextCompaction),
-            { enabled: session.config.eco, requestId: `${runId}:${modelCount + 1}` },
+        const available =
+          manifest.contextBudgetTokens -
+          manifest.outputReserveTokens -
+          manifest.safetyReserveTokens;
+        const overflow = counted.tokens > available;
+        if (
+          !compactedThisRound &&
+          (overflow || counted.tokens > manifest.contextBudgetTokens * AUTO_COMPACTION_TRIGGER)
+        ) {
+          const card: Activity = {
+            id: randomUUID(),
+            kind: 'tool',
+            label: '컨텍스트 자동 LLM 압축',
+            status: 'running',
+            text: '현재 모델로 요약 중 · 컨텍스트 25% 목표',
+          };
+          activities.push(card);
+          await save();
+          try {
+            const compacted = await compactRunningContextWithModel({
+              request: context.request,
+              continuation,
+              ...(runContextCompaction ? { previous: runContextCompaction } : {}),
+              historyThroughMessageId: context.manifest.historyMessageIds.at(-1),
+              suffix: withTaskProgress([]),
+              signal,
+              measure: async (candidate) => (await countInput(candidate)).tokens,
+              summarize: async (candidate) => {
+                const input = (await countInput(candidate)).tokens;
+                measureRequest(candidate, { inputTokens: input });
+                const reservation = await reserveModelCall(candidate.config, input);
+                const summaryUsage: Partial<Usage> = { inputTokens: input };
+                rounds.push(summaryUsage);
+                let summary = '',
+                  finish: string | null = null,
+                  completed = false;
+                const summarySignal = AbortSignal.any([signal, AbortSignal.timeout(120_000)]);
+                try {
+                  for await (const event of provider.generate(candidate, summarySignal)) {
+                    summarySignal.throwIfAborted();
+                    if (finish && event.type !== 'usage')
+                      throw new AppError(
+                        'AFTER_FINISH',
+                        '요약 종료 이후 추가 이벤트를 받았습니다.',
+                      );
+                    if (event.type === 'text_delta') {
+                      summary += event.text;
+                      if (summary.length > 262144)
+                        throw new AppError(
+                          'CONTEXT_SUMMARY_INVALID',
+                          '자동 요약 응답이 너무 큽니다. 원문은 보존했습니다.',
+                        );
+                    } else if (event.type === 'tool_call_delta')
+                      throw new AppError(
+                        'CONTEXT_SUMMARY_TOOLS',
+                        '요약 응답에 도구 호출이 포함되어 적용하지 않았습니다.',
+                      );
+                    else if (event.type === 'usage') {
+                      Object.assign(summaryUsage, event.usage);
+                      await noteModelUsage(reservation, summaryUsage);
+                    } else if (event.type === 'error')
+                      throw new AppError(event.code, event.message, 502);
+                    else if (event.type === 'finished') finish = event.reason;
+                  }
+                  completed = true;
+                } finally {
+                  await settleModelCall(candidate.config, reservation, summaryUsage, completed);
+                  if (
+                    autopilot &&
+                    typeof summaryUsage.outputTokens === 'number' &&
+                    Number.isFinite(summaryUsage.outputTokens) &&
+                    summaryUsage.outputTokens >= 0
+                  )
+                    autopilot.reservedOutputTokens +=
+                      summaryUsage.outputTokens - candidate.config.maxTokens;
+                }
+                if (finish !== 'stop')
+                  throw new AppError(
+                    'CONTEXT_SUMMARY_FINISH',
+                    '자동 LLM 요약이 정상 완료되지 않았습니다. 원문은 보존했습니다. 다시 시도해 주세요.',
+                  );
+                return summary;
+              },
+            });
+            compactedThisRound = true;
+            if (compacted) {
+              runContextCompaction = compacted.checkpoint;
+              request = compacted.request;
+              deliveryRecorded = false;
+              card.status = 'completed';
+              card.text = JSON.stringify({
+                method: 'semantic',
+                count: runContextCompaction.count,
+                originalInputTokens: runContextCompaction.originalInputTokens,
+                compactedInputTokens: runContextCompaction.compactedInputTokens,
+                targetRatio: 0.25,
+                targetLimited: runContextCompaction.targetLimited,
+                message: runContextCompaction.targetLimited
+                  ? 'LLM 요약 완료. 현재 요청과 필수 지침을 유지하여 30% 이하로 줄이지 못했습니다. 원문은 보존됩니다.'
+                  : 'LLM 요약 완료. 현재 요청과 최신 작업 상태를 유지했습니다. 원문은 보존되며 도구 결과를 다시 읽을 수 있습니다.',
+              });
+              await save();
+              if (await includeInputs()) continue modelLoop;
+              continue;
+            }
+            activities.splice(activities.indexOf(card), 1);
+          } catch (error) {
+            card.status = signal.aborted ? 'cancelled' : 'failed';
+            card.text = error instanceof Error ? error.message : String(error);
+            await save();
+            throw error;
+          }
+        }
+        if (options.observations && !deliveryRecorded) {
+          const delivered = withTaskProgress(
+            await options.observations.project(
+              session.id,
+              projectRunningContext(context.request.messages, continuation, runContextCompaction),
+              { enabled: session.config.eco, requestId: `${runId}:${modelCount + 1}` },
+            ),
           );
           deliveryRecorded = true;
           if (JSON.stringify(delivered) !== JSON.stringify(request.messages)) {
-            // Archive/ledger errors fail open to the original result. Recheck
-            // that actual payload before reserving cost or sending the model.
             request.messages = delivered;
             continue;
           }
         }
-        if (!overflow) break;
-        const compacted = compactRunningContext({
-          request: context.request,
-          continuation,
-          ...(runContextCompaction ? { previous: runContextCompaction } : {}),
-          force: true,
-        });
-        runContextCompaction = compacted.checkpoint;
-        request = compacted.request;
-        request.messages = withTaskProgress(request.messages);
-        if (!compactionActivity) {
-          compactionActivity = {
-            id: randomUUID(),
-            kind: 'tool',
-            label: '컨텍스트 자동 빠른 압축',
-            status: 'completed',
-            text: '',
-          };
-          activities.push(compactionActivity);
-        }
-        compactionActivity.text = JSON.stringify({
-          method: 'fast',
-          count: runContextCompaction.count,
-          originalEstimateTokens: runContextCompaction.originalEstimateTokens,
-          compactedEstimateTokens: runContextCompaction.compactedEstimateTokens,
-          message:
-            '현재 요청과 지침을 유지하고 완료된 교환을 요약했습니다. 원문은 저장되어 있으며 read_tool_result로 다시 읽을 수 있습니다.',
-        });
-        await save();
+        if (overflow)
+          throw new AppError(
+            'CONTEXT_FIXED_TOO_LARGE',
+            '현재 요청·필수 지침·도구 정의가 컨텍스트 예산을 초과합니다. 예산을 늘리거나 첨부 자료를 줄여 주세요. 원문은 보존했습니다.',
+          );
+        break;
       }
       if (runContextCompaction)
         manifest!.runCompaction = {

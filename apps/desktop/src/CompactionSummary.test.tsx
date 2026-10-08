@@ -50,3 +50,38 @@ it('reports actual before/after estimates and reduction without ambiguous k suff
   });
   expect(lastCompaction(value)?.kind).toBe('실행 중 자동');
 });
+
+it('shows LLM token counts and the resulting context percentage', () => {
+  const value: Session = {
+    ...session,
+    messages: [
+      {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        content: '',
+        createdAt: '',
+        status: 'complete',
+        error: null,
+        usage: null,
+        runContextCompaction: {
+          summary: 'summary',
+          method: 'semantic',
+          throughContinuationCount: 2,
+          historyCompacted: true,
+          createdAt: '2026-10-08T01:00:00Z',
+          count: 1,
+          originalEstimateTokens: 200000,
+          compactedEstimateTokens: 70000,
+          originalInputTokens: 81000,
+          compactedInputTokens: 25000,
+          contextBudgetTokens: 100000,
+          targetRatio: 0.25,
+        },
+      },
+    ],
+  };
+  const html = renderToStaticMarkup(<CompactionSummary session={value} />);
+  expect(html).toContain('LLM 압축');
+  expect(html).toContain('81,000 → 25,000');
+  expect(html).toContain('컨텍스트 25%');
+});

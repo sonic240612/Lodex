@@ -1325,6 +1325,7 @@ export function App() {
                     빠른 압축
                   </button>
                 </div>
+                <small>자동 LLM 압축: 80% 초과 시 시작 · 25% 목표</small>
                 {session?.contextCompaction && (
                   <small>
                     최근 압축: {session.contextCompaction.compactedMessageCount}개 메시지 ·{' '}

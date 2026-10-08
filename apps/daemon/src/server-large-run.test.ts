@@ -29,6 +29,15 @@ it.each(['stop', 'error'] as const)(
         listModels: async () => [],
         capabilities: async () => ({ streaming: true, tools: true }),
         generate: async function* (request) {
+          if (request.messages[0]?.content.includes('Automatic compaction:')) {
+            yield {
+              type: 'text_delta',
+              text: 'Applied large-edit and large-create. Files are saved; their original results remain available for recall.',
+            };
+            yield { type: 'finished', reason: 'stop' };
+            return;
+          }
+
           if (++calls === 1) {
             yield {
               type: 'tool_call_delta',

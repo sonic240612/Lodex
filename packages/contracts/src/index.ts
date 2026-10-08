@@ -511,7 +511,16 @@ export interface Message {
   runContextCompaction?: RunContextCompaction;
 }
 export const runContextCompactionSchema = z.strictObject({
-  summary: z.string().trim().min(1).max(8000),
+  summary: z.string().trim().min(1).max(262144),
+  method: z.enum(['fast', 'semantic']).optional(),
+  model: z.string().optional(),
+  historyThroughMessageId: idSchema.optional(),
+  preservedInputIndex: z.number().int().nonnegative().optional(),
+  targetRatio: z.number().min(0).max(1).optional(),
+  targetLimited: z.boolean().optional(),
+  contextBudgetTokens: z.number().int().positive().optional(),
+  originalInputTokens: z.number().int().nonnegative().optional(),
+  compactedInputTokens: z.number().int().nonnegative().optional(),
   throughContinuationCount: z.number().int().nonnegative(),
   historyCompacted: z.boolean(),
   createdAt: z.iso.datetime(),
