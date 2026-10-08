@@ -21,6 +21,7 @@ import {
   activityProposal,
   defaultPermissionMode,
   jobCommandSchema,
+  taskListPrompt,
 } from '@lodex/contracts';
 import {
   compactRunningContext,
@@ -49,6 +50,7 @@ import {
 } from '@lodex/tools';
 import type { Store } from '@lodex/storage';
 import { proposePlan } from './planning';
+import { createTaskList, updateTask } from './task-list';
 import { readStoredToolResult, searchSessionHistory } from './history';
 import { completeGoal, invalidateVerification, verifyAutopilot } from './autopilot';
 import { runSkillTool } from './skills';
@@ -232,6 +234,8 @@ export async function runAgent(options: {
 }) {
   const { store, session, provider, context, controller, project } = options;
   const runId = session.run!.id;
+  let taskList = session.taskList ? structuredClone(session.taskList) : undefined;
+  const tracksTasks = context.request.tools?.some((tool) => tool.function.name === 'update_task');
   const persistedAutopilot =
     session.autopilot?.runId === runId ? structuredClone(session.autopilot) : undefined;
   const autopilot = persistedAutopilot
@@ -288,12 +292,11 @@ export async function runAgent(options: {
     ttftMs: rounds[0]?.ttftMs ?? null,
   });
   const save = async (terminal?: 'completed' | 'failed' | 'cancelled', error?: string) => {
-    if (content.length > 262144 || Buffer.byteLength(JSON.stringify(activities)) > 262144)
-      throw new AppError('OUTPUT_LIMIT', '응답 또는 활동 기록 한도를 초과했습니다.');
     const updated = await store.updateRun({
       sessionId: session.id,
       runId,
       text: content,
+      ...(taskList ? { taskList } : {}),
       activities,
       continuation,
       ...(runContextCompaction ? { runContextCompaction } : {}),
@@ -796,6 +799,12 @@ export async function runAgent(options: {
           : projectRunningContext(context.request.messages, continuation, runContextCompaction),
       };
       let manifest: ContextManifest;
+      // Refresh progress after projection so a context checkpoint cannot resurrect old statuses.
+      const withTaskProgress = (messages: InferenceMessage[]) =>
+        tracksTasks && taskList?.tasks.length
+          ? [...messages, { role: 'system' as const, content: taskListPrompt(taskList) }]
+          : messages;
+      request.messages = withTaskProgress(request.messages);
       let exactInputTokens: number | null | undefined;
       let deliveryRecorded = false;
       for (;;) {
@@ -860,6 +869,7 @@ export async function runAgent(options: {
         });
         runContextCompaction = compacted.checkpoint;
         request = compacted.request;
+        request.messages = withTaskProgress(request.messages);
         if (!compactionActivity) {
           compactionActivity = {
             id: randomUUID(),
@@ -977,6 +987,24 @@ export async function runAgent(options: {
       )
         autopilot.reservedOutputTokens += roundUsage.outputTokens - session.config.maxTokens;
       if (thinking) thinking.status = 'completed';
+      if (finished === 'length' || finished === 'max_tokens') {
+        // A truncated call has no effect. Never replay or execute its partial JSON.
+        for (const card of cards.values()) {
+          card.status = 'cancelled';
+          card.text =
+            '출력 토큰 한도에서 끊긴 도구 요청입니다. 실행하지 않았으며 다음 요청에서 이어갑니다.';
+        }
+        if (roundText) continuation.push({ role: 'assistant', content: roundText });
+        continuation.push({
+          role: 'user',
+          content: cards.size
+            ? 'The output token limit interrupted generation. None of those partial tool calls executed. Submit complete calls with smaller edit chunks, retaining the existing file. Do not delete and recreate it to bypass the token limit.'
+            : 'The output token limit interrupted generation. Continue the unfinished response or work from the point reached; do not repeat completed work.',
+        });
+        if (roundText) content += '\n\n';
+        await save();
+        continue;
+      }
       const calls = assembler.finish();
       const assistant: InferenceMessage = {
         role: 'assistant',
@@ -991,6 +1019,16 @@ export async function runAgent(options: {
         continuation.push(assistant);
         signal.throwIfAborted();
         if (await includeInputs()) continue;
+        if (tracksTasks && taskList?.active) {
+          continuation.push({
+            role: 'user',
+            content:
+              'The task list is still active. Continue the first unfinished task and update_task after checking its result. If blocked, record the concrete reason with status blocked. If the user requested a pause, use pending.',
+          });
+          if (roundText) content += '\n\n';
+          await save();
+          continue;
+        }
         if (autopilot) {
           if (++emptyRounds >= 2)
             throw new AppError(
@@ -1577,6 +1615,24 @@ export async function runAgent(options: {
               await store.recordSkillRead(session.id, card.id, provenance);
             },
           });
+        } else if (call.name === 'set_task_list' || call.name === 'update_task') {
+          try {
+            if (call.name === 'set_task_list') {
+              if (session.mode !== 'plan') throw new Error('Plan 모드에서 작업 계획을 작성하세요.');
+              taskList = createTaskList(call.arguments, session.run!.messageId);
+            } else {
+              if (session.mode === 'plan')
+                throw new Error('Plan 모드에서는 작업을 실행하지 않습니다.');
+              taskList = updateTask(taskList, call.arguments);
+            }
+            await save();
+            result = JSON.stringify({ status: 'saved', taskList });
+          } catch (error) {
+            result = JSON.stringify({
+              error: 'TASK_LIST_INVALID',
+              message: error instanceof Error ? error.message : String(error),
+            });
+          }
         } else if (call.name === 'propose_plan') {
           try {
             card.planProposal = proposePlan(call.arguments, session.plan);
@@ -2112,8 +2168,10 @@ export async function runAgent(options: {
     await store.updateRun({
       sessionId: session.id,
       runId,
-      text: content.slice(0, 262144),
-      activities: activities.map((a) => ({ ...a, text: a.text.slice(0, 32768) })),
+      text: content,
+      activities,
+      continuation,
+      ...(taskList ? { taskList } : {}),
       usage: usage(),
       ...(autopilot ? { autopilot } : {}),
       status: cancelled ? 'cancelled' : 'failed',

@@ -38,6 +38,7 @@ import { SettingsSurface } from './SettingsSurface';
 import { SlashMenu } from './SlashMenu';
 import { CompactionSummary } from './CompactionSummary';
 import { CommandJobsPanel } from './CommandJobsPanel';
+import { TaskListPanel } from './TaskListPanel';
 import {
   availableSlashCommands,
   suggestSlashCommands,
@@ -1355,15 +1356,27 @@ export function App() {
         <aside className="plan-panel" aria-label="작업 계획과 할 일">
           <div className="plan-header">
             <Icon name="goal" size={19} />
-            <strong>목표 추진</strong>
+            <strong>작업 계획</strong>
             <span className="small-badge">편집</span>
           </div>
-          <PlanEditor
-            key={session?.id ?? 'new'}
+          <TaskListPanel
+            key={'tasks-' + (session?.id ?? 'new')}
             session={session}
             ensureSession={createSession}
             onError={setError}
           />
+          <details
+            className="goal-section"
+            open={session?.autopilot?.status === 'running' || undefined}
+          >
+            <summary>목표 추진 · Goal</summary>
+            <PlanEditor
+              key={session?.id ?? 'new'}
+              session={session}
+              ensureSession={createSession}
+              onError={setError}
+            />
+          </details>
           <div className="run-panel">
             {session?.projectId && <ExecutionPanel key={session.id} session={session} />}
             <div className="section-label">현재 실행</div>

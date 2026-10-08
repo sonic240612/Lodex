@@ -1689,6 +1689,7 @@ describe('authenticated daemon integration', () => {
       async *generate(request) {
         expect(request.tools?.map((t) => t.function.name)).toEqual([
           'propose_plan',
+          'set_task_list',
           'search_history',
           'read_tool_result',
           'web_fetch',

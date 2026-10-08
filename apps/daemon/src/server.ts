@@ -73,6 +73,8 @@ import {
 } from '@lodex/tools';
 import { runAgent } from './agent-runner';
 import { planningTool } from './planning';
+import { setTaskListTool, updateTaskTool } from './task-list';
+import { startTaskList } from '@lodex/contracts';
 import { historySearchTool, toolResultRecallTool } from './history';
 import { goalCompletionTool, goalResumeEvidence, verificationTools } from './autopilot';
 import { reconcileCosts } from './costs';
@@ -798,6 +800,7 @@ export async function startServer(options: ServerOptions) {
     }
     if (
       command.type === 'send_message' ||
+      command.type === 'start_task_list' ||
       command.type === 'start_autopilot' ||
       command.type === 'start_goal' ||
       command.type === 'resume_goal'
@@ -805,7 +808,9 @@ export async function startServer(options: ServerOptions) {
       const stored = await store.session(command.sessionId);
       const modeSession = {
         ...stored,
-        ...(command.type === 'start_goal' || command.type === 'start_autopilot'
+        ...(command.type === 'start_goal' ||
+        command.type === 'start_autopilot' ||
+        command.type === 'start_task_list'
           ? { mode: 'build' as const }
           : {}),
       };
@@ -957,6 +962,12 @@ export async function startServer(options: ServerOptions) {
             )
           : [];
       tools.push(planningTool);
+      if (session.mode === 'plan') tools.push(setTaskListTool);
+      else if (
+        session.taskList?.tasks.length &&
+        !['start_goal', 'resume_goal', 'start_autopilot'].includes(command.type)
+      )
+        tools.push(updateTaskTool);
       tools.push(historySearchTool);
       tools.push(toolResultRecallTool);
       tools.push(webFetchTool);
@@ -1014,7 +1025,11 @@ export async function startServer(options: ServerOptions) {
         );
       let content: string;
       let contextSession = session;
-      if (command.type === 'start_autopilot') {
+      if (command.type === 'start_task_list') {
+        contextSession = { ...session, taskList: startTaskList(session.taskList) };
+        content =
+          'Execute the saved task list in order, starting at the first unfinished item. Reuse Plan investigation and check each result.';
+      } else if (command.type === 'start_autopilot') {
         const autopilot = prepareAutopilot(session, command.taskIds, command.limits);
         tools.push(...verificationTools);
         content = autopilotPrompt(autopilot);
@@ -1052,7 +1067,11 @@ export async function startServer(options: ServerOptions) {
         : undefined;
       context = compileContext(
         observationPreview
-          ? { ...observationPreview.session, plan: contextSession.plan }
+          ? {
+              ...observationPreview.session,
+              plan: contextSession.plan,
+              ...(contextSession.taskList ? { taskList: contextSession.taskList } : {}),
+            }
           : contextSession,
         content,
         tools,
@@ -1145,6 +1164,7 @@ export async function startServer(options: ServerOptions) {
     if (
       !result.replayed &&
       (command.type === 'send_message' ||
+        command.type === 'start_task_list' ||
         command.type === 'start_autopilot' ||
         command.type === 'start_goal' ||
         command.type === 'resume_goal')

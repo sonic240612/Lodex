@@ -1,5 +1,7 @@
 import { z } from 'zod';
 import type { SecretSource } from './integrations';
+import { taskListSchema, type TaskList } from './task-list';
+export * from './task-list';
 import {
   agentRoutingConfigSchema,
   modelConfigSchema,
@@ -394,6 +396,13 @@ export const commandSchema = z.discriminatedUnion('type', [
     mode: permissionModeSchema,
   }),
   z.strictObject({ ...envelope, ...target, type: z.literal('save_plan'), plan: planSchema }),
+  z.strictObject({
+    ...envelope,
+    ...target,
+    type: z.literal('save_task_list'),
+    taskList: taskListSchema,
+  }),
+  z.strictObject({ ...envelope, ...target, type: z.literal('start_task_list') }),
   z.strictObject({ ...envelope, ...target, type: z.literal('set_mode'), mode: modeSchema }),
   z.strictObject({ ...envelope, ...target, type: z.literal('compact_context') }),
   z.strictObject({ ...envelope, ...target, type: z.literal('quick_compact_context') }),
@@ -761,6 +770,7 @@ export interface ContextManifest {
   >;
 }
 export interface Session {
+  taskList?: TaskList;
   routing?: AgentRoutingConfig;
   mcpAttachments?: McpContextAttachment[];
   mcp?: McpSelection[];

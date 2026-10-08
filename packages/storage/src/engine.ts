@@ -6,6 +6,10 @@ import {
   AppError,
   emptyUsage,
   defaultPlan,
+  taskListSchema,
+  startTaskList,
+  pauseTaskList,
+  type TaskList,
   modelConfigSchema,
   agentRoutingConfigSchema,
   resolveModelConfig,
@@ -141,10 +145,12 @@ function hydrate(session: Session): Session {
         : {}),
     })),
     plan: planSchema.parse(session.plan),
+    ...(session.taskList ? { taskList: taskListSchema.parse(session.taskList) } : {}),
   };
 }
 
 export interface RunUpdate {
+  taskList?: TaskList;
   autopilot?: AutopilotState;
   sessionId: string;
   runId: string;
@@ -764,6 +770,7 @@ export class StorageEngine {
             throw new AppError('RUN_CONFLICT', '중지하려는 실행이 현재 실행과 다릅니다.', 409);
           if (session.run.status === 'running') {
             session.run.status = 'cancelled';
+            if (session.taskList?.active) session.taskList = pauseTaskList(session.taskList);
             session.run.finishedAt = now;
             for (const input of session.messages)
               if (input.runInput?.runId === command.runId && input.runInput.status === 'queued')
@@ -818,6 +825,10 @@ export class StorageEngine {
             session.autopilot.status = 'cancelled';
             session.autopilot.reason = '사용자가 Autopilot을 껐습니다.';
           }
+        } else if (command.type === 'save_task_list') {
+          if (session.run?.status === 'running')
+            throw new AppError('BUSY', '실행을 멈춘 뒤 작업 계획을 편집하세요.', 409);
+          session.taskList = taskListSchema.parse(command.taskList);
         } else if (command.type === 'save_plan') {
           if (session.run?.status === 'running' && session.autopilot?.runId === session.run.id)
             throw new AppError('BUSY', 'Autopilot을 중지한 뒤 실행 계획을 편집하세요.', 409);
@@ -973,7 +984,10 @@ export class StorageEngine {
             if (context?.mcpAttachmentIds?.length) session.hasMcpHistory = true;
             const messageId = randomUUID();
             const runId = randomUUID();
-            if (command.type === 'start_autopilot') {
+            if (command.type === 'start_task_list') {
+              session.mode = 'build';
+              session.taskList = startTaskList(session.taskList);
+            } else if (command.type === 'start_autopilot') {
               session.mode = 'build';
               session.autopilot = prepareAutopilot(session, command.taskIds, command.limits, runId);
             } else if (command.type === 'start_goal') {
@@ -984,15 +998,17 @@ export class StorageEngine {
             const content =
               command.type === 'send_message'
                 ? command.content
-                : command.type === 'start_goal'
-                  ? '/goal ' + command.goal
-                  : command.type === 'resume_goal'
-                    ? '/goal 계속: ' + session.autopilot!.plan.goal
-                    : '목표 실행: ' +
-                      session.plan.goal +
-                      '\n' +
-                      session.autopilot!.taskIds.length +
-                      '개 작업 · 실행 횟수 제한 없음';
+                : command.type === 'start_task_list'
+                  ? '저장된 작업 계획을 첫 번째 미완료 항목부터 순서대로 실행해 줘.'
+                  : command.type === 'start_goal'
+                    ? '/goal ' + command.goal
+                    : command.type === 'resume_goal'
+                      ? '/goal 계속: ' + session.autopilot!.plan.goal
+                      : '목표 실행: ' +
+                        session.plan.goal +
+                        '\n' +
+                        session.autopilot!.taskIds.length +
+                        '개 작업 · 실행 횟수 제한 없음';
             session.messages.push({
               id: randomUUID(),
               role: 'user',
@@ -1048,6 +1064,7 @@ export class StorageEngine {
       const message = session.messages.find((m) => m.id === session.run?.messageId);
       if (!message) throw new AppError('CORRUPT_RUN', '실행 메시지를 찾을 수 없습니다.', 500);
       if (update.text !== undefined) message.content = update.text;
+      if (update.taskList) session.taskList = taskListSchema.parse(update.taskList);
       if (update.activities) message.activities = update.activities;
       if (update.continuation) message.continuation = update.continuation;
       if (update.runContextCompaction) {
@@ -1088,6 +1105,9 @@ export class StorageEngine {
         session.run.finishedAt = new Date().toISOString();
         message.status = update.status === 'completed' ? 'complete' : update.status;
         message.error = update.error ?? null;
+        if (update.status !== 'completed' && session.taskList?.active)
+          session.taskList = pauseTaskList(session.taskList);
+        if (update.status === 'completed' && message.agentMode === 'plan') session.mode = 'build';
         for (const input of session.messages)
           if (input.runInput?.runId === update.runId && input.runInput.status === 'queued')
             input.runInput.status = 'interrupted';

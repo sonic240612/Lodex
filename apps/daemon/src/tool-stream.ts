@@ -8,7 +8,7 @@ export class ToolCallAssembler {
     if (event.id && event.id !== call.id) call.id += event.id;
     if (event.name) call.name += event.name;
     if (event.arguments) call.arguments += event.arguments;
-    if (call.id.length > 200 || call.name.length > 100 || Buffer.byteLength(call.arguments) > 16384)
+    if (call.id.length > 200 || call.name.length > 100)
       throw new AppError('TOOL_LIMIT', '도구 요청이 너무 큽니다.');
     this.calls.set(event.index, call);
     return call;
@@ -49,6 +49,4 @@ export function mergeDetails(target: Record<string, unknown>[], value: unknown) 
       }
     }
   }
-  if (Buffer.byteLength(JSON.stringify(target)) > 131072)
-    throw new AppError('REASONING_LIMIT', 'reasoning 상태 저장 한도를 초과했습니다.');
 }

@@ -29,13 +29,13 @@ export const changeInputSchema = z.strictObject({
           kind: z.literal('edit'),
           path: z.string().min(1).max(4096),
           expectedHash: z.string().regex(/^[a-f0-9]{64}$/),
-          oldText: z.string().min(1).max(6000),
-          newText: z.string().max(6000),
+          oldText: z.string().min(1),
+          newText: z.string(),
         }),
         z.strictObject({
           kind: z.literal('create'),
           path: z.string().min(1).max(4096),
-          content: z.string().max(12000),
+          content: z.string(),
         }),
       ]),
     )
@@ -100,9 +100,13 @@ export async function proposeChanges(
       }
       if (
         item.content.includes('\0') ||
-        Buffer.from(item.content).toString('utf8') !== item.content
+        Buffer.from(item.content).toString('utf8') !== item.content ||
+        Buffer.byteLength(item.content) > 1024 * 1024
       )
-        throw new AppError('FILE_UNSUPPORTED', '새 파일 내용은 UTF-8 텍스트여야 합니다.');
+        throw new AppError(
+          'FILE_UNSUPPORTED',
+          '새 파일 내용은 1 MiB 이하의 UTF-8 텍스트여야 합니다.',
+        );
       const diff = createTwoFilesPatch('/dev/null', 'b/' + item.path, '', item.content, '', '', {
         context: 3,
         timeout: 500,
@@ -118,11 +122,6 @@ export async function proposeChanges(
       });
     }
   }
-  if (
-    Buffer.byteLength(JSON.stringify(files)) > 96000 ||
-    Buffer.byteLength(files.map((f) => f.diff).join('\n')) > 48000
-  )
-    throw new AppError('DIFF_LIMIT', '변경 묶음이 너무 큽니다. 파일 수나 수정 범위를 줄여 주세요.');
   const thenRun = normalizeFusedCommand(args);
   return { files, status: 'proposed', ...(thenRun ? { thenRun } : {}) };
 }

@@ -14,6 +14,7 @@ Desktop agent harness for local LLMs and OpenRouter.
 - Route Plan, Build, and subagent work to different models. Up to three isolated subagents can run concurrently; Build tasks edit and validate in separate Git worktrees.
 - Switch models and generation settings in the same conversation between requests, keeping history and the saved plan.
 - Continue Plan findings in Build with a bounded investigation handoff and saved tool result recall, including across model changes and compaction.
+- Save Plan findings as an editable to-do list, switch to Build after planning, and work through items in order. Goal execution stays separate.
 - Open local project folders, create Git worktrees, and keep conversations scoped to a project.
 - Automatically apply scoped `AGENTS.md`, `AGENTS.override.md`, and `CLAUDE.md` project instructions.
 - Read one or many project files, find them with recursive globs, and search text with optional case folding; create, move, or delete reviewed paths; apply single or multi-file edits with optional Docker validation; and undo verified text edits.

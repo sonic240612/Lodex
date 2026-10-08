@@ -1341,6 +1341,73 @@ button:where(
   margin-top: 20px;
   font-size: 13px;
 }
+.todo-plan {
+  padding: 18px 20px;
+}
+.todo-items {
+  list-style: none;
+  padding: 0;
+  margin: 14px 0;
+}
+.todo-item {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+.todo-item-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 13px;
+}
+.todo-item.in_progress {
+  border-left: 3px solid var(--accent);
+  padding-left: 10px;
+}
+.todo-item.completed .task-title {
+  color: var(--muted);
+}
+.todo-item .task-title {
+  width: 100%;
+  font-size: 14px;
+  margin-top: 6px;
+}
+.todo-item .goal-input {
+  min-height: 70px;
+  font-size: 14px;
+}
+.todo-summary {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+.todo-add,
+.todo-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+.todo-add input {
+  min-width: 0;
+  flex: 1;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  font-size: 14px;
+}
+.todo-actions .save-plan {
+  flex: 1;
+  margin: 0;
+}
+.goal-section {
+  border-top: 1px solid var(--border);
+}
+.goal-section > summary {
+  padding: 16px 20px;
+  cursor: pointer;
+  font-size: 14px;
+}
 .section-label {
   font-size: 11px;
   letter-spacing: 0.65px;

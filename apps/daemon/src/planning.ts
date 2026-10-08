@@ -14,7 +14,7 @@ export const planningTool: ToolDefinition = {
   function: {
     name: 'propose_plan',
     description:
-      'Propose a goal, concrete completion criteria and ordered tasks for user review. Use unique task keys and dependsOn keys without cycles. Does not change the saved plan or execute work. Preserve the user instructions. The user can adopt and edit the plan in the UI.',
+      'Propose an explicitly requested Goal with completion criteria and tasks for user review. For an ordinary Plan investigation, use set_task_list instead. Use unique task keys and dependsOn keys without cycles. Does not change the saved Goal or execute work. Preserve the user instructions.',
     parameters: z.toJSONSchema(planDraftSchema),
   },
 };

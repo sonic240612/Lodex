@@ -64,8 +64,8 @@ const schemas = {
   propose_edit: z.strictObject({
     path: pathSchema,
     expectedHash: z.string().regex(/^[a-f0-9]{64}$/),
-    oldText: z.string().min(1).max(6000),
-    newText: z.string().max(6000),
+    oldText: z.string().min(1),
+    newText: z.string(),
     ...fusionFields,
   }),
   list_files: z.strictObject({ path: pathSchema }),
@@ -109,7 +109,7 @@ const descriptions: Record<keyof typeof schemas, string> = {
   delete_path:
     'Delete one reviewed project file or directory. First call inspect_path and pass its exact expectedFingerprint. Non-empty directories require recursive=true. This is destructive and always requires user review unless Full Access is active.',
   propose_changes:
-    'Propose a reviewed set of 1-8 UTF-8 file changes. kind edit requires sha256 from a prior read_file (Plan-mode reads can be reused), one exact oldText and newText; runtime hash checks reject changed files. kind create requires a nonexistent path inside an EXISTING directory and content. A missing project-root .env or .env.* file may be created this way, but existing dotenv files cannot be read or edited. Paths must be distinct. Optional thenRun fuses an already-known follow-up command: Docker when enabled, otherwise host shell only in Full Access. Failed checks keep the edits; conflicts skip the command. Total arguments stay under 16 KiB. NEVER writes before approval. No directories or deletion.',
+    'Propose a reviewed set of 1-8 UTF-8 file changes. kind edit requires sha256 from a prior read_file (Plan-mode reads can be reused), one exact oldText and newText; runtime hash checks reject changed files. kind create requires a nonexistent path inside an EXISTING directory and content. A missing project-root .env or .env.* file may be created this way, but existing dotenv files cannot be read or edited. Paths must be distinct. Optional thenRun fuses an already-known follow-up command: Docker when enabled, otherwise host shell only in Full Access. Failed checks keep the edits; conflicts skip the command. Text arguments have no per-field character cap; resulting UTF-8 files must fit the 1 MiB file limit. Never delete and recreate an existing file to bypass an edit error. NEVER writes before approval. No directories or deletion.',
   propose_edit:
     'Propose one exact text replacement in an existing UTF-8 project file. Use sha256 from a prior read_file as expectedHash, including a Plan-mode read in this conversation; reuse saved evidence instead of reading again solely because the mode changed. The runtime rechecks the file hash and rejects changed files. oldText must match exactly once, without line numbers. Preserves CRLF. Optional thenRun fuses an already-known follow-up command: Docker when enabled, otherwise host shell only in Full Access. Failed checks keep the edit; conflicts skip the command. Produces a diff for review and NEVER writes before approval. No creation or deletion.',
   list_files:
@@ -313,8 +313,11 @@ export async function proposeEdit(
     context: 3,
     timeout: 500,
   });
-  if (!patch || Buffer.byteLength(patch) > 32000)
-    throw new AppError('DIFF_LIMIT', '변경 비교가 너무 큽니다. 수정 범위를 줄여 주세요.');
+  if (!patch)
+    throw new AppError(
+      'DIFF_LIMIT',
+      '변경 비교를 만들 수 없습니다. 더 작은 수정 단위로 나누세요. 파일을 삭제하고 다시 만들지 마세요.',
+    );
   return {
     path: args.path,
     beforeHash: digest(text),
