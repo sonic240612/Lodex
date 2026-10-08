@@ -283,6 +283,7 @@ export async function runAgent(options: {
     toolCount = 0,
     modelCount = 0;
   let responseStart = 0;
+  let unavailableToolRounds = 0;
   let ecoSummaryTokens = 512;
   let lastEcoAt = 0,
     ecoRetryAfter = 0,
@@ -1319,11 +1320,6 @@ export async function runAgent(options: {
       await save(); // Durable intent before tool access.
       for (const [index, call] of calls.entries()) {
         signal.throwIfAborted();
-        if (!request.tools.some((tool) => tool.function.name === call.name))
-          throw new AppError(
-            'TOOL_UNAVAILABLE',
-            '이 요청에 제공되지 않은 도구라 실행하지 않았습니다.',
-          );
         const card = cards.get(index)!;
         if (['propose_edit', 'propose_changes', 'host_write_file'].includes(call.name)) {
           try {
@@ -1359,7 +1355,17 @@ export async function runAgent(options: {
         await reserveToolCall();
         let result: string;
         let observationResult: string | undefined;
-        if (call.name === 'delegate_tasks') {
+        if (!request.tools.some((tool) => tool.function.name === call.name)) {
+          result = JSON.stringify({
+            error: 'TOOL_UNAVAILABLE',
+            tool: call.name,
+            executed: false,
+            message: `현재 사용할 수 없는 도구 '${call.name}'을 요청하여 실행하지 않았습니다. 사용 가능한 도구 목록을 모델에 전달합니다.`,
+            availableTools: request.tools.map((tool) => tool.function.name),
+            guidance:
+              'Use only the exact names and schemas in the current request. Choose an available alternative or explain the limitation. Do not retry this unavailable tool, invent aliases, or bypass the current permissions. Other calls have their own results; do not repeat successful actions.',
+          });
+        } else if (call.name === 'delegate_tasks') {
           if (!options.subagents)
             throw new AppError('SUBAGENTS_DISABLED', '서브에이전트가 활성화되지 않았습니다.');
           result = await runSubagents(parseDelegation(call.arguments), {
@@ -2401,6 +2407,16 @@ export async function runAgent(options: {
             );
         }
       }
+      unavailableToolRounds = calls.every(
+        (call) => !request.tools!.some((tool) => tool.function.name === call.name),
+      )
+        ? unavailableToolRounds + 1
+        : 0;
+      if (unavailableToolRounds >= 3)
+        throw new AppError(
+          'TOOL_UNAVAILABLE_REPEATED',
+          `모델이 사용할 수 없는 도구(${[...new Set(calls.map((call) => call.name))].join(', ')})만 세 번 연속 요청하여 중지했습니다. 사용 가능한 도구 목록을 전달했지만 수정되지 않았습니다.`,
+        );
       if (roundText) content += '\n\n';
     }
   } catch (error) {

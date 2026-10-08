@@ -504,7 +504,16 @@ describe('SoL-Pi Action Fusion daemon adaptation', () => {
       { mode: 'plan' },
     );
     await app.send();
-    await app.finish('failed');
+    const final = await app.finish();
+    const activity = final.messages
+      .at(-1)
+      ?.activities?.find((entry) => entry.label === 'host_write_file');
+    expect(activity?.status).toBe('failed');
+    expect(JSON.parse(activity!.text)).toMatchObject({
+      error: 'TOOL_UNAVAILABLE',
+      executed: false,
+    });
+    expect(activity?.fusion?.status).toBe('skipped');
     expect(app.executions).toHaveLength(0);
     expect(await readFile(app.file, 'utf8')).toBe('before\r\n');
   });

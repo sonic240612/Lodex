@@ -108,6 +108,123 @@ afterEach(async () => {
   for (const close of cleanup.splice(0)) await close();
 });
 describe('authenticated daemon integration', () => {
+  it.each(['recover', 'mixed', 'plan', 'repeat'] as const)(
+    'returns unavailable tools to the model without executing or losing sibling results (%s)',
+    async (variant) => {
+      const requests: InferenceRequest[] = [];
+      const host = vi.fn(async () => {
+        throw new Error('Unavailable host tool must not run');
+      });
+      const unavailable = variant === 'plan' ? 'propose_edit' : 'run_host_command';
+      const app = await setup(
+        {
+          listModels: async () => [],
+          capabilities: async () => ({ tools: true, streaming: true }),
+          async *generate(request) {
+            requests.push(structuredClone(request));
+            const round = requests.length;
+            const calls =
+              round === 1 || variant === 'repeat'
+                ? [unavailable, ...(variant === 'mixed' ? ['read_file'] : [])]
+                : round === 2 && variant !== 'mixed'
+                  ? ['read_file']
+                  : [];
+            for (const [index, name] of calls.entries()) {
+              yield {
+                type: 'tool_call_delta',
+                index,
+                id: `call-${round}-${index}`,
+                name,
+                arguments: JSON.stringify(
+                  name === 'read_file'
+                    ? { path: 'evidence.txt' }
+                    : name === 'propose_edit'
+                      ? { path: 'evidence.txt', oldText: 'original', newText: 'changed' }
+                      : { command: 'echo forbidden' },
+                ),
+              };
+            }
+            if (!calls.length)
+              yield { type: 'text_delta', text: 'Finished using the available tools.' };
+            yield { type: 'finished', reason: calls.length ? 'tool_calls' : 'stop' };
+          },
+        },
+        undefined,
+        undefined,
+        false,
+        host,
+      );
+      await writeFile(join(app.dir, 'evidence.txt'), 'original');
+      const { project } = await app
+        .request('/v1/projects', {
+          method: 'POST',
+          body: JSON.stringify({ path: app.dir }),
+        })
+        .then((response) => response.json());
+      let session = await app.create(
+        { provider: 'llama-server', model: 'fixture', eco: false, contextBudgetTokens: 32768 },
+        project.id,
+      );
+      if (variant === 'plan') {
+        const changed = await app.command(
+          makeCommand({
+            type: 'set_mode',
+            sessionId: session.id,
+            expectedVersion: session.version,
+            mode: 'plan',
+          }),
+        );
+        session = ((await changed.json()) as CommandResult).session;
+      }
+      await app.command(
+        makeCommand({
+          type: 'send_message',
+          sessionId: session.id,
+          expectedVersion: session.version,
+          content: 'Inspect the evidence.',
+        }),
+      );
+      await expect
+        .poll(async () => (await app.store.session(session.id)).run?.status)
+        .toBe(variant === 'repeat' ? 'failed' : 'completed');
+      const final = await app.store.session(session.id);
+      const answer = final.messages.at(-1)!;
+      expect(host).not.toHaveBeenCalled();
+      expect(await readFile(join(app.dir, 'evidence.txt'), 'utf8')).toBe('original');
+      expect(requests.every((r) => !r.tools?.some((t) => t.function.name === unavailable))).toBe(
+        true,
+      );
+      const feedback = requests[1]!.messages.find((m) => m.toolCallId === 'call-1-0')!;
+      expect(feedback.isError).toBe(true);
+      expect(JSON.parse(feedback.content)).toMatchObject({
+        error: 'TOOL_UNAVAILABLE',
+        tool: unavailable,
+        executed: false,
+        availableTools: expect.arrayContaining(['read_file']),
+      });
+      expect(
+        answer.activities
+          ?.filter((a) => a.label === unavailable)
+          .every((a) => a.status === 'failed'),
+      ).toBe(true);
+      const results = answer.continuation?.filter((m) => m.role === 'tool') ?? [];
+      const calls = answer.continuation?.flatMap((m) => m.toolCalls ?? []) ?? [];
+      expect(results.map((m) => m.toolCallId)).toEqual(calls.map((call) => call.id));
+      if (variant === 'repeat') {
+        expect(requests).toHaveLength(3);
+        expect(answer.error).toContain('세 번 연속');
+      } else {
+        expect(answer.error).toBeNull();
+        expect(results.filter((m) => m.toolName === 'read_file')).toHaveLength(1);
+        expect(
+          requests
+            .at(-1)
+            ?.messages.some((m) => m.role === 'tool' && m.content.includes('original')),
+        ).toBe(true);
+      }
+    },
+  );
+
   it.each(['eco', 'off', 'failed-summary', 'length', 'content-filter'] as const)(
     'maintains small LLM checkpoints below the threshold (%s)',
     async (variant) => {
@@ -3450,10 +3567,16 @@ describe('authenticated daemon integration', () => {
     abort.abort();
   });
   it('rejects tool execution when no project tools are enabled', async () => {
+    let attempts = 0;
     const provider: InferenceProvider = {
       listModels: async () => [],
       capabilities: async () => ({ tools: true, streaming: true }),
       async *generate() {
+        if (attempts++ > 0) {
+          yield { type: 'text_delta', text: 'The requested tool is unavailable.' };
+          yield { type: 'finished', reason: 'stop' };
+          return;
+        }
         yield {
           type: 'tool_call_delta',
           index: 0,
@@ -3475,10 +3598,15 @@ describe('authenticated daemon integration', () => {
       }),
     );
     await vi.waitFor(async () =>
-      expect((await app.store.session(session.id)).run?.status).toBe('failed'),
+      expect((await app.store.session(session.id)).run?.status).toBe('completed'),
     );
-    expect((await app.store.session(session.id)).messages.at(-1)?.error).toContain(
-      '실행하지 않았습니다',
-    );
+    const answer = (await app.store.session(session.id)).messages.at(-1)!;
+    expect(answer.activities?.[0]?.status).toBe('failed');
+    expect(JSON.parse(answer.activities![0]!.text)).toMatchObject({
+      error: 'TOOL_UNAVAILABLE',
+      executed: false,
+      tool: 'exec',
+    });
+    expect(answer.activities?.some((activity) => activity.execution)).toBe(false);
   });
 });
