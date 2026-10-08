@@ -311,14 +311,14 @@ async function previewCommand(command: Command): Promise<CommandResult> {
           {
             id: crypto.randomUUID(),
             kind: 'thinking',
-            label: 'Thinking · 표시 예제',
+            label: 'Thinking',
             status: 'completed',
             text: '접기·펼치기를 확인하기 위한 UI 예제입니다. 실제 모델의 thinking이 아닙니다.',
           },
           {
             id: crypto.randomUUID(),
             kind: 'tool',
-            label: 'read_file · 표시 예제',
+            label: 'read_file',
             status: 'completed',
             arguments: '{"path":"example.ts"}',
             text: '도구 결과 카드의 UI 예제입니다. 실제 파일을 읽지 않았습니다.',
@@ -326,7 +326,7 @@ async function previewCommand(command: Command): Promise<CommandResult> {
           {
             id: crypto.randomUUID(),
             kind: 'tool',
-            label: 'propose_edit · 표시 예제',
+            label: 'propose_edit',
             status: 'completed',
             text: '변경 검토 화면의 UI 예제입니다.',
             edit: {
@@ -342,7 +342,7 @@ async function previewCommand(command: Command): Promise<CommandResult> {
           {
             id: crypto.randomUUID(),
             kind: 'tool',
-            label: 'propose_changes · 표시 예제',
+            label: 'propose_changes',
             status: 'completed',
             text: '묶음 검토 UI 예제입니다. 실제 파일 변경이 아닙니다.',
             changes: {

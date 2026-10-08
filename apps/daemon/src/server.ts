@@ -279,6 +279,7 @@ export async function startServer(options: ServerOptions) {
     options.openrouterKeySource ?? (openrouterKey ? 'os_keychain' : 'none');
   type ActiveRun = {
     abort: AbortController;
+    interrupt?: (() => void) | null;
     task: Promise<void>;
     approval?: {
       sessionId: string;
@@ -699,6 +700,10 @@ export async function startServer(options: ServerOptions) {
         session,
         provider,
         controller,
+        onInterruptible: (interrupt) => {
+          const run = active.get(session.run!.id);
+          if (run) run.interrupt = interrupt;
+        },
         context,
         skills,
         ...(session.routing?.subagentsEnabled
@@ -1175,6 +1180,7 @@ export async function startServer(options: ServerOptions) {
       active.set(result.session.run!.id, { abort, task });
     }
     if (command.type === 'cancel_run') active.get(command.runId)?.abort.abort();
+    if (command.type === 'steer_run' && !result.replayed) active.get(command.runId)?.interrupt?.();
     return result;
   }
   const jobs = await CommandJobs.open(store);

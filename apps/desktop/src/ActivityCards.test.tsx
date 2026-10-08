@@ -2,6 +2,37 @@ import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { ActivityCards } from './ActivityCards';
 describe('activity disclosure', () => {
+  it('summarizes current work, shows targets, and keeps attention visible without opening the feed', () => {
+    const html = renderToStaticMarkup(
+      <ActivityCards
+        activities={[
+          {
+            id: 'read',
+            kind: 'tool',
+            label: 'read_file',
+            arguments: '{"path":"src/app.ts"}',
+            status: 'running',
+            text: '',
+          },
+          {
+            id: 'failure',
+            kind: 'tool',
+            label: 'run_command',
+            arguments: '{"command":"npm test"}',
+            status: 'failed',
+            text: 'failed',
+          },
+        ]}
+      />,
+    );
+    expect(html).toContain('activity-feed-summary');
+    expect(html).toContain('파일 읽기');
+    expect(html).toContain('src/app.ts');
+    expect(html).toContain('확인 필요 1');
+    expect(html).toContain('명령 실행');
+    expect(html).toContain('npm test');
+    expect(html).not.toMatch(/<details[^>]*\sopen/);
+  });
   it('shows fused execution and observation receipts without claiming a skipped check passed', () => {
     const html = renderToStaticMarkup(
       <ActivityCards
@@ -126,8 +157,8 @@ describe('activity disclosure', () => {
         ]}
       />,
     );
-    expect(html.match(/<details\b/g)).toHaveLength(2);
-    expect(html.match(/<summary>/g)).toHaveLength(2);
+    expect(html.match(/<details\b/g)).toHaveLength(3);
+    expect(html.match(/<summary(?:>|\s)/g)).toHaveLength(3);
     expect(html).not.toMatch(/<details[^>]*\bopen(?:[=>\s])/);
     expect(html).toContain('&lt;script&gt;');
     expect(html).not.toContain('<script>');

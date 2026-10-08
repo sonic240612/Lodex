@@ -982,7 +982,7 @@ export function App() {
                     {message.runInput && (
                       <span className="message-status" role="status">
                         {message.runInput.status === 'queued'
-                          ? '추가 지시 · 다음 단계에 전달 대기'
+                          ? '추가 지시 · 전달 중 (실행 중인 도구는 완료 후 반영)'
                           : message.runInput.status === 'included'
                             ? '추가 지시 · 모델 입력에 반영'
                             : '추가 지시 · 실행 중단으로 미반영'}
@@ -1086,7 +1086,7 @@ export function App() {
               }
               placeholder={
                 running
-                  ? '추가 지시를 입력하면 다음 단계에 반영합니다.'
+                  ? '추가 지시를 보내면 답변 생성을 멈추고 반영합니다.'
                   : project
                     ? project.name + '에서 작업 요청하기 · / 명령'
                     : '메시지 보내기 · / 명령'
@@ -1236,7 +1236,7 @@ export function App() {
           <div className="composer-footer">
             <span>
               {running
-                ? '추가 지시는 현재 작업을 마친 뒤 다음 모델 요청에 반영합니다.'
+                ? '추가 지시는 답변 생성 중 바로 반영합니다. 도구 실행·승인 대기 중에는 해당 단계가 끝난 뒤 반영합니다.'
                 : project
                   ? config.provider === 'openrouter' && !config.projectCloudConsent
                     ? '프로젝트 파일 전송이 꺼져 있습니다. 설정에서 허용할 수 있습니다.'

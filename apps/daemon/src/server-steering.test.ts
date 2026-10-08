@@ -13,6 +13,11 @@ const deferred = () => {
   });
   return { promise, release };
 };
+const untilAborted = (signal: AbortSignal) =>
+  new Promise<never>((_resolve, reject) => {
+    signal.throwIfAborted();
+    signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+  });
 async function fixture(provider: InferenceProvider, webFetcher?: typeof fetch) {
   const dir = await mkdtemp(join(tmpdir(), 'lodex-steering-'));
   const store = await Store.open(join(dir, 'state.sqlite'), resolve('apps/daemon/dist/worker.cjs'));
@@ -61,19 +66,28 @@ async function fixture(provider: InferenceProvider, webFetcher?: typeof fetch) {
     },
   };
 }
-it('queues an idempotent instruction during streaming, continues the same run and does not duplicate it in later context', async () => {
-  const gate = deferred(),
-    ready = deferred();
+it('interrupts streaming immediately, discards partial tool calls, and applies an idempotent instruction once', async () => {
+  const ready = deferred();
   let calls = 0;
   const app = await fixture({
     listModels: async () => [],
     capabilities: async () => ({ tools: true, streaming: true }),
-    generate: async function* (request) {
+    generate: async function* (request, signal) {
       if (++calls === 1) {
         yield { type: 'text_delta', text: 'Initial response.' };
+        yield { type: 'reasoning_delta', text: 'Old direction still being generated.' };
+        yield {
+          type: 'tool_call_delta',
+          index: 0,
+          id: 'partial',
+          name: 'web_fetch',
+          arguments: '{"url":',
+        };
         ready.release();
-        await gate.promise;
-        yield { type: 'finished', reason: 'stop' };
+        await new Promise<never>((_resolve, reject) => {
+          signal.throwIfAborted();
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
       } else {
         expect(request.messages.at(-1)?.content).toContain('Keep the result concise.');
         expect(request.tools?.some((tool) => tool.function.name === 'run_host_command')).toBe(
@@ -106,16 +120,22 @@ it('queues an idempotent instruction during streaming, continues the same run an
     });
     expect((await app.request(command)).status).toBe(200);
     expect((await (await app.request(command)).json()).replayed).toBe(true);
-    expect(
-      (await app.store.session(live.id)).messages
-        .filter((message) => message.runInput)
-        .map((message) => message.runInput!.status),
-    ).toEqual(['queued']);
-    gate.release();
     await expect.poll(async () => (await app.store.session(live.id)).run?.status).toBe('completed');
     const final = await app.store.session(live.id);
     expect(final.run!.id).toBe(runId);
     expect(calls).toBe(2);
+    const response = final.messages.find((message) => message.id === final.run!.messageId)!;
+    expect(response.activities?.find((activity) => activity.label === 'web_fetch')?.status).toBe(
+      'cancelled',
+    );
+    expect(response.activities?.find((activity) => activity.kind === 'thinking')?.status).toBe(
+      'interrupted',
+    );
+    expect(
+      response.continuation?.some((message) =>
+        message.toolCalls?.some((call) => call.id === 'partial'),
+      ),
+    ).toBe(false);
     expect(final.messages.find((message) => message.runInput)?.runInput).toMatchObject({
       status: 'included',
       actor: 'desktop',
@@ -131,10 +151,91 @@ it('queues an idempotent instruction during streaming, continues the same run an
         .status,
     ).toBe(409);
   } finally {
-    gate.release();
     await app.close();
   }
 });
+it('interrupts automatic summarization to include steering without replacing the saved transcript', async () => {
+  const ready = deferred();
+  let summaries = 0,
+    responses = 0;
+  const app = await fixture({
+    listModels: async () => [],
+    capabilities: async () => ({ tools: true, streaming: true }),
+    countInputTokens: async (request) =>
+      request.messages.some(
+        (message) =>
+          message.content.includes('Automatic compaction:') ||
+          message.content.includes('running context checkpoint') ||
+          message.content.includes('NEW REQUIREMENT'),
+      )
+        ? 5000
+        : 60000,
+    async *generate(request, signal) {
+      if (request.messages[0]?.content.includes('Automatic compaction:')) {
+        summaries++;
+        yield { type: 'text_delta', text: 'Incomplete summary, not to be saved.' };
+        ready.release();
+        await untilAborted(signal);
+      } else {
+        responses++;
+        expect(JSON.stringify(request.messages)).toContain('NEW REQUIREMENT');
+        expect(JSON.stringify(request.messages)).toContain('Original investigation');
+        yield { type: 'text_delta', text: 'Applied the new requirement.' };
+        yield { type: 'finished', reason: 'stop' };
+      }
+    },
+  });
+  try {
+    let session = (
+      await app.store.apply(
+        makeCommand({
+          type: 'send_message',
+          sessionId: app.session.id,
+          expectedVersion: app.session.version,
+          content: 'Original investigation',
+        }),
+      )
+    ).session;
+    session = await app.store.updateRun({
+      sessionId: session.id,
+      runId: session.run!.id,
+      text: 'Verified findings',
+      status: 'completed',
+    });
+    await app.request({
+      type: 'send_message',
+      sessionId: session.id,
+      expectedVersion: session.version,
+      content: 'Continue',
+    });
+    await ready.promise;
+    session = await app.store.session(session.id);
+    expect(
+      (
+        await app.request({
+          type: 'steer_run',
+          sessionId: session.id,
+          runId: session.run!.id,
+          content: 'NEW REQUIREMENT: preserve the public API.',
+        })
+      ).status,
+    ).toBe(200);
+    await expect
+      .poll(async () => (await app.store.session(session.id)).run?.status)
+      .toBe('completed');
+    session = await app.store.session(session.id);
+    const response = session.messages.find((message) => message.id === session.run!.messageId)!;
+    expect(response.runContextCompaction).toBeUndefined();
+    expect(
+      response.activities?.find((activity) => activity.label === '컨텍스트 자동 LLM 압축')?.status,
+    ).toBe('interrupted');
+    expect(summaries).toBe(1);
+    expect(responses).toBe(1);
+  } finally {
+    await app.close();
+  }
+});
+
 it('finishes the active tool, skips the rest of its batch and applies live input before choosing further actions', async () => {
   const gate = deferred(),
     ready = deferred();

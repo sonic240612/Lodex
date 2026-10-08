@@ -1601,36 +1601,115 @@ button:where(
   padding: 6px 9px;
   white-space: nowrap;
 }
-.activity-cards {
-  margin-bottom: 16px;
-  display: grid;
-  gap: 8px;
+.activity-feed {
+  margin: 2px 0 18px;
+  color: var(--muted);
+  min-width: 0;
 }
-.activity-card {
-  border: 1px solid var(--border);
-  border-radius: 10px;
+.activity-feed-summary,
+.activity-card > summary {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  list-style: none;
+  cursor: pointer;
+  border-radius: 7px;
+  min-height: 36px;
+  padding: 7px 6px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.activity-feed-summary::-webkit-details-marker,
+.activity-card > summary::-webkit-details-marker {
+  display: none;
+}
+.activity-feed-summary:hover,
+.activity-card > summary:hover {
   background: var(--surface);
+  color: var(--text);
+}
+.activity-feed-summary:focus-visible,
+.activity-card > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+.activity-feed-heading,
+.activity-description {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  flex: 1;
+  min-width: 0;
+}
+.activity-feed-heading {
   overflow: hidden;
 }
-.activity-card summary {
-  padding: 10px 12px;
-  cursor: pointer;
+.activity-description > span:first-child {
+  flex-shrink: 0;
+}
+.activity-target {
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.activity-feed-indicator,
+.activity-chevron {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+.activity-feed-indicator.running {
+  color: var(--accent);
+  animation: pulse 1.5s infinite;
+}
+.activity-chevron {
+  opacity: 0.65;
+  transition: transform 0.15s;
+}
+.activity-feed[open] > summary > .activity-chevron,
+.activity-card[open] > summary > .activity-chevron {
+  transform: rotate(90deg);
+}
+.activity-count,
+.activity-card > summary small {
+  flex-shrink: 0;
   font-size: 12px;
   color: var(--muted);
 }
-.activity-card summary small {
-  float: right;
-  font-size: 11px;
-  margin-left: 12px;
+.activity-attention {
+  color: #d9aa70;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.activity-cards {
+  display: grid;
+  gap: 2px;
+  margin: 4px 0 0 13px;
+  padding: 2px 0 2px 15px;
+  border-left: 1px solid var(--border);
+}
+.activity-card {
+  min-width: 0;
+}
+.activity-card[open] {
+  margin-bottom: 6px;
+}
+.activity-card.needs-attention > summary small {
+  color: #d9aa70;
+}
+.activity-fusion-label {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
 }
 .activity-dot {
-  display: inline-block;
-  width: 6px;
-  height: 6px;
+  flex-shrink: 0;
+  width: 5px;
+  height: 5px;
   border-radius: 50%;
   background: var(--muted);
-  margin-right: 8px;
-  vertical-align: middle;
 }
 .activity-dot.running {
   background: var(--accent);
@@ -1639,20 +1718,57 @@ button:where(
 .activity-dot.failed {
   background: #e69a8d;
 }
+.activity-dot.cancelled,
+.activity-dot.interrupted {
+  opacity: 0.45;
+}
 .activity-section {
-  padding: 0 14px 10px;
-  font-size: 11px;
+  margin: 3px 4px 8px 20px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--surface);
+  font-size: 13px;
   color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.activity-section > span {
+  display: block;
+  margin-bottom: 5px;
 }
 .activity-section pre {
   font-family: ui-monospace, Consolas, monospace;
-  font-size: 12px;
-  line-height: 1.6;
-  max-height: 300px;
+  font-size: 13px;
+  line-height: 1.65;
+  max-height: 320px;
   overflow: auto;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   color: var(--text);
+  margin: 6px 0 0;
+}
+@media (max-width: 1050px) {
+  .activity-count {
+    display: none;
+  }
+  .activity-description {
+    flex-wrap: wrap;
+    gap: 2px 8px;
+  }
+  .activity-description .activity-target {
+    flex-basis: 100%;
+  }
+  .activity-fusion-label {
+    display: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .activity-feed-indicator.running,
+  .activity-dot.running {
+    animation: none;
+  }
+  .activity-chevron {
+    transition: none;
+  }
 }
 .project-dialog {
   max-width: 650px;

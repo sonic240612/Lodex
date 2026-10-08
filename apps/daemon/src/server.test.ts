@@ -3135,10 +3135,12 @@ describe('authenticated daemon integration', () => {
   });
   it('cancels an active request and never marks late content complete', async () => {
     let aborted = false;
+    let started = false;
     const provider: InferenceProvider = {
       listModels: async () => [],
       capabilities: async () => ({ tools: false, streaming: true }),
       async *generate(_request, signal) {
+        started = true;
         yield { type: 'text_delta', text: '부분 응답' };
         await new Promise<void>((resolve) => {
           if (signal.aborted) resolve();
@@ -3161,6 +3163,7 @@ describe('authenticated daemon integration', () => {
         }),
       )
       .then((r) => r.json())) as CommandResult;
+    await vi.waitFor(() => expect(started).toBe(true));
     await app.command(
       makeCommand({ type: 'cancel_run', sessionId: session.id, runId: result.session.run!.id }),
     );

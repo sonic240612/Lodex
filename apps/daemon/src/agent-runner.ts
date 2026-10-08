@@ -218,6 +218,7 @@ export async function runAgent(options: {
   provider: InferenceProvider;
   context: CompiledContext;
   controller: AbortController;
+  onInterruptible?: (interrupt: (() => void) | null) => void;
   project?: Project;
   commandExecutor?: typeof executeCommand;
   hostCommandExecutor?: typeof executeHostCommand;
@@ -258,6 +259,19 @@ export async function runAgent(options: {
     ? AbortSignal.any([controller.signal, AbortSignal.timeout(remainingMs)])
     : controller.signal;
   const activities: Activity[] = [];
+  const steeringReason = new AppError(
+    'RUN_STEERED',
+    '추가 지시를 먼저 반영하기 위해 생성을 중단했습니다.',
+  );
+  const interruptible = () => {
+    const current = new AbortController();
+    options.onInterruptible?.(() => current.abort(steeringReason));
+    return {
+      signal: AbortSignal.any([signal, current.signal]),
+      steered: () => current.signal.aborted && !signal.aborted,
+      close: () => options.onInterruptible?.(null),
+    };
+  };
   const continuation: InferenceMessage[] = [];
   const rounds: Partial<Usage>[] = [];
   const usedIds = new Set<string>();
@@ -336,6 +350,10 @@ export async function runAgent(options: {
     await save();
     return true;
   };
+  const hasQueuedInput = async () =>
+    (await store.session(session.id)).messages.some(
+      (input) => input.runInput?.runId === runId && input.runInput.status === 'queued',
+    );
   const authorize = async (card: Activity, request: PermissionRequest): Promise<boolean> => {
     const decision = permissionDecision(
       session.permissionMode ?? defaultPermissionMode(),
@@ -867,58 +885,81 @@ export async function runAgent(options: {
               summarize: async (candidate) => {
                 const input = (await countInput(candidate)).tokens;
                 measureRequest(candidate, { inputTokens: input });
-                const reservation = await reserveModelCall(candidate.config, input);
-                const summaryUsage: Partial<Usage> = { inputTokens: input };
-                rounds.push(summaryUsage);
-                let summary = '',
-                  finish: string | null = null,
-                  completed = false;
-                const summarySignal = AbortSignal.any([signal, AbortSignal.timeout(120_000)]);
+                const summaryGeneration = interruptible();
                 try {
-                  for await (const event of provider.generate(candidate, summarySignal)) {
+                  if (await hasQueuedInput()) throw steeringReason;
+                  const reservation = await reserveModelCall(candidate.config, input);
+                  const summaryUsage: Partial<Usage> = { inputTokens: input };
+                  rounds.push(summaryUsage);
+                  let summary = '',
+                    finish: string | null = null,
+                    completed = false,
+                    started = false;
+                  const summarySignal = AbortSignal.any([
+                    summaryGeneration.signal,
+                    AbortSignal.timeout(120_000),
+                  ]);
+                  try {
                     summarySignal.throwIfAborted();
-                    if (finish && event.type !== 'usage')
-                      throw new AppError(
-                        'AFTER_FINISH',
-                        '요약 종료 이후 추가 이벤트를 받았습니다.',
-                      );
-                    if (event.type === 'text_delta') {
-                      summary += event.text;
-                      if (summary.length > 262144)
+                    started = true;
+                    for await (const event of provider.generate(candidate, summarySignal)) {
+                      summarySignal.throwIfAborted();
+                      if (finish && event.type !== 'usage')
                         throw new AppError(
-                          'CONTEXT_SUMMARY_INVALID',
-                          '자동 요약 응답이 너무 큽니다. 원문은 보존했습니다.',
+                          'AFTER_FINISH',
+                          '요약 종료 이후 추가 이벤트를 받았습니다.',
                         );
-                    } else if (event.type === 'tool_call_delta')
-                      throw new AppError(
-                        'CONTEXT_SUMMARY_TOOLS',
-                        '요약 응답에 도구 호출이 포함되어 적용하지 않았습니다.',
-                      );
-                    else if (event.type === 'usage') {
-                      Object.assign(summaryUsage, event.usage);
-                      await noteModelUsage(reservation, summaryUsage);
-                    } else if (event.type === 'error')
-                      throw new AppError(event.code, event.message, 502);
-                    else if (event.type === 'finished') finish = event.reason;
+                      if (event.type === 'text_delta') {
+                        summary += event.text;
+                        if (summary.length > 262144)
+                          throw new AppError(
+                            'CONTEXT_SUMMARY_INVALID',
+                            '자동 요약 응답이 너무 큽니다. 원문은 보존했습니다.',
+                          );
+                      } else if (event.type === 'tool_call_delta')
+                        throw new AppError(
+                          'CONTEXT_SUMMARY_TOOLS',
+                          '요약 응답에 도구 호출이 포함되어 적용하지 않았습니다.',
+                        );
+                      else if (event.type === 'usage') {
+                        Object.assign(summaryUsage, event.usage);
+                        await noteModelUsage(reservation, summaryUsage);
+                      } else if (event.type === 'error')
+                        throw new AppError(event.code, event.message, 502);
+                      else if (event.type === 'finished') finish = event.reason;
+                    }
+                    completed = true;
+                    summarySignal.throwIfAborted();
+                  } catch (error) {
+                    if (summaryGeneration.steered()) throw steeringReason;
+                    throw error;
+                  } finally {
+                    if (!started)
+                      Object.assign(summaryUsage, { inputTokens: 0, outputTokens: 0, costUsd: 0 });
+                    await settleModelCall(
+                      candidate.config,
+                      reservation,
+                      summaryUsage,
+                      completed || !started,
+                    );
+                    if (
+                      autopilot &&
+                      typeof summaryUsage.outputTokens === 'number' &&
+                      Number.isFinite(summaryUsage.outputTokens) &&
+                      summaryUsage.outputTokens >= 0
+                    )
+                      autopilot.reservedOutputTokens +=
+                        summaryUsage.outputTokens - candidate.config.maxTokens;
                   }
-                  completed = true;
+                  if (finish !== 'stop')
+                    throw new AppError(
+                      'CONTEXT_SUMMARY_FINISH',
+                      '자동 LLM 요약이 정상 완료되지 않았습니다. 원문은 보존했습니다. 다시 시도해 주세요.',
+                    );
+                  return summary;
                 } finally {
-                  await settleModelCall(candidate.config, reservation, summaryUsage, completed);
-                  if (
-                    autopilot &&
-                    typeof summaryUsage.outputTokens === 'number' &&
-                    Number.isFinite(summaryUsage.outputTokens) &&
-                    summaryUsage.outputTokens >= 0
-                  )
-                    autopilot.reservedOutputTokens +=
-                      summaryUsage.outputTokens - candidate.config.maxTokens;
+                  summaryGeneration.close();
                 }
-                if (finish !== 'stop')
-                  throw new AppError(
-                    'CONTEXT_SUMMARY_FINISH',
-                    '자동 LLM 요약이 정상 완료되지 않았습니다. 원문은 보존했습니다. 다시 시도해 주세요.',
-                  );
-                return summary;
               },
             });
             compactedThisRound = true;
@@ -944,6 +985,13 @@ export async function runAgent(options: {
             }
             activities.splice(activities.indexOf(card), 1);
           } catch (error) {
+            if (error === steeringReason && !signal.aborted) {
+              card.status = 'interrupted';
+              card.text = '추가 지시를 반영하여 요약을 다시 준비합니다. 기존 기록은 보존했습니다.';
+              await includeInputs();
+              await save();
+              continue modelLoop;
+            }
             card.status = signal.aborted ? 'cancelled' : 'failed';
             card.text = error instanceof Error ? error.message : String(error);
             await save();
@@ -977,6 +1025,11 @@ export async function runAgent(options: {
           throughContinuationCount: runContextCompaction.throughContinuationCount,
           historyCompacted: runContextCompaction.historyCompacted,
         };
+      const generation = interruptible();
+      if (await includeInputs()) {
+        generation.close();
+        continue;
+      }
       const costReservation = await reserveModelCall(
         session.config,
         exactInputTokens ?? manifest!.inputEstimateTokens,
@@ -987,7 +1040,6 @@ export async function runAgent(options: {
         context: manifest!,
         ...(autopilot ? { autopilot } : {}),
       });
-      signal.throwIfAborted();
       const assembler = new ToolCallAssembler();
       const cards = new Map<number, Activity>();
       const details: Record<string, unknown>[] = [];
@@ -999,9 +1051,13 @@ export async function runAgent(options: {
         finished: string | null = null;
       let thinking: Activity | undefined;
       let streamCompleted = false;
+      let steered = false;
+      let providerStarted = false;
       try {
-        for await (const event of provider.generate(request, signal)) {
-          signal.throwIfAborted();
+        generation.signal.throwIfAborted();
+        providerStarted = true;
+        for await (const event of provider.generate(request, generation.signal)) {
+          generation.signal.throwIfAborted();
           if (finished && event.type !== 'usage')
             throw new AppError('AFTER_FINISH', '종료 이후 추가 이벤트를 받았습니다.');
           if (event.type === 'text_delta') {
@@ -1056,8 +1112,43 @@ export async function runAgent(options: {
           if (performance.now() - lastSave > 180) await save();
         }
         streamCompleted = true;
+        steered = generation.steered();
+      } catch (error) {
+        if (!generation.steered()) throw error;
+        steered = true;
       } finally {
-        await settleModelCall(session.config, costReservation, roundUsage, streamCompleted);
+        generation.close();
+        if (!providerStarted)
+          Object.assign(roundUsage, { inputTokens: 0, outputTokens: 0, costUsd: 0 });
+        await settleModelCall(
+          session.config,
+          costReservation,
+          roundUsage,
+          streamCompleted || !providerStarted,
+        );
+      }
+      if (steered) {
+        if (
+          autopilot &&
+          typeof roundUsage.outputTokens === 'number' &&
+          Number.isFinite(roundUsage.outputTokens) &&
+          roundUsage.outputTokens >= 0
+        )
+          autopilot.reservedOutputTokens += roundUsage.outputTokens - session.config.maxTokens;
+        if (thinking) thinking.status = 'interrupted';
+        for (const card of cards.values()) {
+          card.status = 'cancelled';
+          card.text = '추가 지시가 도착하여 이 요청은 실행하지 않았습니다.';
+        }
+        if (roundText) continuation.push({ role: 'assistant', content: roundText });
+        continuation.push({
+          role: 'system',
+          content:
+            'Generation was interrupted by a new user instruction. No tool calls from that interrupted response were executed. Continue with the new instruction; do not repeat completed work.',
+        });
+        await includeInputs();
+        await save();
+        continue;
       }
       if (!finished) throw new AppError('MISSING_FINISH', '정상 종료가 확인되지 않았습니다.');
       if (
@@ -1171,8 +1262,9 @@ export async function runAgent(options: {
         }
         const skipRemaining = (
           reason = 'Autopilot이 끝나거나 검토 대기 상태가 되어 실행하지 않았습니다.',
+          from = index + 1,
         ) => {
-          for (let rest = index + 1; rest < calls.length; rest++) {
+          for (let rest = from; rest < calls.length; rest++) {
             const skipped = cards.get(rest)!;
             skipped.status = 'cancelled';
             skipped.text = reason;
@@ -1185,6 +1277,11 @@ export async function runAgent(options: {
             });
           }
         };
+        if (await hasQueuedInput()) {
+          skipRemaining('사용자의 추가 지시를 먼저 반영하기 위해 실행하지 않았습니다.', index);
+          await includeInputs();
+          continue modelLoop;
+        }
         await reserveToolCall();
         let result: string;
         let observationResult: string | undefined;
@@ -2259,6 +2356,7 @@ export async function runAgent(options: {
       error: message,
     });
   } finally {
+    options.onInterruptible?.(null);
     await options.mcp?.close();
   }
 }

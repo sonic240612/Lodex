@@ -20,7 +20,7 @@ Desktop agent harness for local LLMs and OpenRouter.
 - Read one or many project files, find them with recursive globs, and search text with optional case folding; create, move, or delete reviewed paths; apply single or multi-file edits with optional Docker validation; and undo verified text edits.
 - Run Docker commands with saved limits. Full Access enables host files, shell commands, environment variables, network access, and selected MCP calls.
 - Search the public web with `web_search` and verify sources with `web_fetch`; both use the selected permission policy and bounded output.
-- Send extra instructions during an active run; they are saved and included at the next safe model step.
+- Send extra instructions during a run. Active generation or automatic summarization is interrupted and resumes with the new input; running tools and pending approvals finish their current step first.
 - Send live stdin/EOF to interactive commands, monitor background jobs, and stop owned processes from chat.
 - Choose **Ask**, **Approve for me**, or **Full Access** per conversation. Plan mode remains read-only.
 - Use `/goal` for goal-driven runs, or run saved plan tasks with dependencies, completion criteria, verification commands, and budgets.
@@ -31,7 +31,7 @@ Desktop agent harness for local LLMs and OpenRouter.
 - Keep the daemon, Telegram, and active agent runs alive when the window is closed; reopen or quit Lodex from the system tray.
 - Use Eco mode, automatic LLM compaction, bounded current-conversation history search, local ObservationPack archives, and on-demand recall for large tool results.
 - Choose LLM-based **Context compaction** or deterministic **Quick compaction**. Automatic compaction displays before/after token estimates and the reduction percentage. Full transcripts stay in SQLite.
-- View Markdown/GFM messages, collapsible thinking and tool activity, active context usage, generation metrics, and a jump-to-latest button.
+- View Markdown/GFM messages, a compact, collapsible activity timeline with thinking, file targets, commands, and attention indicators, active context usage, generation metrics, and a jump-to-latest button.
 - Manage models, skills, MCP, Telegram, worktrees, and backups in **Settings**. Type `/` in chat for commands; use arrow keys and Tab to select, or type a command directly.
 - Create daily or manual secret-free JSON backups, apply count/age retention, and export them through the native save dialog.
 
