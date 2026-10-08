@@ -480,6 +480,7 @@ export const emptyUsage = (provider: ProviderId): Usage => ({
 });
 export const RUN_INPUT_PREFIX = 'Additional user instruction sent during this run:\n';
 export interface Message {
+  agentMode?: AgentMode;
   runInput?: {
     runId: string;
     responseId: string;
@@ -720,6 +721,14 @@ export interface Run {
   context?: ContextManifest;
 }
 export interface ContextManifest {
+  handoff?: {
+    sourceMessageId: string;
+    sourceMode: AgentMode | 'unknown';
+    sourceStatus: Message['status'];
+    includedToolResults: number;
+    omittedToolResults: number;
+    serializedBytes: number;
+  };
   projectInstructions?: { path: string; scope: string; sha256: string }[];
   mcpAttachmentIds?: string[];
   mcpTools?: string[];

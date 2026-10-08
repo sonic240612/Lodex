@@ -1005,6 +1005,7 @@ export class StorageEngine {
             session.messages.push({
               id: messageId,
               role: 'assistant',
+              agentMode: session.mode ?? 'build',
               content: '',
               createdAt: now,
               status: 'streaming',
