@@ -817,7 +817,9 @@ export async function startServer(options: ServerOptions) {
         command.type === 'start_autopilot' ||
         command.type === 'start_task_list'
           ? { mode: 'build' as const }
-          : {}),
+          : command.type === 'send_message' && command.mode
+            ? { mode: command.mode }
+            : {}),
       };
       const session = { ...modeSession, config: resolveModelConfig(modeSession) };
       const configs = [session.config];

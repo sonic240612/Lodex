@@ -82,7 +82,7 @@ The desktop app can also store the key in the operating system keychain. `.env`,
 
 Full Access is stored per conversation. File hashes, path checks, symlink checks, cancellation, process cleanup, and audit records still apply.
 
-Chat commands: `/plan [request]`, `/build [request]`, `/goal <goal>`, `/resume`, `/stop`, `/compact`, `/quick`, `/new`, `/settings`, and `/help`. Korean aliases include `/계획`, `/빌드`, `/목표`, and `/설정`. Selecting a suggestion fills the input; sending it runs the command.
+Messages use Build by default. Use `/plan <request>` for a single read-only planning request. Other chat commands: `/goal <goal>`, `/resume`, `/stop`, `/compact`, `/quick`, `/new`, `/settings`, and `/help`. Korean aliases include `/계획`, `/목표`, and `/설정`. Selecting a suggestion fills the input; sending it runs the command.
 
 `/goal <goal>` continues until completion, a blocker, or a budget limit. Completion checks successful current-run commands or exact artifact hashes; evidence alone requires user confirmation. Saved plans can use verification commands, file content/hash checks, or user confirmation. Later changes invalidate earlier checks. Manual task checkboxes remain separate.
 
@@ -132,7 +132,7 @@ MCP configuration imports Codex TOML, Claude/pi-style `mcpServers` JSON, OpenCod
 
 Create a bot with [BotFather](https://core.telegram.org/bots/tutorial#obtain-your-bot-token), enter the token in Telegram settings or set `TELEGRAM_BOT_TOKEN` in `.env`, select a conversation, enable transmission, and approve the pairing IDs.
 
-Commands include `/ask`, `/goal`, `/resume`, `/run`, `/status`, `/plan`, `/todo`, `/autopilot ask|auto|full`, `/approve`, `/deny`, `/answer`, `/decline`, `/cancel-input`, and `/stop`. `/todo` can set the saved goal, add tasks with completion criteria, mark them done, undo them, or remove them by number. Remote Build actions and permission changes require Build access in Telegram settings. Text sent during an active run becomes additional input to that run. Unknown delivery outcomes are recorded and never retried automatically.
+Commands include `/ask`, `/plan <request>`, `/goal`, `/resume`, `/run`, `/status`, `/todo`, `/autopilot ask|auto|full`, `/approve`, `/deny`, `/answer`, `/decline`, `/cancel-input`, and `/stop`. Plain text and `/ask` start Build requests; `/plan` requires a request and applies only to that request. `/todo` shows the saved goal and tasks; it can also set the goal, add tasks with completion criteria, mark them done, undo them, or remove them by number. Remote Build actions and permission changes require Build access in Telegram settings. Text sent during an active run becomes additional input without changing its mode. Unknown delivery outcomes are recorded and never retried automatically.
 
 Closing the desktop window keeps Lodex running in the system tray. Use **Quit Lodex** from the tray menu to stop the daemon and Telegram connection.
 

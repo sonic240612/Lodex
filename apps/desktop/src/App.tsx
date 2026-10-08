@@ -60,6 +60,7 @@ import {
   suggestSlashCommands,
   moveSlashSelection,
   parseComposerInput,
+  composerRequestMode,
   type SlashCommand,
 } from './slash-commands';
 import { McpElicitationBanner } from './McpElicitationBanner';
@@ -155,8 +156,10 @@ export function App() {
   const [slashIndex, setSlashIndex] = useState(0);
   const [slashDismissed, setSlashDismissed] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [newMode, setNewMode] = useState<AgentMode>('plan');
-  const mode = session?.mode ?? newMode;
+  const mode = composerRequestMode(
+    text,
+    session?.run?.status === 'running' ? (session.mode ?? 'build') : undefined,
+  );
   const [light, setLight] = useState(false);
   const [design, setDesign] = useState(loadDesignPreference);
   const appSurface = useRef<HTMLDivElement>(null);
@@ -179,7 +182,7 @@ export function App() {
   const followLatest = useRef(true);
   const end = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
-  const config = session ? resolveModelConfig(session) : workspace.config;
+  const config = session ? resolveModelConfig({ ...session, mode }) : workspace.config;
   const contextProvider =
     config.provider === 'openrouter' ||
     (session?.routing?.subagentsEnabled &&
@@ -319,7 +322,7 @@ export function App() {
   async function createSession(
     modelConfig = workspace.config,
     routing = session?.routing,
-    agentMode = mode,
+    agentMode: AgentMode = 'build',
   ): Promise<Session> {
     const result = await sendCommand({
       type: 'create_session',
@@ -344,7 +347,7 @@ export function App() {
       setError('알 수 없는 명령입니다. /help로 사용 가능한 명령을 확인하세요.');
       return;
     }
-    if (!['message', 'plan', 'build', 'goal'].includes(command) && argument) {
+    if (!['message', 'plan', 'goal'].includes(command) && argument) {
       setError(`/${command} 명령에는 추가 내용을 입력하지 마세요.`);
       return;
     }
@@ -364,6 +367,12 @@ export function App() {
       setError('현재 실행이 끝난 뒤 명령을 실행하세요.');
       return;
     }
+    if (command === 'plan' && !argument) {
+      setText('/plan ');
+      setError('/plan 뒤에 조사하거나 계획할 내용을 입력하세요.');
+      composer.current?.focus();
+      return;
+    }
     if (command === 'goal' && (!argument || argument.length > 4000)) {
       setError('사용법: /goal 달성할 목표 (최대 4,000자)');
       return;
@@ -379,15 +388,14 @@ export function App() {
       setError(command === 'resume' ? '계속할 목표가 없습니다.' : '압축할 대화가 없습니다.');
       return;
     }
-    const nextMode =
-      command === 'plan' ? 'plan' : command === 'build' || command === 'goal' ? 'build' : mode;
+    const nextMode = composerRequestMode(text, running ? mode : undefined);
     const requestConfig = session ? resolveModelConfig({ ...session, mode: nextMode }) : config;
     const needsModel =
       command === 'message' ||
       command === 'goal' ||
       command === 'compact' ||
       command === 'resume' ||
-      (['plan', 'build'].includes(command) && !!argument);
+      command === 'plan';
     if (needsModel && requestConfig.provider !== 'demo' && !requestConfig.model) {
       setSettings(true);
       return;
@@ -409,22 +417,6 @@ export function App() {
             ).session,
           );
           return;
-        }
-        if (command === 'plan' || command === 'build') {
-          if (target && target.mode !== nextMode) {
-            target = (
-              await sendCommand({
-                type: 'set_mode',
-                sessionId: target.id,
-                expectedVersion: target.version,
-                mode: nextMode,
-              })
-            ).session;
-            workspace.upsert(target);
-          } else if (!target) setNewMode(nextMode);
-          if (!argument) {
-            return;
-          }
         }
         if (command === 'stop') {
           workspace.upsert(
@@ -476,6 +468,7 @@ export function App() {
                       sessionId: target.id,
                       expectedVersion: target.version,
                       content: argument,
+                      mode: nextMode,
                     },
               )
             ).session,
@@ -614,6 +607,7 @@ export function App() {
         sessionId: session.id,
         expectedVersion: session.version,
         config: value,
+        role: mode,
       });
       workspace.upsert(result.session);
     }
@@ -873,7 +867,7 @@ export function App() {
             <span className="mode-badge" title={project?.path}>
               {project
                 ? project.name + ' · ' + (mode === 'plan' ? 'Plan' : 'Build')
-                : '대화 · 계획 편집'}
+                : '대화 · ' + (mode === 'plan' ? 'Plan' : 'Build')}
             </span>
             <button
               className="activity-toggle"

@@ -288,11 +288,12 @@ async function previewCommand(command: Command): Promise<CommandResult> {
       session.routing = command.routing;
     } else if (command.type === 'configure_session') {
       session.config = { ...command.config, provider: 'demo', model: 'demo' };
-      const role = session.mode ?? 'build';
+      const role = command.role ?? session.mode ?? 'build';
       if (session.routing?.[role]) session.routing = { ...session.routing, [role]: session.config };
     } else if (command.type === 'steer_run') {
       throw new Error('실행 중 추가 지시는 데스크톱 앱에서 사용할 수 있습니다.');
     } else if (command.type === 'send_message') {
+      if (command.mode) session.mode = command.mode;
       const now = new Date().toISOString();
       session.title = command.content.slice(0, 60);
       session.messages.push({
@@ -307,6 +308,7 @@ async function previewCommand(command: Command): Promise<CommandResult> {
       session.messages.push({
         id: crypto.randomUUID(),
         role: 'assistant',
+        agentMode: session.mode ?? 'build',
         activities: [
           {
             id: crypto.randomUUID(),

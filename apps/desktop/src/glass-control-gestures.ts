@@ -1,4 +1,11 @@
-import { animate, motionValue, type AnimationPlaybackControls, type MotionValue } from 'motion';
+import {
+  animate,
+  cancelFrame,
+  frame,
+  motionValue,
+  type AnimationPlaybackControls,
+  type MotionValue,
+} from 'motion';
 
 const controls =
   'button:is(.icon-button,.design-switch,.glass-effects-toggle,.send-button,.new-chat,.nav-item,.settings-nav-item,.provider-tag,.autopilot-toggle,.primary-button,.secondary-button), .suggestions button, .glass-optics-preview-lens';
@@ -15,7 +22,6 @@ type Axis = keyof typeof properties;
 type LensState = Record<Axis, number>;
 const axes = Object.keys(properties) as Axis[];
 const neutral: LensState = { x: 0, y: 0, scaleX: 1, scaleY: 1, pressure: 0, reflection: 0 };
-const hovering: LensState = { ...neutral, scaleX: 1.02, scaleY: 1.025, reflection: 0.35 };
 const pressing: LensState = {
   ...neutral,
   scaleX: 0.96,
@@ -30,7 +36,10 @@ type LensRecord = {
   originals: Map<string, { value: string; priority: string }>;
   originalLensMarker: string | null;
   animations: AnimationPlaybackControls[];
-  frame: number | null;
+  render: () => void;
+  renderQueued: boolean;
+  lastPainted: LensState | null;
+  target: LensState;
   generation: number;
 };
 type Press = {
@@ -53,6 +62,8 @@ export function attachGlassControlGestures(root: HTMLElement): () => void {
   let pressed: Press | null = null;
   let suppressedClick: { element: HTMLElement; pointerId: number; expires: number } | null = null;
   let disposed = false;
+  let pendingDrag: { element: HTMLElement; target: LensState } | null = null;
+  let dragQueued = false;
 
   function controlAt(target: EventTarget | null) {
     const control = (target as Element | null)?.closest?.<HTMLButtonElement>(controls);
@@ -74,7 +85,7 @@ export function attachGlassControlGestures(root: HTMLElement): () => void {
   }
 
   function paint(record: LensRecord) {
-    record.frame = null;
+    record.renderQueued = false;
     if (disposed || lenses.get(record.element) !== record) return;
     const clamp = (value: number, low: number, high: number) =>
       Math.max(low, Math.min(high, value));
@@ -87,17 +98,27 @@ export function attachGlassControlGestures(root: HTMLElement): () => void {
       reflection: clamp(record.values.reflection.get(), 0, 1),
     };
     for (const axis of axes) {
-      record.element.style.setProperty(
-        properties[axis],
-        `${state[axis].toFixed(4)}${axis === 'x' || axis === 'y' ? 'px' : ''}`,
-      );
+      state[axis] = Number(state[axis].toFixed(4));
+      if (state[axis] !== record.lastPainted?.[axis])
+        record.element.style.setProperty(
+          properties[axis],
+          `${state[axis]}${axis === 'x' || axis === 'y' ? 'px' : ''}`,
+        );
     }
-    emit(record, state);
+    if (
+      state.pressure !== record.lastPainted?.pressure ||
+      state.scaleX !== record.lastPainted?.scaleX ||
+      state.scaleY !== record.lastPainted?.scaleY
+    )
+      emit(record, state);
+    record.lastPainted = state;
   }
 
   function schedulePaint(record: LensRecord) {
-    if (disposed || lenses.get(record.element) !== record || record.frame !== null) return;
-    record.frame = view!.requestAnimationFrame(() => paint(record));
+    if (disposed || lenses.get(record.element) !== record || record.renderQueued) return;
+    record.renderQueued = true;
+    // Motion's render phase follows all six spring updates in this same frame.
+    frame.render(record.render);
   }
 
   function recordFor(element: HTMLElement) {
@@ -120,9 +141,14 @@ export function attachGlassControlGestures(root: HTMLElement): () => void {
       ),
       originalLensMarker: element.getAttribute('data-glass-lens'),
       animations: [],
-      frame: null,
+      render: () => {},
+      renderQueued: false,
+      lastPainted: null,
+      target: neutral,
       generation: 0,
     };
+    const created = record;
+    created.render = () => paint(created);
     lenses.set(element, record);
     if (record.originalLensMarker === null) element.setAttribute('data-glass-lens', '');
     return record;
@@ -133,7 +159,8 @@ export function attachGlassControlGestures(root: HTMLElement): () => void {
     lenses.delete(record.element);
     record.generation++;
     for (const animation of record.animations) animation.stop();
-    if (record.frame !== null) view!.cancelAnimationFrame(record.frame);
+    cancelFrame(record.render);
+    record.renderQueued = false;
     for (const value of Object.values(record.values)) value.destroy();
     for (const [property, original] of record.originals) {
       if (original.value)
@@ -149,6 +176,8 @@ export function attachGlassControlGestures(root: HTMLElement): () => void {
 
   function spring(element: HTMLElement, target: LensState, restoreAfter = false) {
     const record = recordFor(element);
+    if (!restoreAfter && axes.every((axis) => target[axis] === record.target[axis])) return;
+    record.target = target;
     const generation = ++record.generation;
     for (const animation of record.animations) animation.stop();
     let remaining = axes.length;
@@ -182,7 +211,7 @@ export function attachGlassControlGestures(root: HTMLElement): () => void {
     if (hovered === control) return;
     if (hovered && hovered !== pressed?.element) endHover(hovered);
     hovered = control;
-    if (control && control !== pressed?.element) spring(control, hovering);
+    // Ordinary hover is CSS-only: no dynamic SVG filter or numeric springs.
   }
 
   function out(event: PointerEvent) {
@@ -202,9 +231,16 @@ export function attachGlassControlGestures(root: HTMLElement): () => void {
     }
   }
 
+  function clearPendingDrag() {
+    pendingDrag = null;
+    dragQueued = false;
+    cancelFrame(flushDrag);
+  }
+
   function finish(cancelled: boolean, outside = false) {
     const current = pressed;
     if (!current) return;
+    clearPendingDrag();
     pressed = null;
     if (!cancelled && current.dragged && current.pointerId !== null) {
       suppressedClick = {
@@ -256,14 +292,29 @@ export function attachGlassControlGestures(root: HTMLElement): () => void {
     const strength = Math.min(distance / 88, 1);
     const horizontal = distance ? Math.abs(dx) / distance : 0;
     const vertical = distance ? Math.abs(dy) / distance : 0;
-    spring(pressed.element, {
-      x: 12 * Math.tanh(dx / 50),
-      y: 12 * Math.tanh(dy / 50),
-      scaleX: pressing.scaleX + strength * (0.17 * horizontal - 0.035 * vertical),
-      scaleY: pressing.scaleY + strength * (0.115 * vertical - 0.06 * horizontal),
-      pressure: 1,
-      reflection: Math.min(1, 0.9 + strength * 0.1),
-    });
+    pendingDrag = {
+      element: pressed.element,
+      target: {
+        x: 12 * Math.tanh(dx / 50),
+        y: 12 * Math.tanh(dy / 50),
+        scaleX: pressing.scaleX + strength * (0.17 * horizontal - 0.035 * vertical),
+        scaleY: pressing.scaleY + strength * (0.115 * vertical - 0.06 * horizontal),
+        pressure: 1,
+        reflection: Math.min(1, 0.9 + strength * 0.1),
+      },
+    };
+    if (!dragQueued) {
+      dragQueued = true;
+      frame.read(flushDrag);
+    }
+  }
+
+  function flushDrag() {
+    dragQueued = false;
+    const pending = pendingDrag;
+    pendingDrag = null;
+    if (!disposed && pending && pressed?.element === pending.element)
+      spring(pending.element, pending.target);
   }
 
   function pointerUp(event: PointerEvent) {
@@ -317,6 +368,7 @@ export function attachGlassControlGestures(root: HTMLElement): () => void {
   }
 
   function reset() {
+    clearPendingDrag();
     const current = pressed;
     pressed = null;
     hovered = null;

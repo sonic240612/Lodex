@@ -75,7 +75,7 @@ export function glassRayOffset(lens: GlassLens, x: number, y: number) {
   const qy = Math.abs(py) - (lens.height / 2 - lens.radius);
   const ox = Math.max(qx, 0);
   const oy = Math.max(qy, 0);
-  const cornerDistance = Math.hypot(ox, oy);
+  const cornerDistance = ox === 0 ? oy : oy === 0 ? ox : Math.hypot(ox, oy);
   const distance = cornerDistance + Math.min(Math.max(qx, qy), 0) - lens.radius;
   const depth = -distance;
   if (depth < 0 || depth >= lens.rim) return { x: 0, y: 0 };
@@ -86,10 +86,16 @@ export function glassRayOffset(lens: GlassLens, x: number, y: number) {
   // A quarter-circle cross section joins the flat center with a horizontal
   // tangent. Clamp the extreme tangent at the outermost pixel for stability.
   const t = Math.max(0.025, Math.min(1, depth / lens.rim));
-  const slope = (1 - t) / Math.sqrt(1 - (1 - t) ** 2);
-  const incidence = Math.atan(slope);
-  const transmitted = Math.asin(Math.sin(incidence) / lens.indexOfRefraction);
-  const shift = lens.thickness * Math.tan(incidence - transmitted);
+  // Algebraic Snell evaluation avoids four transcendental trig calls per
+  // pixel. For this circular profile sin(incidence) is simply 1 - t.
+  const sinIncidence = 1 - t;
+  const cosIncidence = Math.sqrt(1 - sinIncidence ** 2);
+  const sinTransmitted = sinIncidence / lens.indexOfRefraction;
+  const cosTransmitted = Math.sqrt(1 - sinTransmitted ** 2);
+  const tangent =
+    (sinIncidence * cosTransmitted - cosIncidence * sinTransmitted) /
+    (cosIncidence * cosTransmitted + sinIncidence * sinTransmitted);
+  const shift = lens.thickness * tangent;
   // Backward image sampling: points along the rim sample toward the center.
   return { x: -normalX * shift, y: -normalY * shift };
 }
@@ -97,7 +103,7 @@ export function glassRayOffset(lens: GlassLens, x: number, y: number) {
 export function displacementMapSize(width: number, height: number) {
   const w = positive(width, 1);
   const h = positive(height, 1);
-  const ratio = Math.min(1, 768 / Math.max(w, h), Math.sqrt(180_000 / (w * h)));
+  const ratio = Math.min(1, 768 / Math.max(w, h), Math.sqrt(98_304 / (w * h)));
   return { width: Math.max(1, Math.floor(w * ratio)), height: Math.max(1, Math.floor(h * ratio)) };
 }
 
@@ -107,18 +113,24 @@ export function createDisplacementPixels(lens: GlassLens) {
   // Offsets therefore remain neutral in the center, even with 8-bit pixels.
   const scale = lens.thickness * 4;
   const pixels = new Uint8ClampedArray(size.width * size.height * 4);
+  pixels.fill(128);
+  for (let index = 3; index < pixels.length; index += 4) pixels[index] = 255;
+  const flatInset = Math.max(lens.radius, lens.rim);
   for (let y = 0; y < size.height; y++) {
+    const sampleY = ((y + 0.5) / size.height) * lens.height;
     for (let x = 0; x < size.width; x++) {
-      const ray = glassRayOffset(
-        lens,
-        ((x + 0.5) / size.width) * lens.width,
-        ((y + 0.5) / size.height) * lens.height,
-      );
+      const sampleX = ((x + 0.5) / size.width) * lens.width;
+      if (
+        sampleX >= flatInset &&
+        sampleX <= lens.width - flatInset &&
+        sampleY >= flatInset &&
+        sampleY <= lens.height - flatInset
+      )
+        continue;
+      const ray = glassRayOffset(lens, sampleX, sampleY);
       const index = (y * size.width + x) * 4;
       pixels[index] = 128 + (ray.x / scale) * 256;
       pixels[index + 1] = 128 + (ray.y / scale) * 256;
-      pixels[index + 2] = 128;
-      pixels[index + 3] = 255;
     }
   }
   return { ...size, pixels, scale };

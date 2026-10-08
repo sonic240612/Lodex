@@ -10,6 +10,7 @@ class ElementStub extends EventTarget {
   parent: ElementStub | null = null;
   ownerDocument!: unknown;
   optical = false;
+  selector = '';
   offsetWidth = 120;
   offsetHeight = 60;
   get clientWidth() {
@@ -48,16 +49,21 @@ class ElementStub extends EventTarget {
   contains(other: ElementStub): boolean {
     return this === other || this.children.some((child) => child.contains(other));
   }
-  matches() {
-    return this.optical;
+  matches(selectors = '') {
+    return this.selector
+      ? selectors
+          .split(',')
+          .map((selector) => selector.trim())
+          .includes(this.selector)
+      : this.optical;
   }
   closest(): ElementStub | null {
     return this.optical ? this : (this.parent?.closest() ?? null);
   }
-  querySelectorAll(): ElementStub[] {
+  querySelectorAll(selectors = ''): ElementStub[] {
     return this.children.flatMap((child) => [
-      ...(child.optical ? [child] : []),
-      ...child.querySelectorAll(),
+      ...(child.matches(selectors) ? [child] : []),
+      ...child.querySelectorAll(selectors),
     ]);
   }
 }
@@ -166,6 +172,19 @@ function fixture(userAgent = 'Chrome/134.0.0.0') {
     resize: () => resized([{ target: surface }]),
     mutation: (addedNodes: ElementStub[] = [], removedNodes: ElementStub[] = []) =>
       mutated([{ addedNodes, removedNodes }]),
+    layout: (moving: boolean) => {
+      if (moving) root.dataset.glassLayoutMoving = '';
+      else delete root.dataset.glassLayoutMoving;
+      mutated([
+        {
+          type: 'attributes',
+          attributeName: 'data-glass-layout-moving',
+          target: root,
+          addedNodes: [],
+          removedNodes: [],
+        },
+      ]);
+    },
     marker: (target: ElementStub, active: boolean) => {
       target.optical = active;
       mutated([
@@ -195,6 +214,87 @@ function fixture(userAgent = 'Chrome/134.0.0.0') {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('glass backdrop lifecycle', () => {
+  it('keeps large opaque panels, menus and idle buttons out of the optical registry', () => {
+    const f = fixture();
+    f.surface.optical = false;
+    for (const selector of [
+      '.sidebar',
+      '.plan-panel',
+      '.settings-screen',
+      '.permission-menu',
+      '.glass-effects-menu',
+      '.new-chat',
+      '.send-button',
+    ]) {
+      const element = new ElementStub(selector);
+      element.selector = selector;
+      f.root.append(element);
+    }
+    const cleanup = attachGlassRefraction(f.root as unknown as HTMLElement);
+    expect(f.frames.size).toBe(0);
+    expect(f.body.children[0]!.children[0]!.children).toHaveLength(0);
+    cleanup();
+  });
+
+  it('does not rescan unrelated streamed message subtrees or repaint on their mutations', () => {
+    const f = fixture();
+    const cleanup = attachGlassRefraction(f.root as unknown as HTMLElement);
+    f.flush();
+    const paragraph = new ElementStub('paragraph');
+    const query = vi.spyOn(paragraph, 'querySelectorAll');
+    f.root.append(paragraph);
+    for (let index = 0; index < 20; index++) f.mutation([paragraph]);
+    expect(query).not.toHaveBeenCalled();
+    expect(f.frames.size).toBe(0);
+    expect(f.renderedMaps).toHaveBeenCalledOnce();
+    cleanup();
+  });
+
+  it('updates only changed optical attributes and reuses cached maps after releasing a button', () => {
+    const f = fixture();
+    const cleanup = attachGlassRefraction(f.root as unknown as HTMLElement);
+    f.flush();
+    const filter = f.body.children[0]!.children[0]!.children[0]!;
+    const channels = filter.children.filter((child) => child.tag === 'feDisplacementMap');
+    const axes = filter.children[1]!.children;
+    const channelWrites = channels.map((channel) => vi.spyOn(channel, 'setAttribute'));
+    const axisWrites = axes.map((axis) => vi.spyOn(axis, 'setAttribute'));
+    f.interact(0);
+    expect(channelWrites.every((write) => write.mock.calls.length === 0)).toBe(true);
+    f.interact(0.5);
+    expect(channelWrites.every((write) => write.mock.calls.length === 1)).toBe(true);
+    expect(axisWrites.every((write) => write.mock.calls.length === 0)).toBe(true);
+    f.interact(0.5);
+    expect(channelWrites.every((write) => write.mock.calls.length === 1)).toBe(true);
+    f.marker(f.surface, false);
+    f.marker(f.surface, true);
+    f.interact(1);
+    expect(f.renderedMaps).toHaveBeenCalledOnce();
+    cleanup();
+  });
+
+  it('defers large map generation until a layout transition settles and bakes its final size once', () => {
+    const f = fixture();
+    f.surface.offsetWidth = 700;
+    f.surface.offsetHeight = 180;
+    const cleanup = attachGlassRefraction(f.root as unknown as HTMLElement);
+    f.layout(true);
+    for (const width of [650, 600, 560]) {
+      f.surface.offsetWidth = width;
+      f.resize();
+      f.interact(0.5);
+    }
+    expect(f.renderedMaps).not.toHaveBeenCalled();
+    expect(f.frames.size).toBe(0);
+    f.layout(false);
+    expect(f.frames.size).toBe(1);
+    f.flush();
+    expect(f.renderedMaps).toHaveBeenCalledOnce();
+    const image = f.body.children[0]!.children[0]!.children[0]!.children[0]!;
+    expect(image.attributes.get('width')).toBe('560');
+    cleanup();
+  });
+
   it('does not deform an enclosing panel when an unmarked child dispatches an interaction', () => {
     const f = fixture();
     const child = new ElementStub('unmarked-button');

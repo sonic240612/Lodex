@@ -1,7 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { attachGlassControlGestures } from './glass-control-gestures';
 
-const motion = vi.hoisted(() => ({ animate: vi.fn(), motionValue: vi.fn() }));
+const motion = vi.hoisted(() => ({
+  animate: vi.fn(),
+  motionValue: vi.fn(),
+  cancelFrame: vi.fn(),
+  frame: { read: vi.fn(), render: vi.fn() },
+}));
 vi.mock('motion', () => motion);
 
 type NumericValue = {
@@ -24,9 +29,19 @@ type Spring = {
   stop: ReturnType<typeof vi.fn>;
 };
 let springs: Spring[];
+let reads: Set<() => void>;
+let renders: Set<() => void>;
 
 beforeEach(() => {
   springs = [];
+  reads = new Set();
+  renders = new Set();
+  motion.frame.read.mockReset().mockImplementation((callback) => reads.add(callback));
+  motion.frame.render.mockReset().mockImplementation((callback) => renders.add(callback));
+  motion.cancelFrame.mockReset().mockImplementation((callback) => {
+    reads.delete(callback);
+    renders.delete(callback);
+  });
   motion.motionValue.mockReset().mockImplementation((initial: number) => {
     let value = initial;
     return {
@@ -45,16 +60,13 @@ beforeEach(() => {
 });
 
 function fixture() {
-  const frames = new Map<number, FrameRequestCallback>();
-  let nextFrame = 0;
+  const frames = renders;
   let clock = 0;
   const view = Object.assign(new EventTarget(), {
     performance: { now: () => clock },
-    requestAnimationFrame: (callback: FrameRequestCallback) => {
-      frames.set(++nextFrame, callback);
-      return nextFrame;
-    },
-    cancelAnimationFrame: (frame: number) => frames.delete(frame),
+    requestAnimationFrame: vi.fn(() => {
+      throw new Error('The gesture should use the existing Motion frame.');
+    }),
   });
   const buttons = new Set<ReturnType<typeof button>>();
   const root = Object.assign(new EventTarget(), {
@@ -72,8 +84,9 @@ function fixture() {
         transform: 'rotate(2deg)',
         getPropertyValue: (name: string) => properties.get(name)?.value ?? '',
         getPropertyPriority: (name: string) => properties.get(name)?.priority ?? '',
-        setProperty: (name: string, value: string, priority = '') =>
+        setProperty: vi.fn((name: string, value: string, priority = '') =>
           properties.set(name, { value, priority }),
+        ),
         removeProperty: (name: string) => properties.delete(name),
       },
       properties,
@@ -114,10 +127,16 @@ function fixture() {
     destination.dispatchEvent(event);
     return event;
   }
+  function flushRead() {
+    const callbacks = [...reads];
+    reads.clear();
+    callbacks.forEach((callback) => callback());
+  }
   function flush() {
+    flushRead();
     const callbacks = [...frames.values()];
     frames.clear();
-    callbacks.forEach((callback) => callback(clock));
+    callbacks.forEach((callback) => callback());
   }
   return {
     root: root as unknown as HTMLElement,
@@ -126,6 +145,7 @@ function fixture() {
     dispatch,
     buttons,
     flush,
+    flushRead,
     frames,
     advanceClock: (milliseconds: number) => {
       clock += milliseconds;
@@ -149,28 +169,88 @@ function complete(group: Spring[]) {
 }
 
 describe('glass material gestures', () => {
+  it('retargets a high-frequency drag only once per Motion frame using the newest coordinates', () => {
+    const f = fixture();
+    const button = f.button();
+    const cleanup = attachGlassControlGestures(f.root);
+    f.dispatch('pointerdown', button);
+    sample(latestSpring(), 1);
+    f.flush();
+    const count = springs.length;
+    for (let x = 101; x <= 200; x++) f.dispatch('pointermove', button, { clientX: x }, f.view);
+    expect(springs.length).toBe(count);
+    expect(reads.size).toBe(1);
+    f.flushRead();
+    expect(springs.length).toBe(count + 6);
+    sample(latestSpring(), 1);
+    expect(f.frames.size).toBe(1);
+    f.flush();
+    expect(button.number('--glass-lens-x')).toBeCloseTo(12 * Math.tanh(2), 4);
+    expect(f.view.requestAnimationFrame).not.toHaveBeenCalled();
+    f.dispatch('pointermove', button, { clientX: 200 }, f.view);
+    f.flushRead();
+    expect(springs.length).toBe(count + 6); // No restart when the target has not changed.
+    cleanup();
+  });
+
+  it('does not rewrite CSS or SVG inputs when a spring update rounds to the already painted state', () => {
+    const f = fixture();
+    const button = f.button();
+    const optical = vi.fn();
+    button.addEventListener('lodex:glass-lens', optical);
+    const cleanup = attachGlassControlGestures(f.root);
+    f.dispatch('pointerdown', button);
+    const press = latestSpring();
+    sample(press, 1);
+    f.flush();
+    const writes = button.style.setProperty.mock.calls.length;
+    const events = optical.mock.calls.length;
+    sample(press, 1);
+    f.flush();
+    expect(button.style.setProperty).toHaveBeenCalledTimes(writes);
+    expect(optical).toHaveBeenCalledTimes(events);
+    const x = press[0]!;
+    x.value.set(2);
+    x.options.onUpdate(2);
+    f.flush();
+    expect(button.style.setProperty).toHaveBeenCalledTimes(writes + 1);
+    expect(optical).toHaveBeenCalledTimes(events); // Translation does not change SVG thickness.
+    cleanup();
+  });
+
+  it.each(['pointerup', 'blur', 'cleanup'])(
+    'discards a queued drag on %s before it can restart a spring',
+    (type) => {
+      const f = fixture();
+      const button = f.button();
+      const cleanup = attachGlassControlGestures(f.root);
+      f.dispatch('pointerdown', button);
+      f.dispatch('pointermove', button, { clientX: 200 }, f.view);
+      expect(reads.size).toBe(1);
+      if (type === 'cleanup') cleanup();
+      else f.dispatch(type, button, {}, f.view);
+      expect(reads.size).toBe(0);
+      const count = springs.length;
+      f.flush();
+      expect(springs.length).toBe(count);
+      cleanup();
+    },
+  );
+
   it.each(['pointerout', 'pointerleave'])(
-    'removes hover decoration immediately on %s without waiting for spring frames',
+    'leaves hover and %s to CSS without allocating lenses, springs or frames',
     (type) => {
       const f = fixture();
       const button = f.button();
       const cleanup = attachGlassControlGestures(f.root);
       f.dispatch('pointerover', button);
-      const hover = latestSpring();
-      sample(hover, 1);
-      f.flush();
-      expect(button.number('--glass-reflection')).toBeGreaterThan(0);
-      expect(button.hasAttribute('data-glass-lens')).toBe(true);
-      sample(hover, 0.8); // A queued animation frame must also be cancelled on exit.
-      const count = springs.length;
       f.dispatch(type, button, { relatedTarget: null });
-      expect(springs.length).toBe(count);
+      expect(springs.length).toBe(0);
+      expect(motion.motionValue).not.toHaveBeenCalled();
       expect(button.properties.size).toBe(0);
       expect(button.hasAttribute('data-glass-lens')).toBe(false);
       expect(f.frames.size).toBe(0);
-      expect(hover.every((spring) => spring.stop.mock.calls.length === 1)).toBe(true);
-      sample(hover, 1.05);
-      expect(f.frames.size).toBe(0);
+      expect(reads.size).toBe(0);
       expect(button.style.transform).toBe('rotate(2deg)');
       cleanup();
     },
@@ -211,6 +291,7 @@ describe('glass material gestures', () => {
     f.dispatch('pointerout', button, { relatedTarget: null });
     f.dispatch('pointerleave', null);
     f.dispatch('pointermove', null, { clientX: 200 }, f.view);
+    f.flushRead();
     sample(latestSpring(), 1);
     f.flush();
     expect(button.number('--glass-pressure')).toBe(1);
@@ -256,17 +337,16 @@ describe('glass material gestures', () => {
     button.addEventListener('lodex:glass-lens', (event) => events.push(event as CustomEvent));
     const cleanup = attachGlassControlGestures(f.root);
     const hover = f.dispatch('pointerover', button);
-    sample(latestSpring(), 1);
-    expect(f.frames.size).toBe(1); // Six spring channels commit one optical update per frame.
-    f.flush();
-    expect(button.number('--glass-lens-scale-x')).toBeGreaterThan(1);
+    expect(springs.length).toBe(0);
     const down = f.dispatch('pointerdown', button);
     const press = latestSpring();
     sample(press, 1);
+    expect(f.frames.size).toBe(1); // Six channels share Motion's current render phase.
     f.flush();
     expect(button.number('--glass-pressure')).toBe(1);
     expect(button.number('--glass-lens-scale-x')).toBeLessThan(1);
     const move = f.dispatch('pointermove', null, { clientX: 230 }, f.view);
+    f.flushRead();
     const drag = latestSpring();
     // Retarget the same MotionValues so Motion can preserve instantaneous spring velocity.
     expect(drag[0]?.value).toBe(press[0]?.value);
@@ -301,7 +381,7 @@ describe('glass material gestures', () => {
     cleanup();
   });
 
-  it('starts a new hover spring when moving directly between adjacent controls', () => {
+  it('does no material work when moving directly between adjacent controls', () => {
     const f = fixture();
     const first = f.button();
     const next = f.button();
@@ -309,9 +389,9 @@ describe('glass material gestures', () => {
     f.dispatch('pointerover', first);
     f.dispatch('pointerout', first, { relatedTarget: next });
     f.dispatch('pointerover', next, { relatedTarget: first });
-    sample(latestSpring(), 1);
     f.flush();
-    expect(next.number('--glass-lens-scale-x')).toBeGreaterThan(1);
+    expect(springs.length).toBe(0);
+    expect(first.properties.size + next.properties.size).toBe(0);
     cleanup();
   });
 
@@ -379,6 +459,7 @@ describe('glass material gestures', () => {
     f.dispatch('pointerdown', preview);
     expect(preview.setPointerCapture).toHaveBeenCalledWith(1);
     f.dispatch('pointermove', null, { clientY: -500 }, f.view);
+    f.flushRead();
     sample(latestSpring(), 1);
     f.flush();
     expect(preview.number('--glass-lens-y')).toBe(-12);
@@ -405,6 +486,7 @@ describe('glass material gestures', () => {
     expect(f.dispatch('click', button).defaultPrevented).toBe(false);
     f.dispatch('pointerdown', preview, { pointerType: 'touch' });
     f.dispatch('pointermove', null, { clientX: 200, pointerType: 'touch' }, f.view);
+    f.flushRead();
     sample(latestSpring(), 1);
     f.flush();
     expect(preview.number('--glass-lens-x')).toBeGreaterThan(0);
@@ -419,6 +501,7 @@ describe('glass material gestures', () => {
       const cleanup = attachGlassControlGestures(f.root);
       f.dispatch('pointerdown', button);
       f.dispatch('pointermove', null, { clientX: 200 }, f.view);
+      f.flushRead();
       sample(latestSpring(), 1);
       f.flush();
       f.dispatch(type, button, {}, type === 'lostpointercapture' ? f.root : f.view);

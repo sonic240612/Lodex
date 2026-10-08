@@ -51,7 +51,7 @@ export function glassPanelLayout(width: number, sidebarOpen: boolean, planOpen: 
   };
 }
 
-/** Keep three stable tracks so the reading surface slides without scaling its text. */
+/** Reflow the reading column once, then animate its position on the compositor. */
 export function useGlassPanelLayout(
   root: RefObject<HTMLElement | null>,
   enabled: boolean,
@@ -66,45 +66,47 @@ export function useGlassPanelLayout(
     return () => window.removeEventListener('resize', update);
   }, []);
   const layout = glassPanelLayout(viewportWidth, sidebarOpen, planOpen);
-  const current = useRef<{ sidebar: number; plan: number } | null>(null);
+  const initialized = useRef(false);
   const previousViewport = useRef(viewportWidth);
   useLayoutEffect(() => {
     const resized = previousViewport.current !== viewportWidth;
     previousViewport.current = viewportWidth;
     const element = root.current;
+    const main = element?.querySelector<HTMLElement>('.main');
     if (!element || !enabled) {
       element?.style.removeProperty('grid-template-columns');
-      current.current = null;
+      element?.removeAttribute('data-glass-layout-moving');
+      main?.style.removeProperty('transform');
+      initialized.current = false;
       return;
     }
-    const paint = () => {
-      const value = current.current!;
-      element.style.gridTemplateColumns = `${value.sidebar}px minmax(0, 1fr) ${value.plan}px`;
-    };
-    if (!current.current || !allowMotion || resized) {
-      current.current = { sidebar: layout.sidebarTrack, plan: layout.planTrack };
-      paint();
-      return;
-    }
-    const sidebar = animate(current.current.sidebar, layout.sidebarTrack, {
-      ...glassSpring,
-      onUpdate: (value) => {
-        if (!current.current) return;
-        current.current.sidebar = Math.max(0, value);
-        paint();
+    const previousLeft = main?.getBoundingClientRect().left;
+    main?.style.removeProperty('transform');
+    element.style.gridTemplateColumns = `${layout.sidebarTrack}px minmax(0, 1fr) ${layout.planTrack}px`;
+    const offset =
+      main && previousLeft !== undefined ? previousLeft - main.getBoundingClientRect().left : 0;
+    const shouldAnimate = initialized.current && allowMotion && !resized && Math.abs(offset) > 0.5;
+    initialized.current = true;
+    if (!shouldAnimate || !main) return;
+    element.setAttribute('data-glass-layout-moving', '');
+    const playback = animate(
+      main,
+      { x: [offset, 0] },
+      {
+        duration: 0.22,
+        ease: [0.22, 1, 0.36, 1],
       },
-    });
-    const plan = animate(current.current.plan, layout.planTrack, {
-      ...glassSpring,
-      onUpdate: (value) => {
-        if (!current.current) return;
-        current.current.plan = Math.max(0, value);
-        paint();
-      },
+    );
+    let active = true;
+    void playback.then(() => {
+      if (!active) return;
+      main.style.removeProperty('transform');
+      element.removeAttribute('data-glass-layout-moving');
     });
     return () => {
-      sidebar.stop();
-      plan.stop();
+      active = false;
+      playback.stop();
+      element.removeAttribute('data-glass-layout-moving');
     };
   }, [root, enabled, allowMotion, layout.sidebarTrack, layout.planTrack, viewportWidth]);
   return layout;

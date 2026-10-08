@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { defaultModelConfig, defaultPlan, type Session } from '@lodex/contracts';
 import {
   availableSlashCommands,
+  composerRequestMode,
   moveSlashSelection,
   parseComposerInput,
   slashCommands,
@@ -25,7 +26,6 @@ describe('composer slash commands', () => {
     ['/PLAN Fix MyFile.ts', 'plan', 'Fix MyFile.ts'],
     [' /계획 모드 코드 검토\n테스트 계획 ', 'plan', '코드 검토\n테스트 계획'],
     ['/계획', 'plan', ''],
-    ['/빌드모드 수정', 'build', '수정'],
     ['/목표 추진 앱 완성', 'goal', '앱 완성'],
     ['/목표 앱 완성', 'goal', '앱 완성'],
     ['/빠른 압축', 'quick', ''],
@@ -50,6 +50,22 @@ describe('composer slash commands', () => {
       argument: 'Please use /goal',
     });
   });
+  it('uses Build for ordinary requests and only plans explicit requests with content', () => {
+    expect(composerRequestMode('')).toBe('build');
+    expect(composerRequestMode('Continue the previous plan')).toBe('build');
+    expect(composerRequestMode('/plan')).toBe('build');
+    expect(composerRequestMode('/plan Investigate the source')).toBe('plan');
+    expect(composerRequestMode('/계획 소스를 조사해')).toBe('plan');
+    expect(composerRequestMode('Apply it', 'plan')).toBe('plan');
+    expect(composerRequestMode('/plan Check it', 'build')).toBe('build');
+  });
+  it('does not expose or recognize the removed Build command or its aliases', () => {
+    for (const input of ['/build', '/build implement', '/빌드모드 수정', '/개발']) {
+      expect(parseComposerInput(input).command).toBe('unknown');
+      expect(suggestSlashCommands(input, slashCommands)).toEqual([]);
+    }
+    expect(slashCommands.map((command) => command.id)).not.toContain('build');
+  });
   it('filters Korean and English prefixes, then closes after completion or arguments', () => {
     expect(suggestSlashCommands('/', slashCommands)).toHaveLength(slashCommands.length);
     expect(suggestSlashCommands('/계획', slashCommands).map((item) => item.id)).toEqual(['plan']);
@@ -68,7 +84,7 @@ describe('composer slash commands', () => {
     const ids = (target: Session | undefined, connected = true) =>
       availableSlashCommands(target, connected).map((item) => item.id);
     expect(ids(undefined, false)).toEqual(['new', 'settings', 'help']);
-    expect(ids(undefined)).toEqual(['plan', 'build', 'goal', 'new', 'settings', 'help']);
+    expect(ids(undefined)).toEqual(['plan', 'goal', 'new', 'settings', 'help']);
     expect(
       ids({
         ...session,

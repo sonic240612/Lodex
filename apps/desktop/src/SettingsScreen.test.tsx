@@ -113,7 +113,7 @@ it('links slash choices to a single selected option for the composer', () => {
   expect(html).toContain('role="listbox"');
   expect(html.match(/role="option"/g)).toHaveLength(3);
   expect(html.match(/aria-selected="true"/g)).toHaveLength(1);
-  expect(html).toMatch(/aria-selected="true" id="slash-command-build"/);
+  expect(html).toMatch(/aria-selected="true" id="slash-command-goal"/);
   expect(html).toContain('Tab 선택');
   expect(html).toContain('type="button"');
 });

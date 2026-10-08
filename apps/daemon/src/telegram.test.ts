@@ -162,9 +162,10 @@ describe('durable Telegram channel', () => {
   it('queues paired remote instructions in the active run instead of starting another request', async () => {
     const app = await fixture();
     await app.pair();
-    app.bot.push([update(2, '/ask first request')]);
+    app.bot.push([update(2, '/plan first request')]);
     await expect.poll(() => app.dispatch.mock.calls.length).toBe(1);
     const first = await app.store.session(app.session.id);
+    expect(first.mode).toBe('plan');
     app.bot.push([update(3, 'also check the output')]);
     await expect.poll(() => app.dispatch.mock.calls.length).toBe(2);
     expect(app.dispatch.mock.calls[1]![0]).toMatchObject({
@@ -175,6 +176,7 @@ describe('durable Telegram channel', () => {
     });
     const queued = await app.store.session(app.session.id);
     expect(queued.run!.id).toBe(first.run!.id);
+    expect(queued.mode).toBe('plan');
     expect(queued.messages.at(-1)!.runInput).toMatchObject({ actor: 'telegram', status: 'queued' });
     await expect
       .poll(() => app.bot.sent.some((message) => message.text.includes('추가 지시를 접수')))
@@ -249,7 +251,7 @@ describe('durable Telegram channel', () => {
     app.bot.push([
       update(2, 'do not run', 101),
       update(3, 'group request', 100, { chat: { id: 100, type: 'group' } }),
-      update(4, '/ask accepted'),
+      update(4, '/plan accepted'),
     ]);
     await expect.poll(() => app.dispatch.mock.calls.length).toBe(1);
     expect(app.dispatch.mock.calls[0]![0]).toMatchObject({
@@ -257,10 +259,11 @@ describe('durable Telegram channel', () => {
       type: 'send_message',
       sessionId: app.session.id,
       content: 'accepted',
+      mode: 'plan',
     });
     await expect.poll(() => app.bot.offsets.includes(5)).toBe(true);
     expect((await app.store.integration('telegram'))?.document).toMatchObject({ offset: 5 });
-    app.bot.push([update(4, '/ask accepted')]);
+    app.bot.push([update(4, '/plan accepted')]);
     await expect.poll(() => app.bot.offsets.filter((id) => id === 5).length).toBeGreaterThan(1);
     expect(app.dispatch).toHaveBeenCalledTimes(1);
     const current = await app.store.session(app.session.id);
@@ -282,14 +285,8 @@ describe('durable Telegram channel', () => {
   it('blocks Build requests until explicitly allowed and never executes unsupported commands', async () => {
     const app = await fixture();
     await app.pair();
-    await app.store.apply(
-      makeCommand({
-        type: 'set_mode',
-        sessionId: app.session.id,
-        expectedVersion: app.session.version,
-        mode: 'build',
-      }),
-    );
+    // An old Plan session must not silently turn plain text into another Plan request.
+    expect(app.session.mode).toBe('plan');
     app.bot.push([update(2, '/ask edit files'), update(3, '/autopilot')]);
     await expect.poll(() => app.bot.sent.length).toBe(1);
     expect(app.bot.sent[0]?.text).toContain('Build');
@@ -297,6 +294,54 @@ describe('durable Telegram channel', () => {
     app.bot.push([]);
     await expect.poll(() => app.bot.sent.length).toBe(2);
     expect(app.bot.sent[1]?.text).toContain('지원하지 않는 명령');
+  });
+
+  it('treats Plan as an explicit request without latching it or changing an active run', async () => {
+    const app = await fixture();
+    await app.pair();
+    app.bot.push([update(2, '/plan')]);
+    await expect
+      .poll(() => app.bot.sent.some((message) => message.text.includes('/plan 뒤에')))
+      .toBe(true);
+    expect(app.dispatch).not.toHaveBeenCalled();
+    app.bot.push([update(3, '/plan Inspect the code')]);
+    await expect.poll(() => app.dispatch.mock.calls.length).toBe(1);
+    expect(app.dispatch.mock.calls[0]![0]).toMatchObject({
+      type: 'send_message',
+      mode: 'plan',
+      content: 'Inspect the code',
+    });
+    const planned = await app.store.session(app.session.id);
+    app.bot.push([update(4, '/plan Inspect something else'), update(5, '/build')]);
+    await expect
+      .poll(() => app.bot.sent.some((message) => message.text.includes('현재 실행이 끝난 뒤')))
+      .toBe(true);
+    app.bot.push([]);
+    await expect
+      .poll(() => app.bot.sent.some((message) => message.text.includes('지원하지 않는 명령')))
+      .toBe(true);
+    expect(app.dispatch).toHaveBeenCalledTimes(1);
+    expect((await app.store.session(app.session.id)).mode).toBe('plan');
+    await app.store.updateRun({
+      sessionId: planned.id,
+      runId: planned.run!.id,
+      status: 'completed',
+      text: 'Plan ready.',
+    });
+    await app.manager.configure({
+      enabled: true,
+      sessionId: planned.id,
+      allowBuild: true,
+      transmissionConsent: true,
+    });
+    app.bot.push([update(6, 'Implement the plan')]);
+    await expect.poll(() => app.dispatch.mock.calls.length).toBe(2);
+    expect(app.dispatch.mock.calls[1]![0]).toMatchObject({
+      type: 'send_message',
+      mode: 'build',
+      content: 'Implement the plan',
+    });
+    expect((await app.store.session(app.session.id)).mode).toBe('build');
   });
 
   it('allows a paired account to run a Full Access conversation remotely', async () => {

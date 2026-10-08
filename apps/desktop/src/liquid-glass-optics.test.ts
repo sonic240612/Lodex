@@ -67,7 +67,7 @@ describe('rounded glass lens', () => {
       [1, 1],
     ]) {
       const map = displacementMapSize(width!, height!);
-      expect(map.width * map.height).toBeLessThanOrEqual(180_000);
+      expect(map.width * map.height).toBeLessThanOrEqual(98_304);
       expect(Math.max(map.width, map.height)).toBeLessThanOrEqual(768);
       expect(Math.min(map.width, map.height)).toBeGreaterThanOrEqual(1);
     }

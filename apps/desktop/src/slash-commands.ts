@@ -1,18 +1,11 @@
-import type { Session } from '@lodex/contracts';
+import type { AgentMode, Session } from '@lodex/contracts';
 
 export const slashCommands = [
   {
     id: 'plan',
     label: '계획 모드',
-    description: 'Plan으로 전환 · 요청 내용을 이어서 입력할 수 있습니다.',
+    description: '이번 요청을 조사하고 작업 계획을 제안합니다.',
     aliases: ['계획 모드', '계획모드', '계획'],
-    argument: '요청 내용',
-  },
-  {
-    id: 'build',
-    label: '빌드 모드',
-    description: 'Build로 전환 · 요청 내용을 이어서 입력할 수 있습니다.',
-    aliases: ['빌드 모드', '빌드모드', '빌드', '개발'],
     argument: '요청 내용',
   },
   {
@@ -100,6 +93,13 @@ export function parseComposerInput(text: string): ParsedComposerInput {
     command: body.split(/\s/, 1)[0]?.includes('/') ? 'message' : 'unknown',
     argument: input,
   };
+}
+
+/** A running request keeps its permissions; an idle request opts into Plan explicitly. */
+export function composerRequestMode(text: string, runningMode?: AgentMode): AgentMode {
+  if (runningMode) return runningMode;
+  const { command, argument } = parseComposerInput(text);
+  return command === 'plan' && argument ? 'plan' : 'build';
 }
 
 export function availableSlashCommands(

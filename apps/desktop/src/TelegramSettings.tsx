@@ -265,12 +265,12 @@ export function TelegramSettings({
           </section>
         )}
         <p>
-          <code>/ask 메시지</code> · <code>/status</code> · <code>/plan</code> ·{' '}
+          <code>/ask 메시지</code> · <code>/status</code> · <code>/plan 내용</code> ·{' '}
           <code>/approve</code> · <code>/deny</code> · <code>/stop</code>
         </p>
         <p>
-          일반 텍스트도 요청으로 전달됩니다. 파일 적용·설정 변경은 데스크톱에서 진행하세요. 앱이
-          실행 중일 때만 연결됩니다.
+          일반 텍스트는 Build로, /plan 내용은 Plan으로 요청합니다. 원격 Build는 위 설정에서 허용해야
+          합니다. 앱이 실행 중일 때만 연결됩니다.
         </p>
         <p>연결 해제 후에도 이미 시작한 작업은 계속됩니다. 실행을 멈추려면 대화에서 중지하세요.</p>
         {!!status?.unknownDeliveries && (

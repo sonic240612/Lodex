@@ -79,6 +79,62 @@ async function setup(
 }
 
 describe('role routing and durable delegation', () => {
+  it.each(['plan', 'build'] as const)(
+    'applies request mode %s before selecting its model, tools and stored run',
+    async (mode) => {
+      const requests: InferenceRequest[] = [];
+      const app = await setup(
+        async function* (request) {
+          requests.push(request);
+          yield { type: 'text_delta', text: 'Request finished.' };
+          yield { type: 'finished', reason: 'stop' };
+        },
+        {
+          subagentsEnabled: false,
+          plan: { ...base, model: 'planner' },
+          build: { ...base, model: 'builder' },
+        },
+        true,
+      );
+      let session = app.session;
+      if (mode === 'plan') {
+        session = (
+          await app.store.apply(
+            makeCommand({
+              type: 'set_mode',
+              sessionId: session.id,
+              expectedVersion: session.version,
+              mode: 'build',
+            }),
+          )
+        ).session;
+      }
+      expect(session.mode).not.toBe(mode);
+      const response = await app.command(
+        makeCommand({
+          type: 'send_message',
+          sessionId: session.id,
+          expectedVersion: session.version,
+          content: 'Use the explicitly requested mode.',
+          mode,
+        }),
+      );
+      expect(response.status).toBe(200);
+      await expect
+        .poll(async () => (await app.store.session(session.id)).run?.status)
+        .toBe('completed');
+      expect(requests).toHaveLength(1);
+      expect(requests[0]!.config.model).toBe(mode === 'plan' ? 'planner' : 'builder');
+      const tools = requests[0]!.tools?.map((tool) => tool.function.name);
+      if (mode === 'plan') {
+        expect(tools).toContain('set_task_list');
+        expect(tools).not.toContain('propose_edit');
+      } else expect(tools).toContain('propose_edit');
+      const stored = await app.store.session(session.id);
+      expect(stored.messages.at(-1)?.agentMode).toBe(mode);
+      expect(stored.messages.at(-1)?.inferenceConfig?.model).toBe(requests[0]!.config.model);
+    },
+  );
   it('switches local and cloud models in one conversation, retaining tool evidence but filtering old reasoning', async () => {
     const requests: InferenceRequest[] = [];
     let firstRead = true;

@@ -970,7 +970,7 @@ export class StorageEngine {
           } else if (command.type === 'configure_session') {
             session.config = command.config;
             // The composer edits its active role even when that role has an override.
-            const role = session.mode ?? 'build';
+            const role = command.role ?? session.mode ?? 'build';
             if (session.routing?.[role])
               session.routing = { ...session.routing, [role]: command.config };
           } else {
@@ -986,7 +986,9 @@ export class StorageEngine {
             if (context?.mcpAttachmentIds?.length) session.hasMcpHistory = true;
             const messageId = randomUUID();
             const runId = randomUUID();
-            if (command.type === 'start_task_list') {
+            if (command.type === 'send_message' && command.mode) {
+              session.mode = command.mode;
+            } else if (command.type === 'start_task_list') {
               session.mode = 'build';
               session.taskList = startTaskList(session.taskList);
             } else if (command.type === 'start_autopilot') {

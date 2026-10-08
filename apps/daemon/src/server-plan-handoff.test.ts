@@ -95,7 +95,7 @@ it.each([false, true])(
             type: 'create_session',
             sessionId: crypto.randomUUID(),
             title: 'Plan to Build',
-            mode: 'plan',
+            mode: 'build',
             config,
             projectId: project.id,
             ...(routed ? { routing: { build: { ...config, model: 'builder' } } } : {}),
@@ -119,6 +119,7 @@ it.each([false, true])(
             sessionId: session.id,
             expectedVersion: session.version,
             content: 'Investigate file.txt in Plan.',
+            mode: 'plan',
           })
         ).status,
       ).toBe(200);
@@ -157,7 +158,7 @@ it.each([false, true])(
             type: 'set_mode',
             sessionId: session.id,
             expectedVersion: session.version,
-            mode: 'build',
+            mode: 'plan',
           }),
         )
       ).session;
@@ -169,6 +170,7 @@ it.each([false, true])(
             sessionId: session.id,
             expectedVersion: session.version,
             content: 'Build using the Plan investigation.',
+            mode: 'build',
           })
         ).status,
       ).toBe(200);

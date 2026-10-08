@@ -38,6 +38,7 @@
   --accent: #dededb;
   --accent-surface: #ffffff09;
   --danger: #e9a79f;
+  --eco: #a1d6ac;
   --shadow: #00000040;
   --glass-fill: rgb(32 32 32 / var(--glass-opacity));
   --glass-dialog: rgb(28 28 28 / var(--glass-opacity));
@@ -62,6 +63,7 @@
   --accent: #3b3b36;
   --accent-surface: #29271f06;
   --danger: #a94037;
+  --eco: #347748;
   --shadow: #25231b14;
   --glass-fill: rgb(255 254 250 / var(--glass-opacity));
   --glass-dialog: rgb(250 249 245 / var(--glass-opacity));
@@ -126,6 +128,14 @@
 }
 .app[data-design='glass'] :is(.sidebar, .plan-panel) {
   --glass-material-fill: var(--sidebar);
+}
+.app[data-design='glass'] :is(.sidebar, .plan-panel)::before {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+.app[data-design='glass'][data-glass-layout-moving] :is(.topbar, .composer)::before {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
 }
 .app[data-design='glass']
   :is(
@@ -272,6 +282,60 @@
   background: var(--surface-hover);
   color: var(--text);
 }
+.app[data-design='glass'] .history {
+  padding: 0 1px 8px;
+}
+.app[data-design='glass'] .history-row {
+  border: 1px solid transparent;
+  border-radius: 12px;
+  margin: 3px 0;
+}
+.app[data-design='glass'] .history-row:has(.history-item.selected, > input:checked) {
+  border-color: var(--glass-edge);
+  background: linear-gradient(155deg, #ffffff06, transparent 65%), var(--surface-hover);
+  box-shadow: inset 0 1px 0 var(--glass-edge);
+}
+.app[data-design='glass'] .history-row:hover {
+  background-color: var(--surface);
+}
+.app[data-design='glass'] .history-item {
+  padding: 10px 11px;
+  gap: 9px;
+  font-size: 13px;
+  background: transparent;
+}
+.app[data-design='glass'] .history-item > span:first-of-type {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
+}
+.app[data-design='glass'] .history-item.selected {
+  background: transparent;
+}
+.app[data-design='glass'] .history-action {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  padding: 4px 9px;
+  font-size: 12px;
+}
+.app[data-design='glass'] .history-action.danger-text {
+  color: var(--danger);
+}
+.app[data-design='glass'] .history-selection {
+  margin: 0 0 9px;
+  padding: 9px 10px;
+  border: 1px solid var(--glass-edge);
+  border-radius: 12px;
+  background: var(--surface);
+  font-size: 12px;
+}
+.app[data-design='glass'] :is(.history-row, .history-selection) input[type='checkbox'] {
+  width: 15px;
+  height: 15px;
+}
 .app[data-design='glass']
   :is(
     .goal-mode-switch,
@@ -356,11 +420,15 @@
     scale(var(--glass-lens-scale-x, 1), var(--glass-lens-scale-y, 1));
   transform-origin: center;
   background: linear-gradient(155deg, #ffffff06, transparent 45%), var(--glass-control-fill);
-  -webkit-backdrop-filter: var(--glass-refraction-filter, blur(8px)) blur(0.35px);
-  backdrop-filter: var(--glass-refraction-filter, blur(8px)) blur(0.35px);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   box-shadow:
     inset 0 1px 0 var(--glass-rim),
     inset 0 -1px 0 #ffffff0a;
+}
+.app[data-design='glass'] :is([data-glass-lens], .glass-optics-preview-lens)::before {
+  -webkit-backdrop-filter: var(--glass-refraction-filter, blur(6px));
+  backdrop-filter: var(--glass-refraction-filter, blur(6px));
 }
 .app[data-design='glass']
   :is(
@@ -409,11 +477,12 @@
   border-radius: 22px;
 }
 /* Settings and connection forms stay opaque at every transparency setting. */
-.app[data-design='glass'] :is(dialog.settings-dialog, .settings-screen, .glass-effects-menu) {
+.app[data-design='glass']
+  :is(dialog.settings-dialog, .settings-screen, .glass-effects-menu, .permission-menu) {
   background: var(--glass-opaque-fill);
 }
 .app[data-design='glass']
-  :is(dialog.settings-dialog, .settings-screen, .glass-effects-menu)::before {
+  :is(dialog.settings-dialog, .settings-screen, .glass-effects-menu, .permission-menu)::before {
   background: var(--glass-opaque-fill);
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
@@ -426,6 +495,117 @@
 .app[data-design='glass'] .settings-screen-nav {
   background: var(--surface);
   padding: 14px;
+}
+
+/* Shared, inexpensive material treatment also covers secondary settings and work controls. */
+.app[data-design='glass']
+  button:where(
+    :not([class]),
+    [class=''],
+    .primary-button,
+    .secondary-button,
+    .danger-button,
+    .save-plan,
+    .review-reveal,
+    .compact-context-button,
+    .edit-actions button,
+    .dialog-actions button,
+    .permission-banner button,
+    .input-action button,
+    .execution-panel button,
+    .integration-body button,
+    .provider-options > button
+  ) {
+  border-radius: 11px;
+  background-image: linear-gradient(160deg, #ffffff07, transparent 60%);
+  box-shadow: inset 0 1px 0 var(--glass-edge);
+}
+.app[data-design='glass']
+  :where(.settings-dialog, .settings-screen, .plan-panel, .elicitation-fields)
+  :is(
+    input:not([type='checkbox'], [type='radio'], [type='range'], [type='hidden']),
+    select,
+    textarea
+  ) {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: inset 0 1px 2px #0000000a;
+}
+.app[data-design='glass'] input::file-selector-button {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-hover);
+  color: var(--text);
+  padding: 6px 10px;
+  margin-right: 10px;
+  cursor: pointer;
+}
+.app[data-design='glass']
+  :is(
+    .resource-grid article,
+    .key-section,
+    .skill-conflict,
+    .mcp-content-preview,
+    .undo-confirm,
+    .artifact-checks,
+    .command-jobs-panel,
+    .context-report,
+    .elicitation-banner
+  ) {
+  border-radius: 14px;
+  border-color: var(--border);
+  background: linear-gradient(160deg, #ffffff03, transparent 60%), var(--surface);
+  box-shadow: inset 0 1px 0 var(--glass-edge);
+}
+.app[data-design='glass'] :is(.activity-feed-summary, .activity-card > summary) {
+  border-radius: 10px;
+}
+.app[data-design='glass'] .delete-dialog {
+  background: var(--glass-opaque-fill);
+  border: 1px solid var(--glass-edge);
+  border-radius: 20px;
+  box-shadow: var(--glass-shadow);
+}
+.app[data-design='glass'] :is(.eco-tag, .eco-setting span) {
+  color: var(--eco);
+}
+.app[data-design='glass'] .eco-tag {
+  border: 1px solid color-mix(in srgb, var(--eco) 24%, transparent);
+  border-radius: 999px;
+  padding: 3px 8px;
+  background: color-mix(in srgb, var(--eco) 8%, transparent);
+}
+.app[data-design='glass'] .eco-setting > input {
+  appearance: none;
+  position: relative;
+  flex: 0 0 auto;
+  width: 40px;
+  height: 24px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-hover);
+  transition: background-color 120ms ease;
+}
+.app[data-design='glass'] .eco-setting > input::before {
+  content: '';
+  position: absolute;
+  inset: 3px auto auto 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--text);
+  box-shadow: 0 1px 3px #0003;
+  transition: transform 150ms ease;
+}
+.app[data-design='glass'] .eco-setting > input:checked {
+  background: var(--eco);
+  border-color: var(--eco);
+}
+.app[data-design='glass'] .eco-setting > input:checked::before {
+  transform: translateX(16px);
+  background: var(--bg);
 }
 .app[data-design='glass'] :is(.permission-menu, .slash-menu, .context-popover) {
   border-radius: 18px;

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { Session } from '@lodex/contracts';
 import { deleteSessions, snapshot } from './bridge';
 import { useWorkspace } from './state';
+import { Icon } from './icons';
 
 export function ConversationHistory({
   sessions,
@@ -127,8 +128,10 @@ export function ConversationHistory({
             )}
             <button
               className={`history-item ${item.id === workspace.selectedId ? 'selected' : ''}`}
+              aria-current={item.id === workspace.selectedId ? 'page' : undefined}
               onClick={() => onSelect(item.id)}
             >
+              <Icon name="chat" size={16} />
               <span>{item.title}</span>
               {item.run?.status === 'running' && <span className="status-dot pulsing" />}
             </button>

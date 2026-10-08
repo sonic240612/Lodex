@@ -9,7 +9,12 @@ import {
 } from './liquid-glass-optics';
 
 export const glassOpticalSurfaces =
-  '.topbar, .composer, .sidebar, .plan-panel, .settings-screen, dialog.settings-dialog:not(.settings-section), .permission-menu, .slash-menu, .context-popover, .glass-effects-menu, .glass-optics-preview-lens, .new-chat, .design-switch, .glass-effects-toggle, .provider-tag, .autopilot-toggle, .send-button, .suggestions button, [data-glass-lens]';
+  '.topbar, .composer, .glass-optics-preview-lens, [data-glass-lens]';
+const opticalContainers =
+  '.main, .composer-area, .glass-effects-control, .glass-effects-menu, .glass-optics-preview';
+const immediateLensArea = 32_768;
+const resizeSettleDelay = 160;
+const cachedMapsLimit = 8;
 const svgNamespace = 'http://www.w3.org/2000/svg';
 let nextLens = 0;
 
@@ -56,6 +61,8 @@ export function attachGlassRefraction(root: HTMLElement): () => void {
     scale: number;
     interaction: GlassLensInteraction;
     size: string;
+    response: ReturnType<typeof glassOpticalResponse> | null;
+    applied: boolean;
   };
   const surfaces = new Map<HTMLElement, Surface>();
   const pending = new Set<HTMLElement>();
@@ -66,6 +73,8 @@ export function attachGlassRefraction(root: HTMLElement): () => void {
   root.setAttribute('data-glass-refraction', disabled ? 'reduced' : 'active');
 
   function clearSurface(element: HTMLElement) {
+    const state = surfaces.get(element);
+    if (state) state.applied = false;
     element.removeAttribute('data-glass-optics');
     element.style.removeProperty('--glass-refraction-filter');
   }
@@ -87,11 +96,15 @@ export function attachGlassRefraction(root: HTMLElement): () => void {
   function updateLens(state: Surface) {
     const response = glassOpticalResponse(state.scale, state.interaction);
     for (const channel of ['red', 'green', 'blue'] as const)
-      state.channels[channel].setAttribute('scale', String(response[channel]));
+      if (state.response?.[channel] !== response[channel])
+        state.channels[channel].setAttribute('scale', String(response[channel]));
     for (const axis of ['x', 'y'] as const) {
-      state.axes[axis].setAttribute('slope', String(response[axis].slope));
-      state.axes[axis].setAttribute('intercept', String(response[axis].intercept));
+      if (state.response?.[axis].slope !== response[axis].slope)
+        state.axes[axis].setAttribute('slope', String(response[axis].slope));
+      if (state.response?.[axis].intercept !== response[axis].intercept)
+        state.axes[axis].setAttribute('intercept', String(response[axis].intercept));
     }
+    state.response = response;
   }
 
   function motionAllowed() {
@@ -99,6 +112,10 @@ export function attachGlassRefraction(root: HTMLElement): () => void {
       root.dataset.glassEffects !== 'reduced' &&
       (!reducedMotion.matches || root.dataset.glassEffects === 'full')
     );
+  }
+
+  function layoutMoving() {
+    return root.dataset.glassLayoutMoving !== undefined;
   }
 
   function resetInteractions() {
@@ -121,7 +138,9 @@ export function attachGlassRefraction(root: HTMLElement): () => void {
     register(element);
     const state = surfaces.get(element)!;
     state.interaction = detail;
-    if (!state.size) paint(element);
+    if (!state.size && element.clientWidth * element.clientHeight <= immediateLensArea)
+      paint(element);
+    else if (!state.size) schedule(true);
     else updateLens(state);
   }
 
@@ -188,7 +207,17 @@ export function attachGlassRefraction(root: HTMLElement): () => void {
       make('feComposite', { in: 'colorChannels', in2: 'greenSample', operator: 'in' }),
     );
     defs.append(filter);
-    const state = { filter, image, channels, axes, scale: 0, interaction: {}, size: '' };
+    const state: Surface = {
+      filter,
+      image,
+      channels,
+      axes,
+      scale: 0,
+      interaction: {},
+      size: '',
+      response: null,
+      applied: false,
+    };
     surfaces.set(element, state);
     updateLens(state);
     resize.observe(element);
@@ -198,7 +227,7 @@ export function attachGlassRefraction(root: HTMLElement): () => void {
   function paint(only?: HTMLElement) {
     if (only && timer !== undefined) view!.clearTimeout(timer);
     timer = undefined;
-    if (stopped || disabled) return;
+    if (stopped || disabled || (!only && layoutMoving())) return;
     for (const element of only ? [only] : pending) {
       const state = surfaces.get(element);
       if (!state || !root.contains(element)) continue;
@@ -227,7 +256,12 @@ export function attachGlassRefraction(root: HTMLElement): () => void {
           context.putImageData(pixels, 0, 0);
           map = { href: canvas.toDataURL('image/png'), scale: generated.scale };
           cache.set(key, map);
-          if (cache.size > 12) cache.delete(cache.keys().next().value!);
+          if (cache.size > cachedMapsLimit) cache.delete(cache.keys().next().value!);
+        } else {
+          // Recently pressed controls keep their maps when the active filter is
+          // removed at release; reopening them does not run canvas generation.
+          cache.delete(key);
+          cache.set(key, map);
         }
         state.image.setAttribute('href', map.href);
         state.image.setAttribute('width', String(width));
@@ -238,8 +272,11 @@ export function attachGlassRefraction(root: HTMLElement): () => void {
         updateLens(state);
         state.size = key;
       }
-      element.style.setProperty('--glass-refraction-filter', `url("#${state.filter.id}")`);
-      element.setAttribute('data-glass-optics', 'refractive');
+      if (!state.applied) {
+        element.style.setProperty('--glass-refraction-filter', `url("#${state.filter.id}")`);
+        element.setAttribute('data-glass-optics', 'refractive');
+        state.applied = true;
+      }
     }
     if (only) {
       pending.delete(only);
@@ -247,13 +284,13 @@ export function attachGlassRefraction(root: HTMLElement): () => void {
     } else pending.clear();
   }
 
-  function schedule(settleResize = false) {
-    if (disabled || stopped || pending.size === 0) return;
+  function schedule(settleResize = false, delay = resizeSettleDelay) {
+    if (disabled || stopped || pending.size === 0 || layoutMoving()) return;
     if (timer !== undefined) {
       if (!settleResize) return;
       view!.clearTimeout(timer);
     }
-    timer = view!.setTimeout(paint, 96);
+    timer = view!.setTimeout(paint, delay);
   }
 
   const resize = new ResizeObserver((entries) => {
@@ -269,6 +306,11 @@ export function attachGlassRefraction(root: HTMLElement): () => void {
           if (element.matches(glassOpticalSurfaces)) register(element);
           else if (surfaces.has(element)) release(element);
           changed = true;
+        } else if (element === root && record.attributeName === 'data-glass-layout-moving') {
+          if (layoutMoving()) {
+            if (timer !== undefined) view!.clearTimeout(timer);
+            timer = undefined;
+          } else schedule(true, 16);
         } else if (element === root && !motionAllowed()) resetInteractions();
         continue;
       }
@@ -276,13 +318,20 @@ export function attachGlassRefraction(root: HTMLElement): () => void {
         if (node.nodeType !== 1) continue;
         const element = node as HTMLElement;
         register(element);
-        element.querySelectorAll<HTMLElement>(glassOpticalSurfaces).forEach(register);
-        changed = true;
+        // Streaming markdown/activity nodes cannot contain persistent lenses.
+        // Scan descendants only when an optical component's known wrapper is
+        // mounted, not on every paragraph or tool output appended to the chat.
+        if (record.target === root || element.matches(opticalContainers))
+          element.querySelectorAll<HTMLElement>(glassOpticalSurfaces).forEach(register);
+        if (pending.size) changed = true;
       }
-      if (record.removedNodes.length) changed = true;
+      for (const node of record.removedNodes) {
+        if (node.nodeType !== 1) continue;
+        for (const element of surfaces.keys())
+          if (node.contains(element) && !root.contains(element)) release(element);
+      }
     }
     if (!changed) return;
-    for (const element of surfaces.keys()) if (!root.contains(element)) release(element);
     schedule();
   });
   function updatePreferences() {
@@ -303,7 +352,7 @@ export function attachGlassRefraction(root: HTMLElement): () => void {
     childList: true,
     subtree: true,
     attributes: true,
-    attributeFilter: ['data-glass-lens', 'data-glass-effects'],
+    attributeFilter: ['data-glass-lens', 'data-glass-effects', 'data-glass-layout-moving'],
   });
   preferences.forEach((preference) => preference.addEventListener('change', updatePreferences));
   reducedMotion.addEventListener('change', updatePreferences);

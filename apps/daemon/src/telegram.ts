@@ -669,6 +669,14 @@ export class Telegram {
           }
           if (text === '/plan') {
             this.enqueue(
+              '/plan 뒤에 조사하거나 계획할 내용을 입력하세요. 저장된 계획은 /todo로 확인할 수 있습니다.',
+            );
+            item.status = 'done';
+            await this.save();
+            continue;
+          }
+          if (text === '/todo') {
+            this.enqueue(
               (session.plan.goal || '저장된 목표 없음') +
                 '\n' +
                 (session.plan.tasks.length
@@ -677,21 +685,7 @@ export class Telegram {
                         (task, index) => `${index + 1}. ${task.done ? '[x]' : '[ ]'} ${task.title}`,
                       )
                       .join('\n')
-                  : '저장된 할 일 없음'),
-            );
-            item.status = 'done';
-            await this.save();
-            continue;
-          }
-          if (text === '/todo') {
-            this.enqueue(
-              session.plan.tasks.length
-                ? session.plan.tasks
-                    .map(
-                      (task, index) => `${index + 1}. ${task.done ? '[x]' : '[ ]'} ${task.title}`,
-                    )
-                    .join('\n')
-                : '저장된 할 일이 없습니다.',
+                  : '저장된 할 일이 없습니다.'),
             );
             item.status = 'done';
             await this.save();
@@ -699,7 +693,7 @@ export class Telegram {
           }
           if (text === '/help' || text === '/start') {
             this.enqueue(
-              '/ask 메시지 — 연결한 대화에 요청\n/goal 목표 — 독립 목표 실행\n/resume — 중단된 /goal 계속\n/costs — OpenRouter 미확정 비용 조회·정산\n/run — 저장 계획 자동 실행\n/plan · /todo — 목표와 할 일 조회\n/todo goal 목표 | 완료 기준\n/todo add 할 일 | 완료 기준\n/todo done 번호 · /todo undo 번호 · /todo remove 번호\n/autopilot ask|auto|full — 승인 단계 변경\n/approve · /deny — 대기 작업 결정\n/answer JSON · /decline · /cancel-input — MCP 입력 결정\n/stop — 현재 실행 중지\n일반 텍스트도 요청으로 전달됩니다. 원격 Build와 권한 변경은 Telegram 설정에서 허용해야 합니다.',
+              '/ask 메시지 — Build 요청\n/plan 내용 — 이번 요청만 조사·계획\n/goal 목표 — 독립 목표 실행\n/resume — 중단된 /goal 계속\n/costs — OpenRouter 미확정 비용 조회·정산\n/run — 저장 계획 자동 실행\n/todo — 목표와 할 일 조회\n/todo goal 목표 | 완료 기준\n/todo add 할 일 | 완료 기준\n/todo done 번호 · /todo undo 번호 · /todo remove 번호\n/autopilot ask|auto|full — 승인 단계 변경\n/approve · /deny — 대기 작업 결정\n/answer JSON · /decline · /cancel-input — MCP 입력 결정\n/stop — 현재 실행 중지\n일반 텍스트도 Build 요청으로 전달됩니다. 원격 Build와 권한 변경은 Telegram 설정에서 허용해야 합니다.',
             );
             item.status = 'done';
             await this.save();
@@ -815,13 +809,22 @@ export class Telegram {
               plan: planSchema.parse(plan),
             });
           } else {
-            if (text.startsWith('/') && !text.startsWith('/ask '))
+            const planRequest = /^\/plan\s/.test(text);
+            if (text.startsWith('/') && !/^\/ask\s/.test(text) && !planRequest)
               throw new AppError(
                 'TELEGRAM_COMMAND',
                 '지원하지 않는 명령입니다. /help 를 확인하세요.',
               );
+            if (planRequest && session.run?.status === 'running')
+              throw new AppError('TELEGRAM_BUSY', '현재 실행이 끝난 뒤 /plan 요청을 보내세요.');
+            const requestMode =
+              session.run?.status === 'running'
+                ? (session.mode ?? 'build')
+                : planRequest
+                  ? 'plan'
+                  : 'build';
             if (
-              session.mode !== 'plan' &&
+              requestMode !== 'plan' &&
               !this.state.config.allowBuild &&
               session.permissionMode !== 'full'
             )
@@ -835,13 +838,18 @@ export class Telegram {
                     type: 'steer_run',
                     sessionId: session.id,
                     runId: session.run.id,
-                    content: text.startsWith('/ask ') ? text.slice(5).trim() : text,
+                    content: /^\/ask\s/.test(text) ? text.slice(5).trim() : text,
                   })
                 : makeCommand({
                     type: 'send_message',
                     sessionId: session.id,
                     expectedVersion: session.version,
-                    content: text.startsWith('/ask ') ? text.slice(5).trim() : text,
+                    content: planRequest
+                      ? text.slice(6).trim()
+                      : /^\/ask\s/.test(text)
+                        ? text.slice(5).trim()
+                        : text,
+                    mode: requestMode,
                   });
           }
           item.command = commandSchema.parse({ ...command, actor: 'telegram' });

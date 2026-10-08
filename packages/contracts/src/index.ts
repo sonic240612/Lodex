@@ -353,6 +353,7 @@ export const commandSchema = z.discriminatedUnion('type', [
     ...target,
     type: z.literal('configure_session'),
     config: modelConfigSchema,
+    role: modeSchema.optional(),
   }),
   z.strictObject({
     ...envelope,
@@ -365,6 +366,7 @@ export const commandSchema = z.discriminatedUnion('type', [
     ...target,
     type: z.literal('send_message'),
     content: z.string().trim().min(1).max(64000),
+    mode: modeSchema.optional(),
   }),
   z.strictObject({
     ...envelope,

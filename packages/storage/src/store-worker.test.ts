@@ -65,6 +65,47 @@ afterEach(async () => {
   }
 });
 describe('durable worker storage', () => {
+  it('changes mode atomically with a request and keeps a running Plan read-only', async () => {
+    const { store } = await db();
+    let session = await create(store);
+    const plan = makeCommand({
+      type: 'send_message',
+      sessionId: session.id,
+      expectedVersion: session.version,
+      content: 'Inspect the code.',
+      mode: 'plan',
+    });
+    session = (await store.apply(plan)).session;
+    expect(session.mode).toBe('plan');
+    expect(session.messages.at(-1)?.agentMode).toBe('plan');
+    await expect(
+      store.apply(
+        makeCommand({
+          type: 'send_message',
+          sessionId: session.id,
+          expectedVersion: session.version,
+          content: 'Write the code.',
+          mode: 'build',
+        }),
+      ),
+    ).rejects.toMatchObject({ code: 'BUSY' });
+    expect((await store.session(session.id)).mode).toBe('plan');
+    const replay = await store.apply(plan);
+    expect(replay.replayed).toBe(true);
+    expect(replay.session.run!.id).toBe(session.run!.id);
+    session = (
+      await store.apply(
+        makeCommand({
+          type: 'steer_run',
+          sessionId: session.id,
+          runId: session.run!.id,
+          content: 'Also inspect tests.',
+        }),
+      )
+    ).session;
+    expect(session.mode).toBe('plan');
+    expect(session.messages.at(-1)?.runInput?.status).toBe('queued');
+  });
   it('keeps raw tool results and a running checkpoint across daemon recovery', async () => {
     let { store, path } = await db();
     let session = await create(store);
@@ -1548,6 +1589,22 @@ describe('durable worker storage', () => {
     expect(changed.routing?.subagentsEnabled).toBe(true);
     expect(changed.messages).toEqual(session.messages);
     expect(changed.messages.at(-1)?.inferenceConfig?.model).toBe('active-before');
+    const otherConfig = { ...config, model: 'next-request-role' };
+    const edited = (
+      await store.apply(
+        makeCommand({
+          type: 'configure_session',
+          sessionId: changed.id,
+          expectedVersion: changed.version,
+          config: otherConfig,
+          role: other,
+        }),
+      )
+    ).session;
+    expect(edited.mode).toBe(changed.mode);
+    expect(edited.routing?.[other]).toEqual(otherConfig);
+    expect(edited.routing?.[mode]).toEqual(config);
+    expect(edited.messages).toEqual(changed.messages);
   });
   it('rejects model and routing changes during a running response without altering history', async () => {
     const { store } = await db();

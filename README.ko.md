@@ -83,7 +83,7 @@ OPENROUTER_API_KEY=your-key
 
 모델·스킬·MCP·Telegram·Worktree·백업은 좌측 하단 **설정**에서 관리합니다. 채팅에 `/`를 입력하면 명령 목록이 열리고, 방향키와 Tab 또는 마우스로 선택할 수 있습니다. 선택은 입력만 채우고 전송하면 실행합니다.
 
-채팅 명령: `/plan [요청]`, `/build [요청]`, `/goal <목표>`, `/resume`, `/stop`, `/compact`, `/quick`, `/new`, `/settings`, `/help`. `/계획`, `/빌드`, `/목표`, `/설정`처럼 한국어로도 입력할 수 있습니다.
+일반 메시지는 Build로 실행합니다. `/plan <요청>`을 입력하면 해당 요청만 읽기 전용으로 조사·계획합니다. 그 외 명령: `/goal <목표>`, `/resume`, `/stop`, `/compact`, `/quick`, `/new`, `/settings`, `/help`. `/계획`, `/목표`, `/설정`처럼 한국어로도 입력할 수 있습니다.
 
 `/goal <목표>`는 완료·차단 사유·예산 한도에 도달할 때까지 계속합니다. 완료 시 현재 실행의 성공한 명령이나 산출물 해시를 확인하고, 설명만 제출하면 사용자 확인을 요청합니다. 저장 계획에는 검증 명령·파일 내용·해시 조건을 지정할 수 있습니다. 이후 변경은 이전 검증을 무효화하며 수동 체크박스와 검증 기록은 별도입니다.
 
@@ -133,7 +133,7 @@ MCP 설정은 Codex TOML, Claude·pi 계열 `mcpServers` JSON, OpenCode JSONC의
 
 [BotFather](https://core.telegram.org/bots/tutorial#obtain-your-bot-token)에서 봇을 만든 뒤 Telegram 설정에 토큰을 입력하거나 `.env`에 `TELEGRAM_BOT_TOKEN`을 설정하세요. 대화를 선택하고 전송을 허용한 뒤 연결 ID를 승인합니다.
 
-명령: `/ask`, `/goal`, `/resume`, `/run`, `/status`, `/plan`, `/todo`, `/autopilot ask|auto|full`, `/approve`, `/deny`, `/answer`, `/decline`, `/cancel-input`, `/stop`. `/todo`로 저장 목표와 완료 기준을 설정하고, 할 일을 추가하거나 번호로 완료·되돌리기·삭제할 수 있습니다. 원격 Build 작업과 권한 변경은 Telegram 설정에서 Build 접근을 허용해야 합니다. 실행 중 일반 텍스트는 같은 실행의 추가 지시로 전달합니다. 결과를 확인하지 못한 전달은 기록만 남기고 자동 재시도하지 않습니다.
+명령: `/ask`, `/plan <요청>`, `/goal`, `/resume`, `/run`, `/status`, `/todo`, `/autopilot ask|auto|full`, `/approve`, `/deny`, `/answer`, `/decline`, `/cancel-input`, `/stop`. 일반 텍스트와 `/ask`는 Build 요청이며 `/plan` 뒤에 내용을 입력하면 해당 요청만 Plan으로 실행합니다. `/todo`로 저장 목표·할 일을 조회하고, 목표와 완료 기준 설정·할 일 추가·번호별 완료·되돌리기·삭제를 할 수 있습니다. 원격 Build 작업과 권한 변경은 Telegram 설정에서 Build 접근을 허용해야 합니다. 실행 중 일반 텍스트는 모드를 바꾸지 않고 같은 실행의 추가 지시로 전달합니다. 결과를 확인하지 못한 전달은 기록만 남기고 자동 재시도하지 않습니다.
 
 데스크톱 창을 닫아도 Lodex는 시스템 트레이에서 계속 실행됩니다. 데몬과 Telegram 연결을 종료하려면 트레이 메뉴의 **완전히 종료**를 사용하세요.
 
