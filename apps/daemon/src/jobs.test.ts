@@ -83,6 +83,9 @@ it('returns a background job immediately, sends live stdin and EOF, and persists
     .poll(() => app.jobs.get(app.session.id, started.jobId!).execution?.status, { timeout: 15000 })
     .toBe('completed');
   expect(await readFile(join(app.dir, 'received.txt'), 'utf8')).toBe('한글 input\nsecret-input');
+  // Completion is visible before the final persistence queue drains. Finish the
+  // original manager's shutdown before simulating a restart on the same store.
+  await app.jobs.close();
   const saved = (await app.store.integration('command_jobs'))!.document;
   expect(JSON.stringify(saved)).not.toContain('secret-input');
   const reopened = await CommandJobs.open(app.store);
@@ -121,6 +124,7 @@ it('cancels a background command and records failure instead of respawning on re
   await expect(
     app.jobs.input(app.session.id, started.jobId!, 'ignored', false),
   ).rejects.toMatchObject({ code: 'COMMAND_INPUT_CLOSED' });
+  await app.jobs.close();
   const saved = (await app.store.integration('command_jobs'))!;
   const records = saved.document as import('@lodex/contracts').CommandJob[];
   records[0]!.execution!.status = 'running';

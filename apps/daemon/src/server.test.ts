@@ -21,6 +21,7 @@ import {
 import { decodeSse } from '@lodex/providers';
 import { Store } from '@lodex/storage';
 import { startServer } from './server';
+import { waitForCompletedRun } from './test-helpers';
 import type { executeCommand, executeHostCommand } from '@lodex/tools';
 const cleanup: (() => Promise<void>)[] = [];
 const token = 'a'.repeat(64);
@@ -2920,10 +2921,7 @@ describe('authenticated daemon integration', () => {
         content: '자동으로 수정해 줘',
       }),
     );
-    await vi.waitFor(async () =>
-      expect((await app.store.session(session.id)).run?.status).toBe('completed'),
-    );
-    const completed = await app.store.session(session.id);
+    const completed = await waitForCompletedRun(app.store, session.id);
     expect(await readFile(file, 'utf8')).toBe('const mode = "automatic";\n');
     expect(
       completed.messages.at(-1)?.activities?.find((activity) => activity.edit)?.edit?.status,

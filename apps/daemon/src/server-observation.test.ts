@@ -1,7 +1,7 @@
 import { mkdtemp, mkdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   defaultExecutionConfig,
   defaultModelConfig,
@@ -13,6 +13,7 @@ import {
 import { Store } from '@lodex/storage';
 import { startServer } from './server';
 import { ObservationPack } from './observations';
+import { waitForCompletedRun } from './test-helpers';
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {
   for (const close of cleanup.splice(0)) await close();
@@ -153,11 +154,7 @@ describe('ObservationPack full session lifecycle', () => {
         content: 'Run the known check.',
       }),
     );
-    await vi.waitFor(async () =>
-      expect((await store.session(session.id)).run?.status).not.toBe('running'),
-    );
-    session = await store.session(session.id);
-    expect(session.run?.status, session.messages.at(-1)?.error ?? undefined).toBe('completed');
+    session = await waitForCompletedRun(store, session.id);
     const original = session.messages
       .at(-1)!
       .continuation!.find((entry) => entry.toolCallId === 'large-log')!;
@@ -252,11 +249,7 @@ describe('ObservationPack full session lifecycle', () => {
         content: 'Retrieve the saved evidence.',
       }),
     );
-    await vi.waitFor(async () =>
-      expect((await store.session(session.id)).run?.status).not.toBe('running'),
-    );
-    session = await store.session(session.id);
-    expect(session.run?.status, session.messages.at(-1)?.error ?? undefined).toBe('completed');
+    session = await waitForCompletedRun(store, session.id);
     expect(session.messages.at(-1)?.content).toContain('after restart');
     const pack = new ObservationPack(observationRoot);
     let offset = 0,
