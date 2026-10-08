@@ -1,109 +1,351 @@
-import { animate, type AnimationPlaybackControls } from 'motion';
+import { animate, motionValue, type AnimationPlaybackControls, type MotionValue } from 'motion';
 
 const controls =
-  'button:is(.icon-button,.design-switch,.glass-effects-toggle,.send-button,.new-chat,.nav-item,.settings-nav-item,.provider-tag,.autopilot-toggle,.primary-button,.secondary-button), .suggestions button';
+  'button:is(.icon-button,.design-switch,.glass-effects-toggle,.send-button,.new-chat,.nav-item,.settings-nav-item,.provider-tag,.autopilot-toggle,.primary-button,.secondary-button), .suggestions button, .glass-optics-preview-lens';
 
-/** Spring gestures on controls only: native click, focus, and selection are untouched. */
+const properties = {
+  x: '--glass-lens-x',
+  y: '--glass-lens-y',
+  scaleX: '--glass-lens-scale-x',
+  scaleY: '--glass-lens-scale-y',
+  pressure: '--glass-pressure',
+  reflection: '--glass-reflection',
+} as const;
+type Axis = keyof typeof properties;
+type LensState = Record<Axis, number>;
+const axes = Object.keys(properties) as Axis[];
+const neutral: LensState = { x: 0, y: 0, scaleX: 1, scaleY: 1, pressure: 0, reflection: 0 };
+const hovering: LensState = { ...neutral, scaleX: 1.02, scaleY: 1.025, reflection: 0.35 };
+const pressing: LensState = {
+  ...neutral,
+  scaleX: 0.96,
+  scaleY: 1.015,
+  pressure: 1,
+  reflection: 0.9,
+};
+
+type LensRecord = {
+  element: HTMLElement;
+  values: Record<Axis, MotionValue<number>>;
+  originals: Map<string, { value: string; priority: string }>;
+  originalLensMarker: string | null;
+  animations: AnimationPlaybackControls[];
+  frame: number | null;
+  generation: number;
+};
+type Press = {
+  element: HTMLElement;
+  pointerId: number | null;
+  pointerType: string;
+  key: string | null;
+  x: number;
+  y: number;
+  dragged: boolean;
+  preview: boolean;
+};
+
+/** Deforms only a control's optical layers. Text, hit targets, focus and native panning stay stable. */
 export function attachGlassControlGestures(root: HTMLElement): () => void {
-  const animations = new Map<
-    HTMLElement,
-    { animation: AnimationPlaybackControls | undefined; transform: string }
-  >();
+  const view = root.ownerDocument.defaultView;
+  if (!view) return () => {};
+  const lenses = new Map<HTMLElement, LensRecord>();
   let hovered: HTMLElement | null = null;
-  let pressed: HTMLElement | null = null;
-  function buttonAt(target: EventTarget | null) {
-    const button = (target as Element | null)?.closest?.<HTMLButtonElement>(controls);
-    return button &&
-      !button.disabled &&
-      !button.hasAttribute('data-motion-managed') &&
-      root.contains(button)
-      ? button
+  let pressed: Press | null = null;
+  let suppressedClick: { element: HTMLElement; pointerId: number; expires: number } | null = null;
+  let disposed = false;
+
+  function controlAt(target: EventTarget | null) {
+    const control = (target as Element | null)?.closest?.<HTMLButtonElement>(controls);
+    return control &&
+      !control.disabled &&
+      !control.hasAttribute('data-motion-managed') &&
+      root.contains(control)
+      ? control
       : null;
   }
-  function spring(button: HTMLElement, scale: number, y: number, restore = false) {
-    const previous = animations.get(button);
-    previous?.animation?.stop();
-    const record = {
-      transform: previous?.transform ?? button.style.transform,
-      animation: undefined as AnimationPlaybackControls | undefined,
-    };
-    animations.set(button, record);
-    record.animation = animate(
-      button,
-      { scale, y },
-      {
-        type: 'spring',
-        stiffness: 420,
-        damping: 21,
-        mass: 0.6,
-        onComplete: () => {
-          if (restore && animations.get(button) === record) {
-            button.style.transform = record.transform;
-            animations.delete(button);
-          }
-        },
-      },
+
+  function emit(record: LensRecord, state: LensState) {
+    record.element.dispatchEvent(
+      new CustomEvent('lodex:glass-lens', {
+        bubbles: true,
+        detail: { pressure: state.pressure, stretchX: state.scaleX, stretchY: state.scaleY },
+      }),
     );
   }
+
+  function paint(record: LensRecord) {
+    record.frame = null;
+    if (disposed || lenses.get(record.element) !== record) return;
+    const clamp = (value: number, low: number, high: number) =>
+      Math.max(low, Math.min(high, value));
+    const state: LensState = {
+      x: clamp(record.values.x.get(), -12, 12),
+      y: clamp(record.values.y.get(), -12, 12),
+      scaleX: clamp(record.values.scaleX.get(), 0.88, 1.16),
+      scaleY: clamp(record.values.scaleY.get(), 0.88, 1.16),
+      pressure: clamp(record.values.pressure.get(), 0, 1),
+      reflection: clamp(record.values.reflection.get(), 0, 1),
+    };
+    for (const axis of axes) {
+      record.element.style.setProperty(
+        properties[axis],
+        `${state[axis].toFixed(4)}${axis === 'x' || axis === 'y' ? 'px' : ''}`,
+      );
+    }
+    emit(record, state);
+  }
+
+  function schedulePaint(record: LensRecord) {
+    if (disposed || lenses.get(record.element) !== record || record.frame !== null) return;
+    record.frame = view!.requestAnimationFrame(() => paint(record));
+  }
+
+  function recordFor(element: HTMLElement) {
+    let record = lenses.get(element);
+    if (record) return record;
+    record = {
+      element,
+      values: Object.fromEntries(axes.map((axis) => [axis, motionValue(neutral[axis])])) as Record<
+        Axis,
+        MotionValue<number>
+      >,
+      originals: new Map(
+        Object.values(properties).map((property) => [
+          property,
+          {
+            value: element.style.getPropertyValue(property),
+            priority: element.style.getPropertyPriority(property),
+          },
+        ]),
+      ),
+      originalLensMarker: element.getAttribute('data-glass-lens'),
+      animations: [],
+      frame: null,
+      generation: 0,
+    };
+    lenses.set(element, record);
+    if (record.originalLensMarker === null) element.setAttribute('data-glass-lens', '');
+    return record;
+  }
+
+  function restore(record: LensRecord) {
+    if (lenses.get(record.element) !== record) return;
+    lenses.delete(record.element);
+    record.generation++;
+    for (const animation of record.animations) animation.stop();
+    if (record.frame !== null) view!.cancelAnimationFrame(record.frame);
+    for (const value of Object.values(record.values)) value.destroy();
+    for (const [property, original] of record.originals) {
+      if (original.value)
+        record.element.style.setProperty(property, original.value, original.priority);
+      else record.element.style.removeProperty(property);
+    }
+    // Keep the target marked until optics receive its final reset; otherwise the
+    // bubbling event would resolve to the containing panel's lens instead.
+    emit(record, neutral);
+    if (record.originalLensMarker === null) record.element.removeAttribute('data-glass-lens');
+    else record.element.setAttribute('data-glass-lens', record.originalLensMarker);
+  }
+
+  function spring(element: HTMLElement, target: LensState, restoreAfter = false) {
+    const record = recordFor(element);
+    const generation = ++record.generation;
+    for (const animation of record.animations) animation.stop();
+    let remaining = axes.length;
+    // MotionValues carry the current velocity when a drag retargets the spring.
+    record.animations = axes.map((axis) =>
+      animate(record.values[axis], target[axis], {
+        type: 'spring',
+        stiffness: 350,
+        damping: 17,
+        mass: 0.65,
+        restDelta: axis === 'x' || axis === 'y' ? 0.01 : 0.0001,
+        restSpeed: axis === 'x' || axis === 'y' ? 0.1 : 0.001,
+        onUpdate: () => schedulePaint(record),
+        onComplete: () => {
+          if (disposed || record.generation !== generation) return;
+          if (--remaining === 0 && restoreAfter) restore(record);
+        },
+      }),
+    );
+  }
+
   function over(event: PointerEvent) {
     if (event.pointerType === 'touch') return;
-    const button = buttonAt(event.target);
-    if (hovered === button) return;
-    if (hovered && hovered !== pressed) spring(hovered, 1, 0, true);
-    hovered = button;
-    if (button && button !== pressed) spring(button, 1.045, -1.5);
+    const control = controlAt(event.target);
+    if (hovered === control) return;
+    if (hovered && hovered !== pressed?.element) spring(hovered, neutral, true);
+    hovered = control;
+    if (control && control !== pressed?.element) spring(control, hovering);
   }
+
   function out(event: PointerEvent) {
-    const next = buttonAt(event.relatedTarget);
+    const next = controlAt(event.relatedTarget);
     if (hovered === next) return;
-    if (hovered && hovered !== pressed) spring(hovered, 1, 0, true);
-    // The following pointerover starts the next button's hover spring.
+    if (hovered && hovered !== pressed?.element) spring(hovered, neutral, true);
     hovered = null;
   }
-  function press(event: PointerEvent | KeyboardEvent) {
-    if ('key' in event && (event.repeat || ![' ', 'Enter'].includes(event.key))) return;
-    if ('button' in event && event.button !== 0) return;
-    const button = buttonAt(event.target);
-    if (!button) return;
-    pressed = button;
-    spring(button, 0.91, 1);
+
+  function releaseCapture(press: Press) {
+    if (!press.preview || press.pointerId === null) return;
+    try {
+      if (press.element.hasPointerCapture(press.pointerId))
+        press.element.releasePointerCapture(press.pointerId);
+    } catch {
+      /* The element or pointer can disappear while a panel closes. */
+    }
   }
-  function release(event: PointerEvent | KeyboardEvent) {
-    if ('key' in event && ![' ', 'Enter'].includes(event.key)) return;
-    if (!pressed) return;
-    spring(
-      pressed,
-      pressed === hovered ? 1.045 : 1,
-      pressed === hovered ? -1.5 : 0,
-      pressed !== hovered,
-    );
+
+  function finish(cancelled: boolean) {
+    const current = pressed;
+    if (!current) return;
     pressed = null;
+    if (!cancelled && current.dragged && current.pointerId !== null) {
+      suppressedClick = {
+        element: current.element,
+        pointerId: current.pointerId,
+        expires: view!.performance.now() + 700,
+      };
+    }
+    releaseCapture(current);
+    spring(current.element, neutral, true);
   }
+
+  function pointerDown(event: PointerEvent) {
+    if (event.button !== 0 || event.isPrimary === false) return;
+    const element = controlAt(event.target);
+    if (!element) return;
+    finish(true);
+    suppressedClick = null;
+    const preview = element.matches('.glass-optics-preview-lens');
+    pressed = {
+      element,
+      pointerId: event.pointerId,
+      pointerType: event.pointerType,
+      key: null,
+      x: event.clientX,
+      y: event.clientY,
+      dragged: false,
+      preview,
+    };
+    // Only the explicit playground captures pointers. Real controls retain native pan behavior.
+    if (preview) {
+      try {
+        element.setPointerCapture(event.pointerId);
+      } catch {
+        /* Detached element or inactive pointer. */
+      }
+    }
+    spring(element, pressing);
+  }
+
+  function pointerMove(event: PointerEvent) {
+    if (!pressed || pressed.pointerId !== event.pointerId) return;
+    if (pressed.pointerType === 'touch' && !pressed.preview) return;
+    const dx = event.clientX - pressed.x;
+    const dy = event.clientY - pressed.y;
+    const distance = Math.hypot(dx, dy);
+    if (distance > 8) pressed.dragged = true;
+    const strength = Math.min(distance / 88, 1);
+    const horizontal = distance ? Math.abs(dx) / distance : 0;
+    const vertical = distance ? Math.abs(dy) / distance : 0;
+    spring(pressed.element, {
+      x: 12 * Math.tanh(dx / 50),
+      y: 12 * Math.tanh(dy / 50),
+      scaleX: pressing.scaleX + strength * (0.17 * horizontal - 0.035 * vertical),
+      scaleY: pressing.scaleY + strength * (0.115 * vertical - 0.06 * horizontal),
+      pressure: 1,
+      reflection: Math.min(1, 0.9 + strength * 0.1),
+    });
+  }
+
+  function pointerUp(event: PointerEvent) {
+    if (pressed?.pointerId === event.pointerId) finish(false);
+  }
+
+  function pointerCancel(event: PointerEvent) {
+    if (pressed?.pointerId === event.pointerId) finish(true);
+  }
+
+  function keyDown(event: KeyboardEvent) {
+    if (event.repeat || ![' ', 'Enter'].includes(event.key)) return;
+    const element = controlAt(event.target);
+    if (!element) return;
+    finish(true);
+    pressed = {
+      element,
+      pointerId: null,
+      pointerType: '',
+      key: event.key,
+      x: 0,
+      y: 0,
+      dragged: false,
+      preview: false,
+    };
+    spring(element, pressing);
+  }
+
+  function keyUp(event: KeyboardEvent) {
+    if (pressed?.key === event.key) finish(false);
+  }
+
+  function focusOut(event: FocusEvent) {
+    if (pressed?.key && controlAt(event.relatedTarget) !== pressed.element) finish(true);
+  }
+
+  function click(event: MouseEvent) {
+    if (!suppressedClick || event.detail === 0 || view!.performance.now() > suppressedClick.expires)
+      return;
+    if (controlAt(event.target) !== suppressedClick.element) return;
+    if ('pointerId' in event && event.pointerId !== suppressedClick.pointerId) return;
+    suppressedClick = null;
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  function leave() {
+    if (hovered && hovered !== pressed?.element) spring(hovered, neutral, true);
+    hovered = null;
+  }
+
   function reset() {
-    hovered = pressed = null;
-    for (const button of animations.keys()) spring(button, 1, 0, true);
+    const current = pressed;
+    pressed = null;
+    hovered = null;
+    suppressedClick = null;
+    if (current) releaseCapture(current);
+    for (const record of [...lenses.values()]) restore(record);
   }
+
   root.addEventListener('pointerover', over, { passive: true });
   root.addEventListener('pointerout', out, { passive: true });
-  root.addEventListener('pointerdown', press, { passive: true });
-  root.addEventListener('pointerup', release, { passive: true });
-  root.addEventListener('pointerleave', reset, { passive: true });
-  root.addEventListener('pointercancel', reset, { passive: true });
-  root.addEventListener('keydown', press);
-  root.addEventListener('keyup', release);
+  root.addEventListener('pointerdown', pointerDown, { passive: true });
+  root.addEventListener('pointerleave', leave, { passive: true });
+  root.addEventListener('lostpointercapture', pointerCancel, { passive: true });
+  root.addEventListener('keydown', keyDown);
+  root.addEventListener('focusout', focusOut);
+  root.addEventListener('click', click, true);
+  view.addEventListener('pointermove', pointerMove, { passive: true });
+  view.addEventListener('pointerup', pointerUp, { passive: true });
+  view.addEventListener('pointercancel', pointerCancel, { passive: true });
+  view.addEventListener('keyup', keyUp);
+  view.addEventListener('blur', reset);
+
   return () => {
+    disposed = true;
     root.removeEventListener('pointerover', over);
     root.removeEventListener('pointerout', out);
-    root.removeEventListener('pointerdown', press);
-    root.removeEventListener('pointerup', release);
-    root.removeEventListener('pointerleave', reset);
-    root.removeEventListener('pointercancel', reset);
-    root.removeEventListener('keydown', press);
-    root.removeEventListener('keyup', release);
-    for (const [button, record] of animations) {
-      record.animation?.stop();
-      button.style.transform = record.transform;
-    }
-    animations.clear();
+    root.removeEventListener('pointerdown', pointerDown);
+    root.removeEventListener('pointerleave', leave);
+    root.removeEventListener('lostpointercapture', pointerCancel);
+    root.removeEventListener('keydown', keyDown);
+    root.removeEventListener('focusout', focusOut);
+    root.removeEventListener('click', click, true);
+    view.removeEventListener('pointermove', pointerMove);
+    view.removeEventListener('pointerup', pointerUp);
+    view.removeEventListener('pointercancel', pointerCancel);
+    view.removeEventListener('keyup', keyUp);
+    view.removeEventListener('blur', reset);
+    reset();
   };
 }

@@ -5,6 +5,8 @@ import {
   displacementMapSize,
   glassRayOffset,
   supportsGlassRefraction,
+  glassOpticalResponse,
+  glassChannelMasks,
 } from './liquid-glass-optics';
 
 describe('rounded glass lens', () => {
@@ -79,6 +81,62 @@ describe('rounded glass lens', () => {
     expect(invalid.width).toBe(1);
     expect(invalid.height).toBe(1);
     expect(invalid.radius).toBe(0);
+  });
+});
+
+describe('chromatic lens response', () => {
+  it('changes edge sampling per channel with subtle bounded separation', () => {
+    const lens = createGlassLens(300, 180, 28);
+    const shift = glassRayOffset(lens, 0.1, 90).x;
+    const response = glassOpticalResponse(96, { pressure: 1, stretchX: 1.13 });
+    expect(response.red).toBeGreaterThan(response.green);
+    expect(response.blue).toBeLessThan(response.green);
+    expect(((shift * (response.red - response.blue)) / 96) * 1.13).toBeLessThan(0.7);
+    expect(glassOpticalResponse(96).green).toBe(96);
+    expect(glassOpticalResponse(96, { pressure: 1 }).green).toBeCloseTo(109.44);
+  });
+
+  it('keeps the flat map exactly neutral under pressure and directional stretch', () => {
+    for (const pressure of [0, 0.5, 1]) {
+      const response = glassOpticalResponse(96, { pressure, stretchX: 1.13, stretchY: 0.9 });
+      for (const axis of [response.x, response.y]) {
+        expect((128 / 255) * axis.slope + axis.intercept).toBeCloseTo(0.5, 14);
+      }
+    }
+    expect(glassOpticalResponse(96, { pressure: NaN, stretchX: Infinity, stretchY: -10 })).toEqual(
+      glassOpticalResponse(96, { pressure: 0, stretchX: 1, stretchY: 0.9 }),
+    );
+    expect(glassOpticalResponse(96, { pressure: 50 }).green).toBeCloseTo(109.44);
+  });
+
+  it('recombines identical flat-center samples without a tint or inflated alpha', () => {
+    const applyMask = (mask: string, rgba: number[]) => {
+      const values = mask.trim().split(/\s+/).map(Number);
+      return Array.from({ length: 4 }, (_, row) =>
+        rgba.reduce(
+          (sum, value, column) => sum + value * values[row * 5 + column]!,
+          values[row * 5 + 4]!,
+        ),
+      );
+    };
+    for (const alpha of [0, 0.15, 0.6, 1]) {
+      for (const color of [
+        [0.2, 0.7, 0.9],
+        [1, 1, 1],
+        [0, 0, 0],
+      ]) {
+        const samples = Object.values(glassChannelMasks).map((mask) =>
+          applyMask(mask, [...color, alpha]),
+        );
+        const combined = color.map((_, channel) =>
+          samples.reduce((sum, sample) => sum + sample[channel]!, 0),
+        );
+        // Arithmetic RGB addition uses opaque intermediate alpha; final
+        // composite(in) applies the green sample's alpha only once.
+        expect(combined.map((value) => value * alpha)).toEqual(color.map((value) => value * alpha));
+        expect(samples.every((sample) => sample[3] === 1)).toBe(true);
+      }
+    }
   });
 });
 

@@ -2,11 +2,14 @@ import { useEffect, type RefObject } from 'react';
 import {
   createDisplacementPixels,
   createGlassLens,
+  glassChannelMasks,
+  glassOpticalResponse,
   supportsGlassRefraction,
+  type GlassLensInteraction,
 } from './liquid-glass-optics';
 
 export const glassOpticalSurfaces =
-  '.topbar, .composer, .sidebar, .plan-panel, .settings-screen, dialog.settings-dialog:not(.settings-section), .permission-menu, .slash-menu, .context-popover, .glass-effects-menu, .glass-optics-preview-lens';
+  '.topbar, .composer, .sidebar, .plan-panel, .settings-screen, dialog.settings-dialog:not(.settings-section), .permission-menu, .slash-menu, .context-popover, .glass-effects-menu, .glass-optics-preview-lens, .new-chat, .design-switch, .glass-effects-toggle, .provider-tag, .autopilot-toggle, .send-button, .suggestions button, [data-glass-lens]';
 const svgNamespace = 'http://www.w3.org/2000/svg';
 let nextLens = 0;
 
@@ -20,7 +23,9 @@ export function attachGlassRefraction(root: HTMLElement): () => void {
   const preferences = [
     view.matchMedia('(prefers-reduced-transparency: reduce)'),
     view.matchMedia('(forced-colors: active)'),
+    view.matchMedia('(prefers-contrast: more)'),
   ];
+  const reducedMotion = view.matchMedia('(prefers-reduced-motion: reduce)');
   const supported = supportsGlassRefraction(
     view.navigator.userAgent,
     view.CSS?.supports('backdrop-filter', 'url("#lodex-glass-support")') ?? false,
@@ -46,7 +51,10 @@ export function attachGlassRefraction(root: HTMLElement): () => void {
   type Surface = {
     filter: SVGFilterElement;
     image: SVGFEImageElement;
-    displacement: SVGFEDisplacementMapElement;
+    channels: Record<keyof typeof glassChannelMasks, SVGFEDisplacementMapElement>;
+    axes: { x: SVGFEFuncRElement; y: SVGFEFuncGElement };
+    scale: number;
+    interaction: GlassLensInteraction;
     size: string;
   };
   const surfaces = new Map<HTMLElement, Surface>();
@@ -76,6 +84,47 @@ export function attachGlassRefraction(root: HTMLElement): () => void {
     return element;
   }
 
+  function updateLens(state: Surface) {
+    const response = glassOpticalResponse(state.scale, state.interaction);
+    for (const channel of ['red', 'green', 'blue'] as const)
+      state.channels[channel].setAttribute('scale', String(response[channel]));
+    for (const axis of ['x', 'y'] as const) {
+      state.axes[axis].setAttribute('slope', String(response[axis].slope));
+      state.axes[axis].setAttribute('intercept', String(response[axis].intercept));
+    }
+  }
+
+  function motionAllowed() {
+    return (
+      root.dataset.glassEffects !== 'reduced' &&
+      (!reducedMotion.matches || root.dataset.glassEffects === 'full')
+    );
+  }
+
+  function resetInteractions() {
+    surfaces.forEach((state) => {
+      state.interaction = {};
+      updateLens(state);
+    });
+  }
+
+  function lensInteraction(event: Event) {
+    if (disabled || !motionAllowed()) return;
+    // Gestures dispatch from the control itself. Never reinterpret an unknown
+    // control as its enclosing panel and deform the entire panel instead.
+    const element = event.target as HTMLElement | null;
+    if (!element?.matches?.(glassOpticalSurfaces) || !root.contains(element)) return;
+    const detail = (event as CustomEvent<GlassLensInteraction>).detail;
+    if (!detail || typeof detail !== 'object') return;
+    // A marker may have just been added in the same pointer event, before the
+    // MutationObserver callback. Bake only this control before its first frame.
+    register(element);
+    const state = surfaces.get(element)!;
+    state.interaction = detail;
+    if (!state.size) paint(element);
+    else updateLens(state);
+  }
+
   function register(element: HTMLElement) {
     if (surfaces.has(element) || !element.matches(glassOpticalSurfaces)) return;
     const filter = make('filter', {
@@ -93,33 +142,71 @@ export function attachGlassRefraction(root: HTMLElement): () => void {
       y: '0',
     });
     const neutral = make('feComponentTransfer', { in: 'lensMap', result: 'neutralMap' });
-    neutral.append(
-      make('feFuncR', { type: 'linear', slope: String(255 / 256) }),
-      make('feFuncG', { type: 'linear', slope: String(255 / 256) }),
+    const axes = {
+      x: make('feFuncR', { type: 'linear' }),
+      y: make('feFuncG', { type: 'linear' }),
+    };
+    neutral.append(axes.x, axes.y);
+    filter.append(image, neutral);
+    const channels = {} as Surface['channels'];
+    for (const channel of ['red', 'green', 'blue'] as const) {
+      const displacement = make('feDisplacementMap', {
+        in: 'SourceGraphic',
+        in2: 'neutralMap',
+        xChannelSelector: 'R',
+        yChannelSelector: 'G',
+        result: `${channel}Sample`,
+      });
+      channels[channel] = displacement;
+      filter.append(
+        displacement,
+        make('feColorMatrix', {
+          in: `${channel}Sample`,
+          type: 'matrix',
+          values: glassChannelMasks[channel],
+          result: `${channel}Channel`,
+        }),
+      );
+    }
+    filter.append(
+      make('feComposite', {
+        in: 'redChannel',
+        in2: 'greenChannel',
+        operator: 'arithmetic',
+        k2: '1',
+        k3: '1',
+        result: 'redGreenChannels',
+      }),
+      make('feComposite', {
+        in: 'redGreenChannels',
+        in2: 'blueChannel',
+        operator: 'arithmetic',
+        k2: '1',
+        k3: '1',
+        result: 'colorChannels',
+      }),
+      make('feComposite', { in: 'colorChannels', in2: 'greenSample', operator: 'in' }),
     );
-    const displacement = make('feDisplacementMap', {
-      in: 'SourceGraphic',
-      in2: 'neutralMap',
-      xChannelSelector: 'R',
-      yChannelSelector: 'G',
-    });
-    filter.append(image, neutral, displacement);
     defs.append(filter);
-    surfaces.set(element, { filter, image, displacement, size: '' });
+    const state = { filter, image, channels, axes, scale: 0, interaction: {}, size: '' };
+    surfaces.set(element, state);
+    updateLens(state);
     resize.observe(element);
     pending.add(element);
   }
 
-  function paint() {
+  function paint(only?: HTMLElement) {
+    if (only && timer !== undefined) view!.clearTimeout(timer);
     timer = undefined;
     if (stopped || disabled) return;
-    for (const element of pending) {
+    for (const element of only ? [only] : pending) {
       const state = surfaces.get(element);
       if (!state || !root.contains(element)) continue;
-      // offset dimensions ignore spring transforms and avoid re-baking a map
-      // on animation frames. Hidden dialogs are resized when they become visible.
-      const width = element.offsetWidth;
-      const height = element.offsetHeight;
+      // The absolute backdrop's inset:0 spans the padding box, excluding the
+      // parent's border. Client dimensions ignore spring transforms, avoiding
+      // map rebakes on animation frames and 1–2px rim shifts on small controls.
+      const width = element.clientWidth;
+      const height = element.clientHeight;
       if (width < 2 || height < 2) continue;
       const radius = Number.parseFloat(view!.getComputedStyle(element).borderTopLeftRadius) || 0;
       const key = `${width}:${height}:${Math.round(radius)}`;
@@ -147,13 +234,17 @@ export function attachGlassRefraction(root: HTMLElement): () => void {
         state.image.setAttribute('height', String(height));
         state.filter.setAttribute('width', String(width));
         state.filter.setAttribute('height', String(height));
-        state.displacement.setAttribute('scale', String(map.scale));
+        state.scale = map.scale;
+        updateLens(state);
         state.size = key;
       }
       element.style.setProperty('--glass-refraction-filter', `url("#${state.filter.id}")`);
       element.setAttribute('data-glass-optics', 'refractive');
     }
-    pending.clear();
+    if (only) {
+      pending.delete(only);
+      schedule();
+    } else pending.clear();
   }
 
   function schedule(settleResize = false) {
@@ -172,6 +263,15 @@ export function attachGlassRefraction(root: HTMLElement): () => void {
   const mutations = new MutationObserver((records) => {
     let changed = false;
     for (const record of records) {
+      if (record.type === 'attributes') {
+        const element = record.target as HTMLElement;
+        if (record.attributeName === 'data-glass-lens') {
+          if (element.matches(glassOpticalSurfaces)) register(element);
+          else if (surfaces.has(element)) release(element);
+          changed = true;
+        } else if (element === root && !motionAllowed()) resetInteractions();
+        continue;
+      }
       for (const node of record.addedNodes) {
         if (node.nodeType !== 1) continue;
         const element = node as HTMLElement;
@@ -188,6 +288,7 @@ export function attachGlassRefraction(root: HTMLElement): () => void {
   function updatePreferences() {
     disabled = preferences.some((preference) => preference.matches);
     root.setAttribute('data-glass-refraction', disabled ? 'reduced' : 'active');
+    if (disabled || !motionAllowed()) resetInteractions();
     if (disabled) {
       if (timer !== undefined) view!.clearTimeout(timer);
       timer = undefined;
@@ -198,8 +299,15 @@ export function attachGlassRefraction(root: HTMLElement): () => void {
     }
   }
   root.querySelectorAll<HTMLElement>(glassOpticalSurfaces).forEach(register);
-  mutations.observe(root, { childList: true, subtree: true });
+  mutations.observe(root, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ['data-glass-lens', 'data-glass-effects'],
+  });
   preferences.forEach((preference) => preference.addEventListener('change', updatePreferences));
+  reducedMotion.addEventListener('change', updatePreferences);
+  root.addEventListener('lodex:glass-lens', lensInteraction);
   schedule();
   return () => {
     stopped = true;
@@ -209,6 +317,8 @@ export function attachGlassRefraction(root: HTMLElement): () => void {
     preferences.forEach((preference) =>
       preference.removeEventListener('change', updatePreferences),
     );
+    reducedMotion.removeEventListener('change', updatePreferences);
+    root.removeEventListener('lodex:glass-lens', lensInteraction);
     surfaces.forEach((_, element) => clearSurface(element));
     surfaces.clear();
     pending.clear();

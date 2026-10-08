@@ -7,6 +7,46 @@ export interface GlassLens {
   indexOfRefraction: number;
 }
 
+export interface GlassLensInteraction {
+  pressure?: number;
+  stretchX?: number;
+  stretchY?: number;
+}
+
+const bounded = (value: number | undefined, fallback: number, min: number, max: number) =>
+  typeof value === 'number' && Number.isFinite(value)
+    ? Math.min(max, Math.max(min, value))
+    : fallback;
+
+/** Keep dispersion below a subpixel at the rim; a neutral map must never tint
+ * the flat center. Stretch is applied around 0.5 to the map's X/Y channels.
+ */
+export function glassOpticalResponse(baseScale: number, interaction: GlassLensInteraction = {}) {
+  const pressure = bounded(interaction.pressure, 0, 0, 1);
+  const thickness = 1 + pressure * 0.14;
+  const scale = baseScale * thickness;
+  const axis = (value: number | undefined) => {
+    const stretch = bounded(value, 1, 0.9, 1.13);
+    return { slope: (255 / 256) * stretch, intercept: (1 - stretch) / 2 };
+  };
+  return {
+    red: scale * 1.015,
+    green: scale,
+    blue: scale * 0.985,
+    x: axis(interaction.stretchX),
+    y: axis(interaction.stretchY),
+  };
+}
+
+// Channel masks use opaque alpha during arithmetic summation. The original
+// green sample's alpha is restored once at the end with feComposite(in).
+// This preserves translucent backdrop pixels instead of adding alpha 3 times.
+export const glassChannelMasks = {
+  red: '1 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0 1',
+  green: '0 0 0 0 0  0 1 0 0 0  0 0 0 0 0  0 0 0 0 1',
+  blue: '0 0 0 0 0  0 0 0 0 0  0 0 1 0 0  0 0 0 0 1',
+} as const;
+
 const positive = (value: number, fallback: number) =>
   Number.isFinite(value) && value > 0 ? value : fallback;
 

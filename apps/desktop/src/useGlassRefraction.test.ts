@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { attachGlassRefraction } from './useGlassRefraction';
 
-class ElementStub {
+class ElementStub extends EventTarget {
   nodeType = 1;
   children: ElementStub[] = [];
   attributes = new Map<string, string>();
@@ -12,12 +12,20 @@ class ElementStub {
   optical = false;
   offsetWidth = 120;
   offsetHeight = 60;
+  get clientWidth() {
+    return this.offsetWidth;
+  }
+  get clientHeight() {
+    return this.offsetHeight;
+  }
   style = {
     cssText: '',
     setProperty: (name: string, value: string) => this.properties.set(name, value),
     removeProperty: (name: string) => this.properties.delete(name),
   };
-  constructor(readonly tag: string) {}
+  constructor(readonly tag: string) {
+    super();
+  }
   get id() {
     return this.attributes.get('id') ?? '';
   }
@@ -43,6 +51,9 @@ class ElementStub {
   matches() {
     return this.optical;
   }
+  closest(): ElementStub | null {
+    return this.optical ? this : (this.parent?.closest() ?? null);
+  }
   querySelectorAll(): ElementStub[] {
     return this.children.flatMap((child) => [
       ...(child.optical ? [child] : []),
@@ -59,12 +70,18 @@ function fixture(userAgent = 'Chrome/134.0.0.0') {
       this.dispatchEvent(new Event('change'));
     }
   }
-  const preferences = [new Preference(), new Preference()];
+  const preferences = [new Preference(), new Preference(), new Preference(), new Preference()];
   const frames = new Map<number, () => void>();
   let nextFrame = 0;
   let resized: (entries: { target: ElementStub }[]) => void = () => {};
   let mutated: (
-    entries: { addedNodes: ElementStub[]; removedNodes: ElementStub[] }[],
+    entries: {
+      addedNodes: ElementStub[];
+      removedNodes: ElementStub[];
+      type?: string;
+      attributeName?: string;
+      target?: ElementStub;
+    }[],
   ) => void = () => {};
   const resizeDisconnect = vi.fn();
   const mutationDisconnect = vi.fn();
@@ -95,7 +112,16 @@ function fixture(userAgent = 'Chrome/134.0.0.0') {
   const view = {
     navigator: { userAgent },
     CSS: { supports: () => true },
-    matchMedia: (query: string) => preferences[query.includes('forced-colors') ? 1 : 0]!,
+    matchMedia: (query: string) =>
+      preferences[
+        query.includes('motion')
+          ? 3
+          : query.includes('contrast')
+            ? 2
+            : query.includes('forced-colors')
+              ? 1
+              : 0
+      ]!,
     getComputedStyle: () => ({ borderTopLeftRadius: '12px' }),
     setTimeout: (callback: () => void) => {
       frames.set(++nextFrame, callback);
@@ -140,6 +166,26 @@ function fixture(userAgent = 'Chrome/134.0.0.0') {
     resize: () => resized([{ target: surface }]),
     mutation: (addedNodes: ElementStub[] = [], removedNodes: ElementStub[] = []) =>
       mutated([{ addedNodes, removedNodes }]),
+    marker: (target: ElementStub, active: boolean) => {
+      target.optical = active;
+      mutated([
+        {
+          type: 'attributes',
+          attributeName: 'data-glass-lens',
+          target,
+          addedNodes: [],
+          removedNodes: [],
+        },
+      ]);
+    },
+    interact: (pressure: number, stretchX = 1, stretchY = 1, target = surface) => {
+      const event = new Event('lodex:glass-lens');
+      Object.defineProperties(event, {
+        target: { value: target },
+        detail: { value: { pressure, stretchX, stretchY } },
+      });
+      root.dispatchEvent(event);
+    },
     resizeDisconnect,
     mutationDisconnect,
     unobserve,
@@ -149,6 +195,101 @@ function fixture(userAgent = 'Chrome/134.0.0.0') {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('glass backdrop lifecycle', () => {
+  it('does not deform an enclosing panel when an unmarked child dispatches an interaction', () => {
+    const f = fixture();
+    const child = new ElementStub('unmarked-button');
+    f.surface.append(child);
+    const cleanup = attachGlassRefraction(f.root as unknown as HTMLElement);
+    f.flush();
+    const panelFilter = f.body.children[0]!.children[0]!.children[0]!;
+    const green = panelFilter.children.find(
+      (node) => node.attributes.get('result') === 'greenSample',
+    )!;
+    const originalScale = green.attributes.get('scale');
+    f.interact(1, 1.13, 0.9, child);
+    expect(green.attributes.get('scale')).toBe(originalScale);
+    expect(child.properties.size).toBe(0);
+    expect(f.renderedMaps).toHaveBeenCalledOnce();
+    cleanup();
+  });
+
+  it('bakes a newly marked control on its first gesture without waiting for observer or resize timers', () => {
+    const f = fixture();
+    const child = new ElementStub('marked-button');
+    child.offsetWidth = 48;
+    child.offsetHeight = 32;
+    f.surface.append(child);
+    const cleanup = attachGlassRefraction(f.root as unknown as HTMLElement);
+    expect(f.frames.size).toBe(1);
+    // The gesture hook sets its marker, then dispatches before the observer runs.
+    child.optical = true;
+    f.interact(1, 1.1, 0.95, child);
+    expect(child.attributes.get('data-glass-optics')).toBe('refractive');
+    expect(f.renderedMaps).toHaveBeenCalledOnce();
+    expect(f.surface.properties.size).toBe(0);
+    // The previous timer is replaced; unrelated larger surfaces stay deferred.
+    expect(f.frames.size).toBe(1);
+    f.flush();
+    expect(f.renderedMaps).toHaveBeenCalledTimes(2);
+    expect(f.surface.attributes.get('data-glass-optics')).toBe('refractive');
+    f.marker(child, true);
+    f.interact(0, 1, 1, child);
+    f.flush();
+    expect(f.renderedMaps).toHaveBeenCalledTimes(2);
+    cleanup();
+  });
+
+  it('registers dynamic control markers and releases their maps when markers are removed', () => {
+    const f = fixture();
+    f.surface.optical = false;
+    const cleanup = attachGlassRefraction(f.root as unknown as HTMLElement);
+    expect(f.frames.size).toBe(0);
+    f.marker(f.surface, true);
+    f.flush();
+    expect(f.surface.attributes.get('data-glass-optics')).toBe('refractive');
+    f.marker(f.surface, false);
+    expect(f.surface.properties.size).toBe(0);
+    expect(f.body.children[0]!.children[0]!.children).toHaveLength(0);
+    expect(f.unobserve).toHaveBeenCalledWith(f.surface);
+    cleanup();
+  });
+
+  it('changes per-channel optical scales on pressure frames without rebaking maps and resets on release', () => {
+    const f = fixture();
+    const cleanup = attachGlassRefraction(f.root as unknown as HTMLElement);
+    f.flush();
+    const filter = f.body.children[0]!.children[0]!.children[0]!;
+    const channels = filter.children.filter((child) => child.tag === 'feDisplacementMap');
+    const baseline = channels.map((channel) => Number(channel.attributes.get('scale')));
+    const axes = filter.children[1]!.children;
+    f.interact(1, 1.1, 0.95);
+    channels.forEach((channel, index) =>
+      expect(Number(channel.attributes.get('scale'))).toBeCloseTo(baseline[index]! * 1.14),
+    );
+    expect(Number(axes[0]!.attributes.get('slope'))).toBeCloseTo((255 / 256) * 1.1);
+    expect(Number(axes[0]!.attributes.get('intercept'))).toBeCloseTo(-0.05);
+    expect(Number(axes[1]!.attributes.get('slope'))).toBeCloseTo((255 / 256) * 0.95);
+    expect(f.renderedMaps).toHaveBeenCalledOnce();
+    f.interact(0);
+    expect(channels.map((channel) => Number(channel.attributes.get('scale')))).toEqual(baseline);
+    expect(Number(axes[0]!.attributes.get('slope'))).toBe(255 / 256);
+    f.interact(1);
+    f.preferences[3]!.update(true);
+    expect(channels.map((channel) => Number(channel.attributes.get('scale')))).toEqual(baseline);
+    f.interact(1);
+    expect(channels.map((channel) => Number(channel.attributes.get('scale')))).toEqual(baseline);
+    // Explicit full effects can override reduced motion, never reduced transparency.
+    f.root.dataset.glassEffects = 'full';
+    f.interact(1);
+    expect(Number(channels[1]!.attributes.get('scale'))).toBeGreaterThan(baseline[1]!);
+    f.preferences[0]!.update(true);
+    f.interact(1);
+    expect(channels.map((channel) => Number(channel.attributes.get('scale')))).toEqual(baseline);
+    cleanup();
+    f.interact(1);
+    expect(channels.map((channel) => Number(channel.attributes.get('scale')))).toEqual(baseline);
+  });
+
   it('registers only a backdrop filter, coalesces resizing and cleans every resource on design change', () => {
     const f = fixture();
     const cleanup = attachGlassRefraction(f.root as unknown as HTMLElement);
@@ -163,12 +304,12 @@ describe('glass backdrop lifecycle', () => {
     );
     expect(f.surface.properties.has('filter')).toBe(false);
     const filter = f.body.children[0]!.children[0]!.children[0]!;
-    expect(filter.children.map((child) => child.tag)).toEqual([
-      'feImage',
-      'feComponentTransfer',
-      'feDisplacementMap',
-    ]);
+    expect(filter.children.filter((child) => child.tag === 'feDisplacementMap')).toHaveLength(3);
+    expect(filter.children.filter((child) => child.tag === 'feColorMatrix')).toHaveLength(3);
     expect(filter.children[2]!.attributes.get('in')).toBe('SourceGraphic');
+    const finalComposite = filter.children.at(-1)!;
+    expect(finalComposite.attributes.get('operator')).toBe('in');
+    expect(finalComposite.attributes.get('in2')).toBe('greenSample');
     f.resize();
     f.flush();
     expect(f.renderedMaps).toHaveBeenCalledTimes(1);

@@ -113,11 +113,15 @@ export function GlassEffectsSettings({
             </button>
           ))}
         </div>
-        <div className="glass-optics-preview" aria-hidden="true">
-          <div className="glass-optics-preview-lines" />
-          <div className="glass-optics-preview-lens">Liquid Glass</div>
+        <div className="glass-optics-preview">
+          <div className="glass-optics-preview-lines" aria-hidden="true" />
+          <button type="button" className="glass-optics-preview-lens" aria-label="유리 렌즈 체험">
+            눌러서 움직이기
+          </button>
         </div>
-        <small className="glass-optics-caption">유리 효과 미리보기</small>
+        <small className="glass-optics-caption">
+          누르거나 드래그하면 유리의 두께와 모양이 변합니다.
+        </small>
       </GlassPopover>
     </div>
   );
