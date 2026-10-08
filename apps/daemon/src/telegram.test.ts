@@ -31,10 +31,22 @@ const ok = (result: unknown) =>
   });
 class Bot {
   offsets: number[] = [];
+  allowedUpdates: string[][] = [];
+  messageIds = new WeakMap<object, number>();
+  nextMessageId = 0;
+  callbackAnswers: { callback_query_id: string; text?: string; show_alert?: boolean }[] = [];
+  markupEdits: {
+    chat_id: number;
+    message_id: number;
+    reply_markup: { inline_keyboard: unknown[][] };
+  }[] = [];
+  failCallbackAnswer = false;
+  failMarkupEdit = false;
   sent: (TelegramFormattedChunk & {
     chat_id: number;
     link_preview_options?: { is_disabled: boolean };
     parse_mode?: string;
+    reply_markup?: { inline_keyboard: { text: string; callback_data: string }[][] };
   })[] = [];
   failures: ('unknown' | 'limited')[] = [];
   pending: unknown[][] = [];
@@ -46,15 +58,34 @@ class Bot {
     if (method === 'sendMessage') {
       this.sent.push(body);
       const failure = this.failures.shift();
-      if (failure === 'unknown') throw new Error('URL with secret ' + token);
       if (failure === 'limited')
         return new Response(JSON.stringify({ ok: false, parameters: { retry_after: 0.01 } }), {
           status: 429,
         });
-      return ok({ message_id: this.sent.length, chat: { id: body.chat_id } });
+      const messageId = ++this.nextMessageId;
+      this.messageIds.set(body, messageId);
+      if (failure === 'unknown') throw new Error('URL with secret ' + token);
+      return ok({ message_id: messageId, chat: { id: body.chat_id } });
+    }
+    if (method === 'answerCallbackQuery') {
+      this.callbackAnswers.push(body);
+      if (this.failCallbackAnswer) {
+        this.failCallbackAnswer = false;
+        throw new Error('Fixture callback answer delivery is uncertain');
+      }
+      return ok(true);
+    }
+    if (method === 'editMessageReplyMarkup') {
+      this.markupEdits.push(body);
+      if (this.failMarkupEdit) {
+        this.failMarkupEdit = false;
+        throw new Error('Fixture keyboard cleanup delivery is uncertain');
+      }
+      return ok(true);
     }
     if (method !== 'getUpdates') throw new Error('Unexpected bot method');
     this.offsets.push(body.offset);
+    this.allowedUpdates.push(body.allowed_updates ?? []);
     if (this.pending.length) return ok(this.pending.shift());
     if (body.timeout === 0) return ok([]);
     return new Promise<Response>((resolve, reject) => {
@@ -89,6 +120,26 @@ const update = (
     text,
     from: { id: userId, is_bot: false, first_name: 'Fixture' },
     chat: { id: userId, type: 'private' },
+    ...overrides,
+  },
+});
+const callbackUpdate = (
+  id: number,
+  data: string,
+  messageId: number,
+  overrides: Record<string, unknown> = {},
+) => ({
+  update_id: id,
+  callback_query: {
+    id: 'callback-' + id,
+    from: { id: 100, is_bot: false, first_name: 'Fixture' },
+    data,
+    message: {
+      message_id: messageId,
+      date: Math.floor(Date.now() / 1000) - 86400,
+      from: { id: 123456789, is_bot: true },
+      chat: { id: 100, type: 'private' },
+    },
     ...overrides,
   },
 });
@@ -161,12 +212,80 @@ async function fixture(
     get store() {
       return store;
     },
+    reopenChannel: async () => {
+      await manager.close();
+      manager = await Telegram.open(options());
+    },
     reopen: async () => {
       await manager.close();
       await store.close();
       store = await Store.open(path, resolve('apps/daemon/dist/worker.cjs'));
       manager = await Telegram.open(options());
     },
+  };
+}
+
+async function approvalButtonFixture(
+  kind: 'command' | 'verification' = 'command',
+  options: { target?: string; notificationFailure?: 'unknown' | 'limited' } = {},
+) {
+  const app = await fixture();
+  await app.pair();
+  await app.manager.configure({
+    enabled: true,
+    sessionId: app.session.id,
+    allowBuild: kind !== 'verification',
+    transmissionConsent: true,
+  });
+  const session = await app.store.session(app.session.id);
+  const sent = await app.store.apply(
+    makeCommand({
+      type: 'send_message',
+      sessionId: session.id,
+      expectedVersion: session.version,
+      content: '인라인 승인 테스트',
+    }),
+  );
+  const activityId = crypto.randomUUID();
+  if (options.notificationFailure) app.bot.failures.push(options.notificationFailure);
+  await app.store.updateRun({
+    sessionId: session.id,
+    runId: sent.session.run!.id,
+    activities: [
+      {
+        id: activityId,
+        kind: 'tool',
+        label: 'run_command',
+        status: 'running',
+        text: '',
+        approval: {
+          kind,
+          target: options.target ?? 'npm test',
+          actor: 'telegram',
+          mode: 'ask',
+          risk: 'low',
+          reason: '프로젝트 명령 실행',
+          status: 'pending',
+          requestedAt: new Date().toISOString(),
+        },
+      },
+    ],
+  });
+  app.manager.wake();
+  await expect
+    .poll(() => app.bot.sent.some((message) => message.reply_markup?.inline_keyboard.length))
+    .toBe(true);
+  const notification = app.bot.sent.find(
+    (message) => message.reply_markup?.inline_keyboard.length,
+  )!;
+  const buttons = notification.reply_markup!.inline_keyboard.flat();
+  return {
+    app,
+    activityId,
+    runId: sent.session.run!.id,
+    notification,
+    buttons,
+    messageId: app.bot.messageIds.get(notification)!,
   };
 }
 
@@ -692,6 +811,302 @@ describe('durable Telegram channel', () => {
       ).toMatchObject({ status: 'approved', decidedBy: 'user' });
     },
   );
+
+  it.each([
+    { kind: 'command', action: 'approve', label: '승인', result: '승인했습니다.' },
+    { kind: 'command', action: 'reject', label: '거절', result: '거절했습니다.' },
+    { kind: 'verification', action: 'approve', label: '승인', result: '승인했습니다.' },
+  ] as const)(
+    'handles a paired $action button for $kind without expiring the original message date',
+    async ({ kind, action, label, result }) => {
+      const { app, activityId, notification, buttons, messageId } =
+        await approvalButtonFixture(kind);
+      expect(buttons.map((button) => button.text)).toEqual(['승인', '거절']);
+      expect(new Set(buttons.map((button) => button.callback_data)).size).toBe(2);
+      expect(buttons.every((button) => Buffer.byteLength(button.callback_data, 'utf8') <= 64)).toBe(
+        true,
+      );
+      expect(buttons.every((button) => button.callback_data.length > 0)).toBe(true);
+      expect(notification.text).toContain('npm test');
+      expect(app.bot.allowedUpdates.some((allowed) => allowed.includes('callback_query'))).toBe(
+        true,
+      );
+
+      app.bot.push([
+        callbackUpdate(
+          2,
+          buttons.find((button) => button.text === label)!.callback_data,
+          messageId,
+        ),
+      ]);
+      await expect.poll(() => app.decideApproval.mock.calls.length).toBe(1);
+      expect(app.decideApproval.mock.calls[0]![0]).toMatchObject({
+        sessionId: app.session.id,
+        activityId,
+        action,
+      });
+      await expect
+        .poll(() =>
+          app.bot.callbackAnswers.some((answer) => answer.callback_query_id === 'callback-2'),
+        )
+        .toBe(true);
+      await expect.poll(() => app.bot.sent.some((message) => message.text === result)).toBe(true);
+      await expect
+        .poll(() =>
+          app.bot.markupEdits.some(
+            (edit) =>
+              edit.chat_id === 100 &&
+              edit.message_id === messageId &&
+              edit.reply_markup.inline_keyboard.length === 0,
+          ),
+        )
+        .toBe(true);
+    },
+  );
+
+  it('retains exact approval buttons after restart and cannot replay them against a newer request', async () => {
+    const { app, activityId, buttons, messageId, runId } = await approvalButtonFixture();
+    const data = buttons[0]!.callback_data;
+    await app.reopenChannel();
+    app.bot.push([callbackUpdate(2, data, messageId)]);
+    await expect.poll(() => app.decideApproval.mock.calls.length).toBe(1);
+    await expect
+      .poll(() => app.bot.sent.some((message) => message.text === '승인했습니다.'))
+      .toBe(true);
+
+    const current = await app.store.session(app.session.id);
+    const previous = current.messages
+      .flatMap((message) => message.activities ?? [])
+      .find((activity) => activity.id === activityId)!;
+    const nextId = crypto.randomUUID();
+    await app.store.updateRun({
+      sessionId: current.id,
+      runId,
+      activities: [
+        {
+          ...previous,
+          id: nextId,
+          approval: { ...previous.approval!, target: 'npm run build', status: 'pending' },
+        },
+      ],
+    });
+    app.manager.wake();
+    await expect
+      .poll(() =>
+        app.bot.sent.some(
+          (message) => message.text.includes('npm run build') && message.reply_markup,
+        ),
+      )
+      .toBeTruthy();
+    app.bot.push([callbackUpdate(2, data, messageId), callbackUpdate(3, data, messageId)]);
+    await expect.poll(() => app.bot.offsets.some((offset) => offset >= 4)).toBe(true);
+    expect(app.decideApproval).toHaveBeenCalledTimes(1);
+    expect(
+      (await app.store.session(current.id)).messages
+        .flatMap((message) => message.activities ?? [])
+        .find((activity) => activity.id === nextId)?.approval?.status,
+    ).toBe('pending');
+  });
+
+  it('ignores forged buttons and other accounts without consuming the paired owner approval', async () => {
+    const { app, buttons, messageId } = await approvalButtonFixture();
+    const data = buttons[0]!.callback_data;
+    app.bot.push([
+      callbackUpdate(2, 'forged-notification', messageId),
+      callbackUpdate(3, data, messageId, { from: { id: 200, is_bot: false } }),
+      callbackUpdate(4, data, messageId, {
+        message: {
+          message_id: messageId,
+          date: 1,
+          from: { id: 123456789, is_bot: true },
+          chat: { id: 200, type: 'private' },
+        },
+      }),
+      callbackUpdate(5, data, messageId, {
+        message: {
+          message_id: messageId,
+          date: 1,
+          from: { id: 987654321, is_bot: true },
+          chat: { id: 100, type: 'private' },
+        },
+      }),
+      callbackUpdate(6, data, messageId + 100),
+    ]);
+    await expect.poll(() => app.bot.offsets.some((offset) => offset >= 7)).toBe(true);
+    expect(app.decideApproval).not.toHaveBeenCalled();
+    app.bot.push([callbackUpdate(7, data, messageId)]);
+    await expect.poll(() => app.decideApproval.mock.calls.length).toBe(1);
+  });
+
+  it('invalidates an old conversation button when the connected conversation changes', async () => {
+    const { app, buttons, messageId } = await approvalButtonFixture();
+    const second = (
+      await app.store.apply(
+        makeCommand({
+          type: 'create_session',
+          sessionId: crypto.randomUUID(),
+          title: 'Other conversation',
+          mode: 'plan',
+          config: { ...defaultModelConfig(), provider: 'demo', model: 'demo' },
+        }),
+      )
+    ).session;
+    await app.manager.configure({
+      enabled: true,
+      sessionId: second.id,
+      allowBuild: true,
+      transmissionConsent: true,
+    });
+    app.bot.push([callbackUpdate(2, buttons[0]!.callback_data, messageId)]);
+    await expect.poll(() => app.bot.offsets.some((offset) => offset >= 3)).toBe(true);
+    expect(app.decideApproval).not.toHaveBeenCalled();
+  });
+
+  it('does not repeat a decision or stop polling when callback feedback delivery fails', async () => {
+    const { app, buttons, messageId } = await approvalButtonFixture();
+    app.bot.failCallbackAnswer = true;
+    app.bot.failMarkupEdit = true;
+    app.bot.push([callbackUpdate(2, buttons[0]!.callback_data, messageId)]);
+    await expect.poll(() => app.decideApproval.mock.calls.length).toBe(1);
+    await expect
+      .poll(() => app.bot.sent.some((message) => message.text === '승인했습니다.'))
+      .toBe(true);
+    expect(app.manager.status().running).toBe(true);
+    app.bot.push([callbackUpdate(3, buttons[0]!.callback_data, messageId), update(4, '/todo')]);
+    await expect
+      .poll(() => app.bot.sent.some((message) => message.text.includes('저장된 할 일이 없습니다.')))
+      .toBe(true);
+    expect(app.decideApproval).toHaveBeenCalledTimes(1);
+  });
+
+  it('attaches approval buttons only to the final chunk and preserves them after rate limiting', async () => {
+    const { app, notification } = await approvalButtonFixture('command', {
+      target: '검사 대상 파일 '.repeat(600),
+      notificationFailure: 'limited',
+    });
+    expect(app.bot.sent.length).toBeGreaterThan(2);
+    expect(app.bot.sent[0]).toEqual(app.bot.sent[1]);
+    expect(app.bot.sent.at(-1)).toBe(notification);
+    expect(app.bot.sent.slice(0, -1).every((message) => !message.reply_markup)).toBe(true);
+    expect(notification.reply_markup!.inline_keyboard[0]).toHaveLength(2);
+    expect(app.bot.sent.every((message) => message.text.length <= 4096)).toBe(true);
+  });
+
+  it.each(['target', 'arguments'] as const)(
+    'replaces approval buttons when pending $change change without approving the new request through old buttons',
+    async (change) => {
+      const { app, activityId, buttons, messageId, runId } = await approvalButtonFixture();
+      const session = await app.store.session(app.session.id);
+      const activity = session.messages
+        .flatMap((message) => message.activities ?? [])
+        .find((entry) => entry.id === activityId)!;
+      await app.store.updateRun({
+        sessionId: session.id,
+        runId,
+        activities: [
+          {
+            ...activity,
+            ...(change === 'target'
+              ? { approval: { ...activity.approval!, target: 'npm publish --access public' } }
+              : { arguments: JSON.stringify({ command: 'npm publish --access public' }) }),
+          },
+        ],
+      });
+      app.manager.wake();
+      await expect
+        .poll(() =>
+          app.bot.sent.some(
+            (message) => message.text.includes('npm publish') && message.reply_markup,
+          ),
+        )
+        .toBeTruthy();
+      const replacement = app.bot.sent.find(
+        (message) => message.text.includes('npm publish') && message.reply_markup,
+      )!;
+      expect(replacement.reply_markup!.inline_keyboard[0]![0]!.callback_data).not.toBe(
+        buttons[0]!.callback_data,
+      );
+      app.bot.push([callbackUpdate(2, buttons[0]!.callback_data, messageId)]);
+      await expect.poll(() => app.bot.offsets.some((offset) => offset >= 3)).toBe(true);
+      expect(app.decideApproval).not.toHaveBeenCalled();
+      app.bot.push([
+        callbackUpdate(
+          3,
+          replacement.reply_markup!.inline_keyboard[0]![1]!.callback_data,
+          app.bot.messageIds.get(replacement)!,
+        ),
+      ]);
+      await expect.poll(() => app.decideApproval.mock.calls.length).toBe(1);
+      expect(app.decideApproval.mock.calls[0]![0]).toMatchObject({ activityId, action: 'reject' });
+    },
+  );
+
+  it('cannot act on an approval already resolved in the desktop', async () => {
+    const { app, activityId, buttons, messageId } = await approvalButtonFixture();
+    const session = await app.store.session(app.session.id);
+    await app.store.decideApproval({
+      sessionId: session.id,
+      expectedVersion: session.version,
+      activityId,
+      action: 'reject',
+    });
+    app.manager.wake();
+    app.bot.push([callbackUpdate(2, buttons[0]!.callback_data, messageId)]);
+    await expect.poll(() => app.bot.offsets.some((offset) => offset >= 3)).toBe(true);
+    expect(app.decideApproval).not.toHaveBeenCalled();
+    await expect
+      .poll(() => app.bot.markupEdits.some((edit) => edit.message_id === messageId))
+      .toBe(true);
+  });
+
+  it('accepts a genuine visible approval button after an uncertain send without resending the notification', async () => {
+    const { app, buttons, messageId, notification } = await approvalButtonFixture('command', {
+      notificationFailure: 'unknown',
+    });
+    await expect.poll(() => app.manager.status().unknownDeliveries).toBe(1);
+    expect(messageId).toBeGreaterThan(0);
+    app.bot.push([callbackUpdate(2, buttons[0]!.callback_data, messageId)]);
+    await expect.poll(() => app.decideApproval.mock.calls.length).toBe(1);
+    await expect
+      .poll(() => app.bot.sent.some((message) => message.text === '승인했습니다.'))
+      .toBe(true);
+    expect(app.bot.sent.filter((message) => message.text === notification.text)).toHaveLength(1);
+    app.bot.push([callbackUpdate(3, buttons[1]!.callback_data, messageId)]);
+    await expect.poll(() => app.bot.offsets.some((offset) => offset >= 4)).toBe(true);
+    expect(app.decideApproval).toHaveBeenCalledTimes(1);
+  });
+
+  it('reissues current-session buttons after reconfiguration and invalidates command buttons when remote Build is disabled', async () => {
+    const { app, buttons, messageId } = await approvalButtonFixture();
+    await app.manager.configure({ ...app.manager.status().config, allowBuild: true });
+    await expect.poll(() => app.bot.sent.filter((message) => message.reply_markup).length).toBe(2);
+    const replacement = app.bot.sent.filter((message) => message.reply_markup).at(-1)!;
+    const replacementData = replacement.reply_markup!.inline_keyboard[0]![0]!.callback_data;
+    expect(replacementData).not.toBe(buttons[0]!.callback_data);
+    app.bot.push([callbackUpdate(2, buttons[0]!.callback_data, messageId)]);
+    await expect.poll(() => app.bot.offsets.some((offset) => offset >= 3)).toBe(true);
+    expect(app.decideApproval).not.toHaveBeenCalled();
+    await app.manager.configure({ ...app.manager.status().config, allowBuild: false });
+    app.bot.push([callbackUpdate(3, replacementData, app.bot.messageIds.get(replacement)!)]);
+    await expect.poll(() => app.bot.offsets.some((offset) => offset >= 4)).toBe(true);
+    expect(app.decideApproval).not.toHaveBeenCalled();
+    expect(app.bot.sent.filter((message) => message.reply_markup)).toHaveLength(2);
+  });
+
+  it('invalidates the interrupted run approval after a full app restart', async () => {
+    const { app, activityId, buttons, messageId } = await approvalButtonFixture();
+    await app.reopen();
+    app.bot.push([callbackUpdate(2, buttons[0]!.callback_data, messageId)]);
+    await expect.poll(() => app.bot.offsets.some((offset) => offset >= 3)).toBe(true);
+    expect(app.decideApproval).not.toHaveBeenCalled();
+    const session = await app.store.session(app.session.id);
+    expect(session.run?.status).toBe('interrupted');
+    expect(
+      session.messages
+        .flatMap((message) => message.activities ?? [])
+        .find((activity) => activity.id === activityId)?.approval,
+    ).toMatchObject({ status: 'rejected', decidedBy: 'policy' });
+  });
 
   it('notifies and submits MCP elicitation JSON without persisting answer values', async () => {
     const app = await fixture();

@@ -40,7 +40,24 @@ const updateSchema = z.object({
       chat: z.object({ id: z.number().int().positive().safe(), type: z.literal('private') }),
     })
     .optional(),
+  callback_query: z
+    .object({
+      id: z.string().min(1).max(256),
+      from: peerSchema,
+      data: z.string().max(64).optional(),
+      message: z
+        .object({
+          message_id: z.number().int().positive().safe(),
+          from: z
+            .object({ id: z.number().int().positive().safe(), is_bot: z.boolean() })
+            .optional(),
+          chat: z.object({ id: z.number().int().safe(), type: z.string().max(32) }),
+        })
+        .optional(),
+    })
+    .optional(),
 });
+type ApprovalKeyboard = { inline_keyboard: { text: string; callback_data: string }[][] };
 type Inbox = {
   id: number;
   epoch: number;
@@ -50,6 +67,12 @@ type Inbox = {
   status: 'queued' | 'prepared' | 'waiting' | 'done';
   command?: Command;
   run?: { id: string; messageId: string; sessionId: string };
+  callback?: {
+    id: string;
+    outboxId: string;
+    messageId: number;
+    action: ApprovalAction['action'];
+  };
 };
 type Outbox = TelegramFormattedChunk & {
   id: string;
@@ -59,6 +82,11 @@ type Outbox = TelegramFormattedChunk & {
   sessionId?: string | null;
   status: 'queued' | 'sending' | 'sent' | 'unknown' | 'failed';
   retryAt: number;
+  messageId?: number;
+  replyMarkup?: ApprovalKeyboard;
+  approval?: { activityId: string; fingerprint: string; resolved?: boolean };
+  keyboardCleared?: boolean;
+  clearKeyboardAt?: number;
 };
 interface Journal {
   config: TelegramConfig;
@@ -162,11 +190,11 @@ export class Telegram {
     const active = this.state.inbox.filter((item) => item.status !== 'done'),
       done = this.state.inbox.filter((item) => item.status === 'done').slice(-64);
     this.state.inbox = [...done, ...active].sort((a, b) => a.id - b.id);
+    const keep = (item: Outbox) =>
+      ['queued', 'sending'].includes(item.status) || !!(item.approval && !item.approval.resolved);
     this.state.outbox = [
-      ...this.state.outbox
-        .filter((item) => !['queued', 'sending'].includes(item.status))
-        .slice(-64),
-      ...this.state.outbox.filter((item) => ['queued', 'sending'].includes(item.status)),
+      ...this.state.outbox.filter((item) => !keep(item)).slice(-64),
+      ...this.state.outbox.filter(keep),
     ];
     this.version = await this.options.store.saveIntegration('telegram', this.version, this.state);
   }
@@ -302,7 +330,7 @@ export class Telegram {
       return this.status();
     });
   }
-  private enqueue(output: string | TelegramFormattedChunk[]) {
+  private enqueue(output: string | TelegramFormattedChunk[], approval?: Activity) {
     if (!this.state.owner) return;
     const pendingGroups = new Set(
       this.state.outbox
@@ -317,9 +345,11 @@ export class Telegram {
       typeof output === 'string'
         ? telegramChunks(output, this.token).map((text) => ({ text }))
         : output;
-    for (const part of parts)
+    for (const [index, part] of parts.entries()) {
+      const id = crypto.randomUUID();
+      const buttons = approval && index === parts.length - 1;
       this.state.outbox.push({
-        id: crypto.randomUUID(),
+        id,
         groupId,
         epoch: this.state.epoch,
         chatId: this.state.owner.chatId,
@@ -327,10 +357,28 @@ export class Telegram {
         ...part,
         status: 'queued',
         retryAt: 0,
+        ...(buttons
+          ? {
+              approval: {
+                activityId: approval.id,
+                fingerprint: this.approvalFingerprint(approval),
+              },
+              replyMarkup: {
+                inline_keyboard: [
+                  [
+                    { text: '승인', callback_data: `approval:a:${id}` },
+                    { text: '거절', callback_data: `approval:d:${id}` },
+                  ],
+                ],
+              },
+            }
+          : {}),
       });
+    }
   }
   private async api(
-    method: 'getMe' | 'getUpdates' | 'sendMessage',
+    method:
+      'getMe' | 'getUpdates' | 'sendMessage' | 'answerCallbackQuery' | 'editMessageReplyMarkup',
     body: unknown,
     signal: AbortSignal,
   ): Promise<unknown> {
@@ -463,7 +511,12 @@ export class Telegram {
       try {
         updates = await this.api(
           'getUpdates',
-          { offset: this.state.offset, limit: 50, timeout, allowed_updates: ['message'] },
+          {
+            offset: this.state.offset,
+            limit: 50,
+            timeout,
+            allowed_updates: ['message', 'callback_query'],
+          },
           AbortSignal.any([signal, pollAbort.signal]),
         );
         failures = 0;
@@ -497,7 +550,12 @@ export class Telegram {
         if (id.data.update_id < this.state.offset) continue;
         this.state.offset = id.data.update_id + 1;
         const parsed = updateSchema.safeParse(raw);
-        if (!parsed.success || !parsed.data.message) continue;
+        if (!parsed.success) continue;
+        if (parsed.data.callback_query) {
+          await this.receiveApprovalCallback(id.data.update_id, parsed.data.callback_query, signal);
+          continue;
+        }
+        if (!parsed.data.message) continue;
         const message = parsed.data.message;
         if (
           message.chat.id !== message.from.id ||
@@ -553,6 +611,7 @@ export class Telegram {
     }
   }
   private async process(signal: AbortSignal) {
+    await this.refreshApprovalButtons(signal);
     await this.notifyPendingApproval();
     await this.notifyPendingElicitation();
     for (const item of this.state.inbox) {
@@ -561,6 +620,10 @@ export class Telegram {
       if (item.epoch !== this.state.epoch || !this.state.owner) {
         item.status = 'done';
         await this.save();
+        continue;
+      }
+      if (item.callback) {
+        await this.processApprovalCallback(item, signal);
         continue;
       }
       if (item.status === 'waiting' && item.run) {
@@ -606,6 +669,7 @@ export class Telegram {
               activityId: approval.id,
               action: text === '/approve' ? 'approve' : 'reject',
             });
+            await this.refreshApprovalButtons(signal);
             item.status = 'done';
             this.enqueue(text === '/approve' ? '승인했습니다.' : '거절했습니다.');
             await this.save();
@@ -934,6 +998,245 @@ export class Telegram {
       }
     }
   }
+  private approvalFingerprint(activity: Activity) {
+    return hash(
+      JSON.stringify([
+        activity.label,
+        activity.arguments,
+        activity.approval,
+        activity.edit,
+        activity.changes,
+      ]),
+    );
+  }
+  private approvalButton(outboxId: string, messageId: number) {
+    return this.state.outbox.find(
+      (item) =>
+        item.id === outboxId &&
+        item.approval &&
+        item.epoch === this.state.epoch &&
+        item.sessionId === this.state.config.sessionId &&
+        item.chatId === this.state.owner?.chatId &&
+        (item.status === 'sent' || item.status === 'unknown') &&
+        (item.messageId === messageId || (item.status === 'unknown' && !item.messageId)),
+    );
+  }
+  private async answerCallback(id: string, text: string, signal: AbortSignal, alert = false) {
+    try {
+      await this.api(
+        'answerCallbackQuery',
+        {
+          callback_query_id: id,
+          text,
+          show_alert: alert,
+          cache_time: 0,
+        },
+        AbortSignal.any([signal, AbortSignal.timeout(2000)]),
+      );
+    } catch {
+      // This only dismisses Telegram's spinner; failure must not repeat an approval.
+    }
+  }
+  private async receiveApprovalCallback(
+    updateId: number,
+    query: NonNullable<z.infer<typeof updateSchema>['callback_query']>,
+    signal: AbortSignal,
+  ) {
+    const message = query.message;
+    const owner = this.state.owner;
+    if (
+      !owner ||
+      !this.state.config.transmissionConsent ||
+      query.from.id !== owner.userId ||
+      message?.chat.id !== owner.chatId ||
+      message.chat.type !== 'private' ||
+      message.from?.id !== this.state.bot?.id ||
+      !message.from?.is_bot
+    ) {
+      await this.answerCallback(
+        query.id,
+        '연결된 계정의 개인 채팅에서만 사용할 수 있습니다.',
+        signal,
+        true,
+      );
+      return;
+    }
+    const data = query.data?.match(/^approval:([ad]):([0-9a-f-]{36})$/);
+    const button = data && this.approvalButton(data[2]!, message.message_id);
+    if (!button) {
+      await this.answerCallback(
+        query.id,
+        '이 승인 버튼은 만료되었거나 현재 대화의 요청이 아닙니다.',
+        signal,
+        true,
+      );
+      return;
+    }
+    if (this.state.inbox.some((item) => item.callback?.id === query.id)) {
+      await this.answerCallback(query.id, '이미 접수한 요청입니다.', signal);
+      return;
+    }
+    if (this.state.inbox.filter((item) => item.status !== 'done').length >= 64) {
+      await this.answerCallback(
+        query.id,
+        '대기 중인 요청이 많습니다. 잠시 후 다시 누르세요.',
+        signal,
+        true,
+      );
+      return;
+    }
+    // Receiving the bound button proves delivery even if sendMessage's response was lost.
+    button.messageId = message.message_id;
+    this.state.inbox.push({
+      id: updateId,
+      epoch: this.state.epoch,
+      sessionId: this.state.config.sessionId,
+      date: Math.floor(Date.now() / 1000),
+      text: '',
+      status: 'queued',
+      callback: {
+        id: query.id,
+        outboxId: button.id,
+        messageId: message.message_id,
+        action: data![1] === 'a' ? 'approve' : 'reject',
+      },
+    });
+  }
+  private async processApprovalCallback(item: Inbox, signal: AbortSignal) {
+    const callback = item.callback!;
+    const button = this.approvalButton(callback.outboxId, callback.messageId);
+    let result: string;
+    try {
+      if (
+        !button ||
+        button.approval!.resolved ||
+        item.sessionId !== this.state.config.sessionId ||
+        !this.state.config.transmissionConsent ||
+        item.date < Math.floor(Date.now() / 1000) - 300
+      )
+        throw new AppError('TELEGRAM_APPROVAL_STALE', '이미 처리되었거나 만료된 승인 요청입니다.');
+      // Dismiss the spinner before reading the current version: a slow Telegram ack must
+      // not turn an otherwise valid click into a conflict with ongoing run updates.
+      await this.answerCallback(callback.id, '요청을 처리하고 있습니다.', signal);
+      signal.throwIfAborted();
+      const session = await this.options.store.session(button.sessionId!);
+      const activity = session.messages
+        .flatMap((message) => message.activities ?? [])
+        .find((entry) => entry.id === button.approval!.activityId);
+      if (
+        !activity?.approval ||
+        activity.approval.status !== 'pending' ||
+        this.approvalFingerprint(activity) !== button.approval!.fingerprint
+      ) {
+        button.approval!.resolved = true;
+        throw new AppError(
+          'TELEGRAM_APPROVAL_STALE',
+          '이미 처리되었거나 내용이 변경된 승인 요청입니다.',
+        );
+      }
+      if (!this.state.config.allowBuild && activity.approval.kind !== 'verification')
+        throw new AppError(
+          'TELEGRAM_BUILD',
+          'Telegram 설정에서 Build 원격 요청을 먼저 허용하세요.',
+        );
+      signal.throwIfAborted();
+      await this.options.decideApproval({
+        sessionId: session.id,
+        expectedVersion: session.version,
+        activityId: activity.id,
+        action: callback.action,
+      });
+      button.approval!.resolved = true;
+      result = callback.action === 'approve' ? '승인했습니다.' : '거절했습니다.';
+      this.enqueue(result);
+    } catch (error) {
+      if (
+        signal.aborted ||
+        (error instanceof AppError &&
+          ['STORAGE_EXIT', 'STORAGE_ERROR', 'INTEGRATION_STATE'].includes(error.code))
+      )
+        throw error;
+      if (
+        button &&
+        error instanceof AppError &&
+        ['APPROVAL_EXPIRED', 'APPROVAL_NOT_FOUND'].includes(error.code)
+      )
+        button.approval!.resolved = true;
+      result =
+        error instanceof AppError
+          ? error.message
+          : '처리 결과를 확인하지 못했습니다. 대화에서 승인 상태를 확인하세요.';
+      await this.answerCallback(callback.id, result.slice(0, 180), signal, true);
+    }
+    item.status = 'done';
+    await this.save();
+    if (button?.approval?.resolved) await this.clearApprovalKeyboard(button, signal);
+  }
+  private async clearApprovalKeyboard(item: Outbox, signal: AbortSignal) {
+    if (
+      !item.messageId ||
+      item.keyboardCleared ||
+      (item.clearKeyboardAt ?? 0) > Date.now() ||
+      item.chatId !== this.state.owner?.chatId
+    )
+      return;
+    try {
+      await this.api(
+        'editMessageReplyMarkup',
+        {
+          chat_id: item.chatId,
+          message_id: item.messageId,
+          reply_markup: { inline_keyboard: [] },
+        },
+        AbortSignal.any([signal, AbortSignal.timeout(2000)]),
+      );
+      item.keyboardCleared = true;
+    } catch (error) {
+      // Removing UI is idempotent. Unlike the approval, an uncertain edit may be retried.
+      if (error instanceof BotError && error.definite && !error.retryAfter)
+        item.keyboardCleared = true;
+      else
+        item.clearKeyboardAt =
+          Date.now() +
+          (error instanceof BotError && error.retryAfter ? error.retryAfter * 1000 : 30000);
+    }
+    await this.save();
+  }
+  private async refreshApprovalButtons(signal: AbortSignal) {
+    const buttons = this.state.outbox.filter((item) => item.approval);
+    if (!buttons.length) return;
+    let session: Session | undefined;
+    if (this.state.config.sessionId) {
+      try {
+        session = await this.options.store.session(this.state.config.sessionId);
+      } catch (error) {
+        if (!(error instanceof AppError) || error.code !== 'NOT_FOUND') throw error;
+      }
+    }
+    const pending = new Map(
+      session?.messages
+        .flatMap((message) => message.activities ?? [])
+        .filter((activity) => activity.approval?.status === 'pending')
+        .map((activity) => [activity.id, activity]) ?? [],
+    );
+    let changed = false;
+    for (const item of buttons) {
+      const activity = pending.get(item.approval!.activityId);
+      if (
+        !item.approval!.resolved &&
+        (item.epoch !== this.state.epoch ||
+          item.sessionId !== session?.id ||
+          !activity ||
+          this.approvalFingerprint(activity) !== item.approval!.fingerprint)
+      ) {
+        item.approval!.resolved = true;
+        if (item.status === 'queued') item.status = 'failed';
+        changed = true;
+      }
+      if (item.approval!.resolved) await this.clearApprovalKeyboard(item, signal);
+    }
+    if (changed) await this.save();
+  }
   private pendingApproval(session: Session): Activity | undefined {
     return session.messages
       .flatMap((message) => message.activities ?? [])
@@ -951,7 +1254,8 @@ export class Telegram {
       ' · ' +
       approval.target +
       '\n사유: ' +
-      approval.reason
+      approval.reason +
+      (activity.arguments ? '\n인자: ' + activity.arguments : '')
     );
   }
   private async notifyPendingApproval() {
@@ -964,12 +1268,23 @@ export class Telegram {
       return;
     }
     const approval = this.pendingApproval(session);
-    if (!approval || approval.id === this.state.notifiedApprovalId) return;
+    if (!approval) return;
+    if (
+      this.state.outbox.some(
+        (item) =>
+          item.epoch === this.state.epoch &&
+          item.sessionId === session.id &&
+          item.approval?.activityId === approval.id &&
+          item.approval.fingerprint === this.approvalFingerprint(approval),
+      )
+    )
+      return;
     if (!this.state.config.allowBuild && approval.approval?.kind !== 'verification') return;
     this.enqueue(
       '승인이 필요합니다.\n' +
         this.approvalSummary(approval) +
-        '\n/approve 또는 /deny 로 결정하세요.',
+        '\n아래 버튼으로 결정하세요. /approve 또는 /deny 명령도 사용할 수 있습니다.',
+      approval,
     );
     this.state.notifiedApprovalId = approval.id;
     await this.save();
@@ -1024,6 +1339,7 @@ export class Telegram {
             chat_id: item.chatId,
             text: item.text || '내용 없음',
             ...(item.entities?.length ? { entities: item.entities } : {}),
+            ...(item.replyMarkup ? { reply_markup: item.replyMarkup } : {}),
             link_preview_options: { is_disabled: true },
           },
           signal,
@@ -1035,6 +1351,7 @@ export class Telegram {
           })
           .safeParse(response);
         if (!sent.success) throw new BotError('Telegram 전달 확인 형식이 올바르지 않습니다.');
+        item.messageId = sent.data.message_id;
         item.status = 'sent';
       } catch (error) {
         if (error instanceof BotError && error.retryAfter) {

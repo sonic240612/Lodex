@@ -34,7 +34,7 @@ Copy [`.env.example`](.env.example) to `.env` for API keys, or save them through
 - Docker and host commands, interactive PTY terminals, stdin/EOF, background jobs, cancellation, and additional instructions during a run.
 - Web search and page reading; optional isolated Chrome/Edge automation in Full Access; registered language servers for diagnostics, definitions, references, hover, and symbols.
 - Interval, daily, and project-file-change schedules using the conversation's permissions and model. OpenRouter usage is billed normally.
-- Telegram pairing, remote chat, live approvals, task controls, and durable answer delivery.
+- Telegram pairing, remote chat, approval buttons, task controls, and durable answer delivery.
 
 Messages use Build by default. Type `/` to browse commands with the mouse or arrow keys and Tab. Common commands: `/plan`, `/goal`, `/resume`, `/stop`, `/compact`, `/quick`, `/skill`, `/new`, `/settings`.
 
