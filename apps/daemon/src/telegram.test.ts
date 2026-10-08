@@ -14,7 +14,8 @@ import {
 import { Store } from '@lodex/storage';
 import { inspectSkillDirectory } from '@lodex/skills';
 import { Telegram } from './telegram';
-import { telegramChunks } from './telegram-output';
+import { telegramReplyChunks } from './telegram-output';
+import type { TelegramFormattedChunk } from './telegram-markdown';
 
 // Real per-chat delivery pacing is retained in tests, without contacting Telegram.
 vi.setConfig({ expect: { poll: { timeout: 5000 } } });
@@ -30,7 +31,11 @@ const ok = (result: unknown) =>
   });
 class Bot {
   offsets: number[] = [];
-  sent: { chat_id: number; text: string }[] = [];
+  sent: (TelegramFormattedChunk & {
+    chat_id: number;
+    link_preview_options?: { is_disabled: boolean };
+    parse_mode?: string;
+  })[] = [];
   failures: ('unknown' | 'limited')[] = [];
   pending: unknown[][] = [];
   waiting: ((updates: unknown[]) => void) | undefined;
@@ -232,7 +237,7 @@ describe('durable Telegram channel', () => {
     await expect.poll(() => app.dispatch.mock.calls.length).toBe(1);
     const current = await app.store.session(app.session.id);
     const progress = '중간 조사 내용\n'.repeat(2000);
-    const final = '완료한 최종 답변 🦔\n'.repeat(500) + token + '\n최종 결론';
+    const final = '**완료한 최종 답변 🦔**\n'.repeat(500) + token + '\n최종 결론';
     await app.store.updateRun({
       sessionId: current.id,
       runId: current.run!.id,
@@ -241,7 +246,8 @@ describe('durable Telegram channel', () => {
       status: 'completed',
     });
     app.manager.wake();
-    const expected = telegramChunks('[complete]\n' + final, token);
+    const completed = await app.store.session(current.id);
+    const expected = telegramReplyChunks(completed.messages.at(-1)!, token);
     await expect
       .poll(() => app.bot.sent.filter((message) => message.text.startsWith('[1/')).length)
       .toBe(1);
@@ -254,8 +260,15 @@ describe('durable Telegram channel', () => {
     expect(
       app.bot.sent
         .filter((message) => /^\[\d+\/\d+\]/.test(message.text))
-        .map((message) => message.text),
+        .map(({ text, entities }) => ({ text, ...(entities ? { entities } : {}) })),
     ).toEqual(expected);
+    const replies = app.bot.sent.filter((message) => /^\[\d+\/\d+\]/.test(message.text));
+    expect(
+      replies.some((message) => message.entities?.some((entity) => entity.type === 'bold')),
+    ).toBe(true);
+    expect(replies.every((message) => !message.text.includes('**'))).toBe(true);
+    expect(replies.every((message) => message.parse_mode === undefined)).toBe(true);
+    expect(replies.every((message) => message.link_preview_options?.is_disabled)).toBe(true);
     expect(
       app.bot.sent.some(
         (message) => message.text.includes('중간 조사 내용') || message.text.includes(token),
@@ -265,6 +278,14 @@ describe('durable Telegram channel', () => {
     expect(JSON.stringify((await app.store.integration('telegram'))?.document)).not.toContain(
       token,
     );
+    const persisted = (await app.store.integration('telegram'))!.document as {
+      outbox: TelegramFormattedChunk[];
+    };
+    expect(
+      persisted.outbox
+        .filter((message) => /^\[\d+\/\d+\]/.test(message.text))
+        .map(({ text, entities }) => ({ text, ...(entities ? { entities } : {}) })),
+    ).toEqual(expected);
   });
 
   it('keeps multipart delivery ordered through rate limits and skips uncertain parts after restart', async () => {
@@ -282,6 +303,8 @@ describe('durable Telegram channel', () => {
       chatId: 100,
       sessionId: app.session.id,
       text: `part ${index + 1}`,
+      // The last part represents a journal written before formatted output was supported.
+      ...(index < 2 ? { entities: [{ type: 'bold', offset: 0, length: 4 }] } : {}),
       status,
       retryAt: 0,
     }));
@@ -290,8 +313,49 @@ describe('durable Telegram channel', () => {
     await app.reopen();
     await expect.poll(() => app.bot.sent.length).toBe(3);
     expect(app.bot.sent.map((message) => message.text)).toEqual(['part 2', 'part 2', 'part 3']);
+    expect(app.bot.sent[0]).toEqual(app.bot.sent[1]);
+    expect(app.bot.sent.map((message) => message.entities)).toEqual([
+      [{ type: 'bold', offset: 0, length: 4 }],
+      [{ type: 'bold', offset: 0, length: 4 }],
+      undefined,
+    ]);
     expect(app.manager.status().unknownDeliveries).toBe(1);
     expect(app.dispatch).not.toHaveBeenCalled();
+  });
+
+  it('formats the assistant response in status while preserving literal operational text', async () => {
+    const title = '**Scoped** _literal_';
+    const app = await fixture();
+    await app.pair();
+    const started = await app.store.apply(
+      makeCommand({
+        type: 'send_message',
+        sessionId: app.session.id,
+        expectedVersion: app.session.version,
+        content: title,
+      }),
+    );
+    await app.store.updateRun({
+      sessionId: app.session.id,
+      runId: started.session.run!.id,
+      text: '**Rendered** and `literal_*[]`.',
+      status: 'completed',
+    });
+    app.bot.push([update(2, '/status')]);
+    await expect.poll(() => app.bot.sent.length).toBe(1);
+    const status = app.bot.sent[0]!;
+    expect(status.text).toBe(title + '\ncompleted\n[complete]\nRendered and literal_*[].');
+    expect(status.entities).toEqual([
+      { type: 'bold', offset: status.text.indexOf('Rendered'), length: 'Rendered'.length },
+      { type: 'code', offset: status.text.indexOf('literal_*[]'), length: 'literal_*[]'.length },
+    ]);
+    expect(status.parse_mode).toBeUndefined();
+    expect(status.link_preview_options).toEqual({ is_disabled: true });
+    app.bot.push([update(3, '/help')]);
+    await expect.poll(() => app.bot.sent.length).toBe(2);
+    expect(app.bot.sent[1]!.text).toContain('/plan');
+    expect(app.bot.sent[1]!.entities).toBeUndefined();
+    expect(app.bot.sent[1]!.parse_mode).toBeUndefined();
   });
 
   it('queues paired remote instructions in the active run instead of starting another request', async () => {
@@ -591,7 +655,7 @@ describe('durable Telegram channel', () => {
             text: '',
             approval: {
               kind,
-              target: 'npm test',
+              target: 'npm test --pattern "**literal**"',
               actor: 'telegram',
               mode: 'ask',
               risk: 'low',
@@ -606,6 +670,12 @@ describe('durable Telegram channel', () => {
       await expect
         .poll(() => app.bot.sent.some((message) => message.text.includes('승인이 필요합니다.')))
         .toBe(true);
+      const notification = app.bot.sent.find((message) =>
+        message.text.includes('승인이 필요합니다.'),
+      )!;
+      expect(notification.text).toContain('npm test --pattern "**literal**"');
+      expect(notification.entities).toBeUndefined();
+      expect(notification.parse_mode).toBeUndefined();
       app.bot.push([update(2, '/approve')]);
       await expect.poll(() => app.decideApproval.mock.calls.length).toBe(1);
       expect(app.decideApproval.mock.calls[0]![0]).toMatchObject({

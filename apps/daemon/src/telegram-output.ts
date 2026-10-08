@@ -1,4 +1,29 @@
 import type { Message } from '@lodex/contracts';
+import { telegramFormattedChunks, telegramMarkdown } from './telegram-markdown';
+
+/** Only assistant content is Markdown; operational prefixes and error details stay literal. */
+export function telegramReplyChunks(message: Message, token: string | null, prefix = '') {
+  const offset = message.status === 'complete' ? (message.finalResponseOffset ?? 0) : 0;
+  const answer =
+    message.content.slice(offset) ||
+    (message.status === 'complete' ? '작업이 완료되었습니다.' : '답변 내용 없음');
+  const rendered = telegramMarkdown(answer, token);
+  const header = `${prefix}[${message.status}]\n`;
+  return telegramFormattedChunks(
+    {
+      text: header + rendered.text + (message.error ? '\n' + message.error : ''),
+      ...(rendered.entities
+        ? {
+            entities: rendered.entities.map((entity) => ({
+              ...entity,
+              offset: entity.offset + header.length,
+            })),
+          }
+        : {}),
+    },
+    token,
+  );
+}
 
 /** The transcript contains progress updates; only the completed response belongs in the reply. */
 export function telegramAnswer(message: Message) {

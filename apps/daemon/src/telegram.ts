@@ -20,7 +20,8 @@ import {
   type SecretSource,
 } from '@lodex/contracts';
 import type { Store } from '@lodex/storage';
-import { telegramAnswer, telegramChunks } from './telegram-output';
+import { telegramChunks, telegramReplyChunks } from './telegram-output';
+import type { TelegramFormattedChunk } from './telegram-markdown';
 import { resolveSkillInvocation } from '@lodex/skills';
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
@@ -50,12 +51,11 @@ type Inbox = {
   command?: Command;
   run?: { id: string; messageId: string; sessionId: string };
 };
-type Outbox = {
+type Outbox = TelegramFormattedChunk & {
   id: string;
   groupId?: string;
   epoch: number;
   chatId: number;
-  text: string;
   sessionId?: string | null;
   status: 'queued' | 'sending' | 'sent' | 'unknown' | 'failed';
   retryAt: number;
@@ -302,7 +302,7 @@ export class Telegram {
       return this.status();
     });
   }
-  private enqueue(text: string) {
+  private enqueue(output: string | TelegramFormattedChunk[]) {
     if (!this.state.owner) return;
     const pendingGroups = new Set(
       this.state.outbox
@@ -311,16 +311,20 @@ export class Telegram {
     );
     if (pendingGroups.size >= 64)
       throw new AppError('TELEGRAM_QUEUE', 'Telegram 발신 대기 한도에 도달했습니다.');
-    // Plain text only: model text cannot create Telegram markup or trigger URL previews.
+    // Persist each complete payload so retries and restarts retain its text/entity offsets.
     const groupId = crypto.randomUUID();
-    for (const part of telegramChunks(text, this.token))
+    const parts =
+      typeof output === 'string'
+        ? telegramChunks(output, this.token).map((text) => ({ text }))
+        : output;
+    for (const part of parts)
       this.state.outbox.push({
         id: crypto.randomUUID(),
         groupId,
         epoch: this.state.epoch,
         chatId: this.state.owner.chatId,
         sessionId: this.state.config.sessionId,
-        text: part,
+        ...part,
         status: 'queued',
         retryAt: 0,
       });
@@ -570,7 +574,11 @@ export class Telegram {
         }
         const message = session.messages.find((message) => message.id === item.run!.messageId);
         if (message?.status === 'streaming') continue;
-        this.enqueue(message ? telegramAnswer(message) : '대화가 변경되어 결과를 찾지 못했습니다.');
+        this.enqueue(
+          message
+            ? telegramReplyChunks(message, this.token)
+            : '대화가 변경되어 결과를 찾지 못했습니다.',
+        );
         item.status = 'done';
         await this.save();
         continue;
@@ -661,18 +669,15 @@ export class Telegram {
           if (text === '/status') {
             const approval = this.pendingApproval(session);
             const elicitation = this.pendingElicitation(session);
-            this.enqueue(
+            const prefix =
               session.title +
-                '\n' +
-                (session.run?.status ?? 'idle') +
-                (approval ? '\n승인 대기: ' + this.approvalSummary(approval) : '') +
-                (elicitation ? '\nMCP 입력 대기: ' + elicitation.elicitation!.message : '') +
-                '\n' +
-                (() => {
-                  const message = session.messages.filter((m) => m.role === 'assistant').at(-1);
-                  return message ? telegramAnswer(message) : '';
-                })(),
-            );
+              '\n' +
+              (session.run?.status ?? 'idle') +
+              (approval ? '\n승인 대기: ' + this.approvalSummary(approval) : '') +
+              (elicitation ? '\nMCP 입력 대기: ' + elicitation.elicitation!.message : '') +
+              '\n';
+            const message = session.messages.filter((m) => m.role === 'assistant').at(-1);
+            this.enqueue(message ? telegramReplyChunks(message, this.token, prefix) : prefix);
             item.status = 'done';
             await this.save();
             continue;
@@ -1018,6 +1023,7 @@ export class Telegram {
           {
             chat_id: item.chatId,
             text: item.text || '내용 없음',
+            ...(item.entities?.length ? { entities: item.entities } : {}),
             link_preview_options: { is_disabled: true },
           },
           signal,

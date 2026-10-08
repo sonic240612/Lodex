@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Message } from '@lodex/contracts';
-import { telegramAnswer, telegramChunks } from './telegram-output';
+import { telegramAnswer, telegramChunks, telegramReplyChunks } from './telegram-output';
 
 const message = (overrides: Partial<Message> = {}): Message => ({
   id: 'answer',
@@ -15,6 +15,37 @@ const message = (overrides: Partial<Message> = {}): Message => ({
 });
 
 describe('Telegram answer formatting', () => {
+  it('formats only the final answer and keeps status, operational prefix and errors literal', () => {
+    const reply = telegramReplyChunks(
+      message({
+        content: '**중간**\n**최종 🦔**',
+        finalResponseOffset: '**중간**\n'.length,
+        error: '**오류** C:\\some_path',
+      }),
+      null,
+      '**프로젝트**\n',
+    );
+    expect(reply).toEqual([
+      {
+        text: '**프로젝트**\n[complete]\n최종 🦔\n**오류** C:\\some_path',
+        entities: [{ type: 'bold', offset: '**프로젝트**\n[complete]\n'.length, length: 5 }],
+      },
+    ]);
+  });
+
+  it('redacts literal status metadata before calculating answer offsets', () => {
+    const reply = telegramReplyChunks(
+      message({ content: '**최종**', finalResponseOffset: 0, error: 'fixture_secret' }),
+      'fixture_secret',
+      'fixture_secret\n',
+    );
+    expect(reply).toEqual([
+      {
+        text: '[redacted]\n[complete]\n최종\n[redacted]',
+        entities: [{ type: 'bold', offset: '[redacted]\n[complete]\n'.length, length: 2 }],
+      },
+    ]);
+  });
   it('selects the final response and preserves older messages without offset metadata', () => {
     expect(telegramAnswer(message())).toBe('[complete]\n최종 답변입니다.');
     const legacy = message();

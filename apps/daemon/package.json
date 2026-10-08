@@ -4,14 +4,20 @@
   "version": "0.1.0",
   "type": "module",
   "dependencies": {
-    "@lodex/mcp": "0.1.0",
-    "@lodex/contracts": "0.1.0",
-    "@lodex/storage": "0.1.0",
-    "@lodex/providers": "0.1.0",
     "@lodex/context": "0.1.0",
-    "@lodex/tools": "0.1.0",
+    "@lodex/contracts": "0.1.0",
     "@lodex/local-runtime": "0.1.0",
+    "@lodex/mcp": "0.1.0",
+    "@lodex/providers": "0.1.0",
     "@lodex/skills": "0.1.0",
+    "@lodex/storage": "0.1.0",
+    "@lodex/tools": "0.1.0",
+    "remark-gfm": "4.0.1",
+    "remark-parse": "11.0.0",
+    "unified": "11.0.5",
     "zod": "4.6.2"
+  },
+  "devDependencies": {
+    "@types/mdast": "4.0.4"
   }
 }
