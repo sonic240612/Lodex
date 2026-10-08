@@ -19,13 +19,25 @@ import {
 } from '@lodex/contracts';
 import { z } from 'zod';
 
-const absolutePath = z.string().min(1).max(4096).refine(isAbsolute, '절대 경로가 필요합니다.');
+const absolutePath = z
+  .string()
+  .min(1)
+  .max(4096)
+  .refine(isAbsolute, '절대 경로가 필요합니다.')
+  .describe('Absolute host path.');
 const listSchema = z.strictObject({ path: absolutePath });
 const readSchema = z.strictObject({ path: absolutePath });
 const writeSchema = z.strictObject({
   path: absolutePath,
-  expectedHash: z.union([z.string().regex(/^[a-f0-9]{64}$/), z.null()]),
-  content: z.string().max(1_048_576),
+  expectedHash: z
+    .union([z.string().regex(/^[a-f0-9]{64}$/), z.null()])
+    .describe('Current sha256 from host read/write; null ONLY for nonexistent files.'),
+  content: z
+    .string()
+    .max(1_048_576)
+    .describe(
+      'COMPLETE UTF-8 content, preserving unrelated text and line endings. Not a patch. Empty clears.',
+    ),
   ...fusionFields,
 });
 
@@ -40,8 +52,7 @@ export const hostFileTools: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'host_list_files',
-      description:
-        'FULL ACCESS ONLY. List one absolute host directory, including locations outside the selected project. Returns at most 500 entries and does not recurse.',
+      description: 'FULL ACCESS ONLY. List an absolute host directory, at most 500 direct entries.',
       parameters: z.toJSONSchema(listSchema),
     },
   },
@@ -50,7 +61,7 @@ export const hostFileTools: ToolDefinition[] = [
     function: {
       name: 'host_read_file',
       description:
-        'FULL ACCESS ONLY. Read one UTF-8 host file by absolute path, including secret files and files outside the selected project. Returns a SHA-256 hash for safe later writes. Maximum 1 MiB.',
+        'FULL ACCESS ONLY. Read any UTF-8 host file, including secrets, with sha256. Maximum 1 MiB.',
       parameters: z.toJSONSchema(readSchema),
     },
   },
@@ -59,7 +70,7 @@ export const hostFileTools: ToolDefinition[] = [
     function: {
       name: 'host_write_file',
       description:
-        'FULL ACCESS BUILD ONLY. Atomically create or replace a UTF-8 host file by absolute path. Pass the SHA-256 returned by host_read_file for an existing file, or null only when creating a new file. Optional thenRun fuses an already-known host command with the write, without another model turn. Concurrent changes skip the command; a failed command keeps the file.',
+        'FULL ACCESS BUILD ONLY. Atomic whole-file write; first host_read_file. Creates parents. New-file example: {"path":"/absolute/new.txt","expectedHash":null,"content":"hello\\n"}. Use actual host path. thenRun runs a known host command; conflicts skip it, failures keep the file.',
       parameters: z.toJSONSchema(writeSchema),
     },
   },

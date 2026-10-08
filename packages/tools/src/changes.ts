@@ -2,6 +2,7 @@ import { lstat, open, link, unlink } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
+import { editFields, newFileContent } from './file-inputs';
 import { createTwoFilesPatch } from 'diff';
 import {
   AppError,
@@ -24,23 +25,21 @@ import {
 export const changeInputSchema = z.strictObject({
   files: z
     .array(
-      z.union([
+      z.discriminatedUnion('kind', [
         z.strictObject({
           kind: z.literal('edit'),
-          path: z.string().min(1).max(4096),
-          expectedHash: z.string().regex(/^[a-f0-9]{64}$/),
-          oldText: z.string().min(1),
-          newText: z.string(),
+          ...editFields,
         }),
         z.strictObject({
-          kind: z.literal('create'),
-          path: z.string().min(1).max(4096),
-          content: z.string(),
+          kind: z.literal('create').describe('New file only; existing empty files need edit.'),
+          path: z.string().min(1).max(4096).describe('New relative path; parent must exist.'),
+          content: newFileContent,
         }),
       ]),
     )
     .min(1)
-    .max(8),
+    .max(8)
+    .describe('Distinct paths; same-file edits must be sequential.'),
   ...fusionFields,
 });
 const isCreate = (file: FileChange): file is CreatedFileProposal =>

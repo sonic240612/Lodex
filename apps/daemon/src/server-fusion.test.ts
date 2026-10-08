@@ -346,6 +346,8 @@ describe('SoL-Pi Action Fusion daemon adaptation', () => {
       (result) => {
         expect(result.editStatus).toBe('applied');
         expect(result.validation.exitCode).toBe(0);
+        expect(result.nextEdit).toContain('Before another edit, read the affected file again');
+        expect(result).not.toHaveProperty('files');
       },
     );
     await app.send();
@@ -452,6 +454,7 @@ describe('SoL-Pi Action Fusion daemon adaptation', () => {
       edit,
       (result) => {
         expect(result.editStatus).toBe('rejected');
+        expect(result).not.toHaveProperty('files');
         expect(result.validationStatus).toBe('skipped');
       },
       { permission: 'auto', docker: true, network: 'bridge' },

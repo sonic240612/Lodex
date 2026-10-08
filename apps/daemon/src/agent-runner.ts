@@ -445,6 +445,8 @@ export async function runAgent(options: {
         output: execution.output,
         truncated: execution.truncated,
       },
+      nextEdit:
+        'Before another edit, read the affected file again: the command may have changed it.',
       message: passed
         ? `${THEN_RUN_SUCCEEDED} The approved changes were applied and their fused validation passed.`
         : `${THEN_RUN_FAILED} The approved changes were applied, but their fused validation failed. Inspect the output; do not revert unless requested.`,
@@ -1321,10 +1323,12 @@ export async function runAgent(options: {
       for (const [index, call] of calls.entries()) {
         signal.throwIfAborted();
         const card = cards.get(index)!;
+        let fusionRequested = false;
         if (['propose_edit', 'propose_changes', 'host_write_file'].includes(call.name)) {
           try {
             const input = JSON.parse(call.arguments);
-            if (input.thenRun || input.then_run) card.fusion = { status: 'pending' };
+            fusionRequested = !!(input?.thenRun || input?.then_run);
+            if (fusionRequested) card.fusion = { status: 'pending' };
           } catch {
             /* Dispatcher reports invalid input. */
           }
@@ -1522,6 +1526,12 @@ export async function runAgent(options: {
                               status: 'applied',
                               worktreeId: record.worktreeId,
                               paths,
+                              files: (changes ? changes.files : [edit!]).map((file) => ({
+                                path: file.path,
+                                sha256: file.afterHash,
+                              })),
+                              nextEdit:
+                                'Use files[].sha256 and updated content; reread after external changes.',
                               sourceProjectUnchanged: true,
                             });
                           }
@@ -2111,10 +2121,7 @@ export async function runAgent(options: {
             );
           } catch (error) {
             signal.throwIfAborted();
-            if (
-              !['propose_edit', 'propose_changes'].includes(call.name) ||
-              !(JSON.parse(call.arguments).thenRun || JSON.parse(call.arguments).then_run)
-            )
+            if (!['propose_edit', 'propose_changes'].includes(call.name) || !fusionRequested)
               throw error;
             result = JSON.stringify({
               error: error instanceof AppError ? error.code : 'FUSION_FAILED',
@@ -2125,7 +2132,7 @@ export async function runAgent(options: {
         if (
           ['propose_edit', 'propose_changes'].includes(call.name) &&
           !activityProposal(card) &&
-          (JSON.parse(call.arguments).thenRun || JSON.parse(call.arguments).then_run)
+          fusionRequested
         ) {
           const failure = JSON.parse(result);
           if (failure.error)
@@ -2235,6 +2242,18 @@ export async function runAgent(options: {
                   result = JSON.stringify({
                     status: decision.status,
                     editStatus: decision.status,
+                    ...(decision.status === 'applied'
+                      ? {
+                          files: ('files' in decision ? decision.files : [decision]).map(
+                            (file) => ({
+                              path: file.path,
+                              sha256: file.afterHash,
+                            }),
+                          ),
+                          nextEdit:
+                            'Use files[].sha256 and updated content; reread after external changes.',
+                        }
+                      : {}),
                     ...(thenRun ? { validationStatus: 'skipped' } : {}),
                     message:
                       decision.status === 'applied'

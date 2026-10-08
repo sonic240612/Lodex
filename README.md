@@ -104,6 +104,8 @@ OpenRouter requests retain their IDs and cost reservations across interruption. 
 
 Connect a local folder to create a project conversation. File tools stay inside the selected project except in Full Access. Missing project-root `.env` files can be created without exposing existing secret files in lower permission modes.
 
+Edits use exact text and file hashes. Read results identify partial content and line endings; applied edits return updated hashes for the next change. Empty files support insertion, and invalid edit inputs report the field or recovery step needed. Concurrent changes still require a fresh read.
+
 Path moves and deletions require a fresh content fingerprint. **Approve for me** handles ordinary folder creation and moves, while deletion still waits for review. Path operations never overwrite a destination, and deleted paths do not have automatic undo.
 
 Worktrees start from the current commit; uncommitted source changes remain in the original folder. Build subagents use separate worktrees and the parent conversation’s permissions and budgets. **Settings → Worktree → Review changes** compares against the current source and the base commit, merges disjoint text edits, and lets you resolve conflicts before applying. Apply changes from an idle source Build conversation. Stale files are rejected; the Git index and commits stay untouched. Reviews support up to eight UTF-8 files of 32 KiB each. Commit and cleanup remain manual.

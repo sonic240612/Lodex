@@ -108,6 +108,146 @@ afterEach(async () => {
   for (const close of cleanup.splice(0)) await close();
 });
 describe('authenticated daemon integration', () => {
+  it.each(['{"path":', 'null'])(
+    'returns malformed edit input to the model without failing the entire run (%s)',
+    async (argumentsJson) => {
+      const requests: InferenceRequest[] = [];
+      const app = await setup({
+        listModels: async () => [],
+        capabilities: async () => ({ tools: true, streaming: true }),
+        async *generate(request) {
+          requests.push(structuredClone(request));
+          if (requests.length === 1) {
+            yield {
+              type: 'tool_call_delta',
+              index: 0,
+              id: 'invalid-edit',
+              name: 'propose_edit',
+              arguments: argumentsJson,
+            };
+            yield { type: 'finished', reason: 'tool_calls' };
+          } else {
+            yield { type: 'text_delta', text: 'No edit was applied.' };
+            yield { type: 'finished', reason: 'stop' };
+          }
+        },
+      });
+      await writeFile(join(app.dir, 'value.txt'), 'untouched');
+      const { project } = await app
+        .request('/v1/projects', { method: 'POST', body: JSON.stringify({ path: app.dir }) })
+        .then((response) => response.json());
+      const session = await app.create(
+        { provider: 'llama-server', model: 'fixture', eco: false, contextBudgetTokens: 65536 },
+        project.id,
+      );
+      await app.command(
+        makeCommand({
+          type: 'send_message',
+          sessionId: session.id,
+          expectedVersion: session.version,
+          content: 'Edit the file.',
+        }),
+      );
+      await expect
+        .poll(async () => (await app.store.session(session.id)).run?.status)
+        .toBe('completed');
+      expect(await readFile(join(app.dir, 'value.txt'), 'utf8')).toBe('untouched');
+      expect(requests).toHaveLength(2);
+      const feedback = requests[1]!.messages.at(-1)!;
+      expect(feedback.isError).toBe(true);
+      expect(JSON.parse(feedback.content).error).toBe('TOOL_ARGUMENTS');
+    },
+  );
+
+  it.each(['propose_edit', 'propose_changes'])(
+    'supplies current hashes for consecutive successful edits without rereading (%s)',
+    async (toolName) => {
+      const requests: InferenceRequest[] = [];
+      const app = await setup({
+        listModels: async () => [],
+        capabilities: async () => ({ tools: true, streaming: true }),
+        async *generate(request) {
+          requests.push(structuredClone(request));
+          const round = requests.length;
+          if (round === 4) {
+            yield { type: 'text_delta', text: 'Two edits applied.' };
+            yield { type: 'finished', reason: 'stop' };
+            return;
+          }
+          const previous = round > 1 ? JSON.parse(request.messages.at(-1)!.content) : null;
+          const edit =
+            round > 1
+              ? {
+                  path: 'value.txt',
+                  expectedHash: round === 2 ? previous.sha256 : previous.files[0].sha256,
+                  oldText: round === 2 ? previous.lines[0].text : 'second',
+                  newText: round === 2 ? 'second' : 'third',
+                }
+              : undefined;
+          yield {
+            type: 'tool_call_delta',
+            index: 0,
+            id: `edit-${round}`,
+            name: round === 1 ? 'read_file' : toolName,
+            arguments: JSON.stringify(
+              round === 1
+                ? { path: 'value.txt' }
+                : toolName === 'propose_changes'
+                  ? { files: [{ kind: 'edit', ...edit }] }
+                  : edit,
+            ),
+          };
+          yield { type: 'finished', reason: 'tool_calls' };
+        },
+      });
+      await writeFile(join(app.dir, 'value.txt'), 'first\r\n');
+      const { project } = await app
+        .request('/v1/projects', { method: 'POST', body: JSON.stringify({ path: app.dir }) })
+        .then((response) => response.json());
+      let session = await app.create(
+        { provider: 'llama-server', model: 'fixture', eco: false, contextBudgetTokens: 65536 },
+        project.id,
+      );
+      const permission = await app.command(
+        makeCommand({
+          type: 'set_permission_mode',
+          sessionId: session.id,
+          expectedVersion: session.version,
+          mode: 'auto',
+        }),
+      );
+      session = ((await permission.json()) as CommandResult).session;
+      await app.command(
+        makeCommand({
+          type: 'send_message',
+          sessionId: session.id,
+          expectedVersion: session.version,
+          content: 'Make two sequential edits.',
+        }),
+      );
+      await expect
+        .poll(async () => (await app.store.session(session.id)).run?.status)
+        .toBe('completed');
+      expect(await readFile(join(app.dir, 'value.txt'), 'utf8')).toBe('third\r\n');
+      expect(requests).toHaveLength(4);
+      expect(requests[0]?.messages[0]?.content).toContain(
+        'Apply dependent edits to the same file sequentially',
+      );
+      for (const [index, content] of [
+        [2, 'second\r\n'],
+        [3, 'third\r\n'],
+      ] as const) {
+        const result = JSON.parse(requests[index]!.messages.at(-1)!.content);
+        expect(result).toMatchObject({
+          status: 'applied',
+          files: [
+            { path: 'value.txt', sha256: createHash('sha256').update(content).digest('hex') },
+          ],
+        });
+      }
+    },
+  );
+
   it.each(['recover', 'mixed', 'plan', 'repeat'] as const)(
     'returns unavailable tools to the model without executing or losing sibling results (%s)',
     async (variant) => {
@@ -829,8 +969,11 @@ describe('authenticated daemon integration', () => {
       ).status,
     ).toBe(200);
     await expect
-      .poll(async () => (await app.store.session(session.id)).run?.status)
-      .toBe('completed');
+      .poll(async () => {
+        const current = await app.store.session(session.id);
+        return { status: current.run?.status, error: current.messages.at(-1)?.error };
+      })
+      .toEqual({ status: 'completed', error: null });
     const finished = await app.store.session(session.id);
     expect(requests).toHaveLength(2);
     expect(finished.messages.at(-1)?.runContextCompaction).toBeDefined();
@@ -1901,9 +2044,10 @@ describe('authenticated daemon integration', () => {
         limits: autopilotLimitsSchema.parse({}),
       }),
     );
-    await vi.waitFor(async () =>
-      expect((await app.store.session(session.id)).autopilot?.status).toBe('completed'),
-    );
+    await vi.waitFor(async () => {
+      const current = await app.store.session(session.id);
+      expect(current.autopilot?.status, current.autopilot?.reason).toBe('completed');
+    });
     expect(commands).toEqual(['task-check', 'final-check']);
     expect(
       (await app.store.session(session.id)).messages

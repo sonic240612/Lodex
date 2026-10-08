@@ -14,6 +14,7 @@ import {
 import { createTwoFilesPatch } from 'diff';
 import { proposeChanges, changeInputSchema } from './changes';
 import { pathOperationSchemas, runPathOperation } from './path-operations';
+import { editFields } from './file-inputs';
 export { proposeChanges, checkChanges, writeChanges } from './changes';
 export {
   type InputControl,
@@ -62,10 +63,8 @@ const schemas = {
   ...pathOperationSchemas,
   propose_changes: changeInputSchema,
   propose_edit: z.strictObject({
-    path: pathSchema,
-    expectedHash: z.string().regex(/^[a-f0-9]{64}$/),
-    oldText: z.string().min(1),
-    newText: z.string(),
+    ...editFields,
+    path: editFields.path.default('.'),
     ...fusionFields,
   }),
   list_files: z.strictObject({ path: pathSchema }),
@@ -101,27 +100,25 @@ const schemas = {
 };
 const descriptions: Record<keyof typeof schemas, string> = {
   inspect_path:
-    'Inspect one existing project file or directory before move_path or delete_path. Returns a content fingerprint, kind, bounded entry count, and byte count. Reads at most 2,000 entries and 32 MiB. Secret, generated, linked, and project-root paths are excluded.',
-  make_directory:
-    'Create one directory inside an existing project directory after permission review. Does not create missing parents and never overwrites an existing path.',
+    'Inspect before move/delete; returns fingerprint, kind and counts (max 2,000 entries/32 MiB). Excludes secret, generated, linked and project-root paths.',
+  make_directory: 'Create one reviewed project directory. Parent must exist; never overwrites.',
   move_path:
-    'Move one reviewed file or directory inside the project. First call inspect_path and pass its exact expectedFingerprint. The destination parent must exist and the destination must not exist. Never overwrites.',
+    'Reviewed project move using inspect_path fingerprint. Destination must not exist; parent must exist. Never overwrites.',
   delete_path:
-    'Delete one reviewed project file or directory. First call inspect_path and pass its exact expectedFingerprint. Non-empty directories require recursive=true. This is destructive and always requires user review unless Full Access is active.',
+    'Delete using inspect_path fingerprint. Nonempty directories need recursive=true. Destructive: requires user review except in Full Access.',
   propose_changes:
-    'Propose a reviewed set of 1-8 UTF-8 file changes. kind edit requires sha256 from a prior read_file (Plan-mode reads can be reused), one exact oldText and newText; runtime hash checks reject changed files. kind create requires a nonexistent path inside an EXISTING directory and content. A missing project-root .env or .env.* file may be created this way, but existing dotenv files cannot be read or edited. Paths must be distinct. Optional thenRun fuses an already-known follow-up command: Docker when enabled, otherwise host shell only in Full Access. Failed checks keep the edits; conflicts skip the command. Text arguments have no per-field character cap; resulting UTF-8 files must fit the 1 MiB file limit. Never delete and recreate an existing file to bypass an edit error. NEVER writes before approval. No directories or deletion.',
+    'Reviewed UTF-8 changes, at most 1 MiB/file; no text-field cap. edit follows propose_edit. Create example: {"files":[{"kind":"create","path":"src/new.ts","content":"hello\\n"}]}. Missing parents: make_directory, one level at a time. Root dotenv creation allowed; existing dotenv blocked. Optional thenRun validates after write; failure keeps edits. No deletion.',
   propose_edit:
-    'Propose one exact text replacement in an existing UTF-8 project file. Use sha256 from a prior read_file as expectedHash, including a Plan-mode read in this conversation; reuse saved evidence instead of reading again solely because the mode changed. The runtime rechecks the file hash and rejects changed files. oldText must match exactly once, without line numbers. Preserves CRLF. Optional thenRun fuses an already-known follow-up command: Docker when enabled, otherwise host shell only in Full Access. Failed checks keep the edit; conflicts skip the command. Produces a diff for review and NEVER writes before approval. No creation or deletion.',
-  list_files:
-    'List up to 200 files/directories directly inside a project-relative directory. Start with path ".". No file content is read.',
+    'Reviewed exact replacement. Example: expectedHash=read.sha256, oldText="n=1", newText="n=2". Add context around repeated anchors. Reuse current Plan reads. Preserves CRLF; mixed endings need single-line anchors. New files: propose_changes. Optional thenRun validates after write; failure keeps edits.',
+  list_files: 'List at most 200 direct project-directory entries. Start with path ".".',
   find_files:
-    'Find project files recursively with a bounded glob such as "**/*.ts", "src/**/test?.tsx", or "README*". Returns at most 500 project-relative paths. Generated, secret, and linked paths are excluded. No file content is read.',
+    'Find project-relative paths by glob, e.g. "**/*.ts" (max 500). Excludes generated, secret and linked paths.',
   read_file:
-    'Read UTF-8 text from a project-relative file, with line numbers. Use startLine and maxLines for a bounded range. No writes.',
+    'Read UTF-8 project lines and whole-file sha256. lines[].text excludes numbering. bytes=0: empty; complete=false: partial; lineEnding: lf/crlf/mixed/none.',
   read_many_files:
-    'Read bounded line ranges from 1-20 UTF-8 project files in one call. Returns each file SHA-256 and numbered lines, with a shared output budget. Use this instead of repeated read_file calls when the needed paths are already known. Secret, generated, linked, binary, and oversized files remain blocked. No writes.',
+    'Batch read_file for known paths with a shared budget. Each file has its own hash. Check skipped/truncated; request missing ranges separately.',
   search_text:
-    'Search for a literal string in project UTF-8 files. caseSensitive defaults to true. Returns bounded line matches. Not a regex. Generated directories and common secret files are excluded.',
+    'Literal UTF-8 project search, not regex; returns bounded line matches. Excludes generated and secret files.',
 };
 export const projectTools: ToolDefinition[] = Object.entries(schemas).map(([name, schema]) => ({
   type: 'function',
@@ -270,6 +267,15 @@ function selectLineRange(text: string, startLine: number, maxLines: number, maxB
     lines,
     bytes,
     truncated: startLine - 1 + lines.length < all.length,
+  };
+}
+function readMetadata(text: string, startLine: number, truncated: boolean) {
+  const crlf = text.includes('\r\n');
+  const lf = /(?<!\r)\n/.test(text);
+  return {
+    bytes: Buffer.byteLength(text),
+    lineEnding: crlf ? (lf ? 'mixed' : 'crlf') : lf ? 'lf' : 'none',
+    complete: startLine === 1 && !truncated,
   };
 }
 function replaceOnce(text: string, oldText: string, newText: string): string {
@@ -603,6 +609,7 @@ export async function runProjectTool(
       return JSON.stringify({
         path: args.path,
         sha256: createHash('sha256').update(text).digest('hex'),
+        ...readMetadata(text, args.startLine, selected.truncated),
         totalLines: selected.totalLines,
         lines: selected.lines,
         truncated: selected.truncated,
@@ -613,6 +620,9 @@ export async function runProjectTool(
       const files: {
         path: string;
         sha256: string;
+        bytes: number;
+        lineEnding: string;
+        complete: boolean;
         totalLines: number;
         lines: { line: number; text: string }[];
         truncated: boolean;
@@ -635,6 +645,7 @@ export async function runProjectTool(
         const file = {
           path: request.path,
           sha256: createHash('sha256').update(text).digest('hex'),
+          ...readMetadata(text, request.startLine, selected.truncated),
           totalLines: selected.totalLines,
           lines: selected.lines,
           truncated: selected.truncated,
@@ -700,17 +711,50 @@ export async function runProjectTool(
     return JSON.stringify({ matches, truncated, skipped, visited });
   } catch (error) {
     signal.throwIfAborted();
+    const code =
+      error instanceof AppError
+        ? error.code
+        : error instanceof z.ZodError
+          ? 'TOOL_ARGUMENTS'
+          : 'FILE_ERROR';
+    const recovery: Record<string, string> = {
+      TOOL_ARGUMENTS:
+        'Use the provided tool schema and correct the indicated fields. Send one complete JSON object, not a patch or Markdown.',
+      EDIT_MATCH:
+        'Read the relevant range and copy source text exactly. Include more surrounding lines to make the match unique. Empty oldText is allowed only for an empty existing file. Do not retry the same unmatched text or delete/recreate the file.',
+      EDIT_CONFLICT:
+        'Read the current file again and rebuild the edit with its current sha256 and source text. Do not reuse a stale hash or overwrite intervening changes.',
+      EDIT_EMPTY:
+        'The requested replacement changes nothing. Check whether the desired state already exists and skip this edit if so.',
+      CHANGE_DUPLICATE:
+        'Use one change per file path. Combine edits in one unique block, or apply sequentially using each confirmed new hash.',
+      CREATE_EXISTS:
+        'This path already exists, even if empty. Read it and use kind edit/propose_edit with its current hash; never delete it to retry create.',
+      CREATE_PARENT:
+        'Check the parent with list_files and create missing directories with make_directory, one level at a time, before creating the file.',
+      DIFF_LIMIT:
+        'Split into smaller exact replacements. Keep the original file and use a current hash for each applied edit.',
+      PATH_DENIED:
+        'Stay within the paths permitted by this tool. Do not retry by changing separators or disguising the path.',
+      FILE_ERROR:
+        'Check the path and parent directory with list_files/find_files, then read the intended existing file. For a new file use propose_changes kind create after its parents exist.',
+    };
     return JSON.stringify({
-      error:
-        error instanceof AppError
-          ? error.code
-          : error instanceof z.ZodError
-            ? 'TOOL_ARGUMENTS'
-            : 'FILE_ERROR',
+      error: code,
       message:
         error instanceof AppError
           ? error.message
           : '인자·파일 경로·텍스트 형식·접근 권한을 확인하세요.',
+      ...(recovery[code] ? { recovery: recovery[code] } : {}),
+      ...(error instanceof z.ZodError
+        ? {
+            issues: error.issues.slice(0, 8).map((issue) => ({
+              path: issue.path.join('.'),
+              code: issue.code,
+              message: issue.message.slice(0, 240),
+            })),
+          }
+        : {}),
     });
   }
 }

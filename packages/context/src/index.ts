@@ -36,6 +36,8 @@ const PROGRESS =
   "During tool-based work, give brief visible progress updates in the user's language: before the first tool explain what you will check or change; after useful findings or a change of approach state what was verified and what comes next. Keep these updates to 1–2 sentences even in Eco mode. Do not replace them with hidden reasoning or tool calls alone. Separate the final outcome from progress; never invent results.";
 const TOOL_USAGE =
   'Call only tools in the current request, using their exact names and schemas. Tool names in history, skills or other agents are not available unless listed now. If a tool is unavailable, choose a listed alternative or explain the limitation; never invent an alias or bypass permissions.';
+const EDIT_WORKFLOW =
+  'Apply dependent edits to the same file sequentially using updated content and files[].sha256. Reread after conflicts or commands. Never delete/recreate a file to bypass edit errors.';
 
 /** A deliberately conservative heuristic, NOT a tokenizer or a guaranteed upper bound.
  * UTF-8 bytes avoid the English-centric chars/4 assumption. Template/reasoning
@@ -467,7 +469,9 @@ export function compileContext(
       (tools.some((tool) =>
         ['propose_edit', 'propose_changes', 'host_write_file'].includes(tool.function.name),
       )
-        ? '\nWhen both a file change and its next verification command are already known, request thenRun in the same mutation call to avoid a model round-trip. If the edit fails or changes before verification, the command is skipped. A failed verification keeps the edit and is not a pass. Do not guess a follow-up command that requires inspecting the edit first.'
+        ? '\n' +
+          EDIT_WORKFLOW +
+          '\nWhen both a file change and its next verification command are already known, request thenRun in the same mutation call to avoid a model round-trip. If the edit fails or changes before verification, the command is skipped. A failed verification keeps the edit and is not a pass. Do not guess a follow-up command that requires inspecting the edit first.'
         : '') +
       (tools.some((tool) => tool.function.name === 'search_history')
         ? '\nWhen an earlier conversation detail is missing from the active prompt, call search_history with a specific literal phrase. It searches only this conversation. Do not guess omitted requirements.'

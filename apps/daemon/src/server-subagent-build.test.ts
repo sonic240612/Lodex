@@ -222,6 +222,12 @@ it('builds and verifies in a worktree, audits child commands, then reviews and m
     projectId: child.projectId,
     status: 'completed',
   });
+  const editResult = activities.find((activity) => activity.label.endsWith('propose_edit'));
+  expect(editResult).toBeDefined();
+  expect(JSON.parse(editResult!.text)).toMatchObject({
+    status: 'applied',
+    files: [{ path: 'file.txt', sha256: createHash('sha256').update('after\n').digest('hex') }],
+  });
   expect(
     activities.find((activity) => activity.label === 'merge_worktree')?.approval,
   ).toMatchObject({ kind: 'file', status: 'approved', decidedBy: 'full_access' });
