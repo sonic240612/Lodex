@@ -1,3 +1,4 @@
+import { t as localize } from './i18n';
 import { SettingsSurface } from './SettingsSurface';
 import { useEffect, useRef, useState } from 'react';
 import type { Session } from '@lodex/contracts';
@@ -89,7 +90,7 @@ export function SkillManager({
     const skill = skills.find((entry) => entry.id === selection.id);
     return (
       !skill ||
-      !skill.invocation.model ||
+      (!skill.invocation.model && !skill.invocation.user) ||
       !supportsCurrentPlatform(skill) ||
       skill.revision !== selection.revision
     );
@@ -186,16 +187,18 @@ export function SkillManager({
       aria-busy={busy}
     >
       <div className="dialog-header">
-        <h2 id="skill-manager-title">스킬</h2>
-        <button className="icon-button" aria-label="스킬 관리 닫기" onClick={onClose}>
+        <h2 id="skill-manager-title">{localize('스킬')}</h2>
+        <button className="icon-button" aria-label={localize('스킬 관리 닫기')} onClick={onClose}>
           <Icon name="close" />
         </button>
       </div>
       <div className="settings-body">
         {!nativeDesktop && (
-          <p className="demo-notice">스킬 등록과 대화 연결은 데스크톱 앱에서 사용할 수 있습니다.</p>
+          <p className="demo-notice">
+            {localize('스킬 등록과 대화 연결은 데스크톱 앱에서 사용할 수 있습니다.')}
+          </p>
         )}
-        {!loaded && <p role="status">스킬 목록을 불러오는 중…</p>}
+        {!loaded && <p role="status">{localize('스킬 목록을 불러오는 중…')}</p>}
         {connectionError && (
           <p className="form-error" role="alert">
             {connectionError}
@@ -203,17 +206,21 @@ export function SkillManager({
         )}
         <section aria-labelledby="skill-selection-title">
           <h3 id="skill-selection-title">
-            {session ? '이 대화에서 사용할 스킬' : '새 대화에서 사용할 스킬'} · {selected.length}/16
+            {session ? localize('이 대화에서 사용할 스킬') : localize('새 대화에서 사용할 스킬')} ·{' '}
+            {selected.length}/16
           </h3>
           <p>
-            선택한 스킬의 이름과 설명을 모델에 전달합니다. 지침 본문과 리소스는 모델이 필요할 때
-            읽습니다.
+            {localize(
+              '자동 호출이 허용된 스킬은 이름과 설명을 모델에 전달하며 필요할 때 본문을 읽습니다. 직접 실행하려면 채팅에 /skill 이름 인자 또는 /스킬이름 인자를 입력하세요.',
+            )}
           </p>
-          <p>선택을 해제해도 이전 대화에서 읽은 스킬 내용은 남습니다.</p>
-          {running && <p role="status">대화 실행이 끝나면 스킬 선택을 변경할 수 있습니다.</p>}
+          <p>{localize('선택을 해제해도 이전 대화에서 읽은 스킬 내용은 남습니다.')}</p>
+          {running && (
+            <p role="status">{localize('대화 실행이 끝나면 스킬 선택을 변경할 수 있습니다.')}</p>
+          )}
           {sessionConflict && (
             <div role="status" className="skill-conflict">
-              <p>대화가 변경되었습니다. 저장된 선택을 다시 불러온 뒤 편집하세요.</p>
+              <p>{localize('대화가 변경되었습니다. 저장된 선택을 다시 불러온 뒤 편집하세요.')}</p>
               <button
                 type="button"
                 disabled={busy || running}
@@ -224,32 +231,35 @@ export function SkillManager({
                   setError('');
                 }}
               >
-                저장된 선택 불러오기
+                {localize('저장된 선택 불러오기')}
               </button>
             </div>
           )}
           <fieldset disabled={busy || running || unavailable}>
             {selected.length > 0 && (
-              <ul className="skill-selection-list" aria-label="선택한 스킬">
+              <ul className="skill-selection-list" aria-label={localize('선택한 스킬')}>
                 {selected.map((selection) => {
                   const skill = skills.find((entry) => entry.id === selection.id);
                   const stale = skill?.revision !== selection.revision;
                   return (
                     <li key={selection.id}>
                       <span>
-                        {skill?.name ?? '등록이 제거된 스킬'}
-                        {stale && <small> · 다시 선택 필요</small>}
+                        {skill?.name ?? localize('등록이 제거된 스킬')}
+                        {stale && <small>{localize(' · 다시 선택 필요')}</small>}
                       </span>
                       <button
                         type="button"
-                        aria-label={`${skill?.name ?? '제거된 스킬'} 선택 해제`}
+                        aria-label={localize(
+                          '{0} 선택 해제',
+                          skill?.name ?? localize('제거된 스킬'),
+                        )}
                         onClick={() =>
                           setSelected((current) =>
                             current.filter((entry) => entry.id !== selection.id),
                           )
                         }
                       >
-                        선택 해제
+                        {localize('선택 해제')}
                       </button>
                     </li>
                   );
@@ -264,14 +274,17 @@ export function SkillManager({
                   onChange={(event) => setConsent(event.target.checked)}
                 />
                 <span>
-                  선택한 스킬의 이름·설명·모델이 읽는 지침과 리소스를 OpenRouter 및 선택한 모델
-                  제공자에게 전송하는 데 동의합니다. 이전 대화에 남은 스킬 내용도 포함합니다.
+                  {localize(
+                    '선택한 스킬의 이름·설명·모델이 읽는 지침과 리소스를 OpenRouter 및 선택한 모델 제공자에게 전송하는 데 동의합니다. 이전 대화에 남은 스킬 내용도 포함합니다.',
+                  )}
                 </span>
               </label>
             )}
             {invalidSelection && (
               <p className="form-error">
-                변경되거나 사용할 수 없는 스킬을 선택 해제하거나 최신 등록 정보로 다시 선택하세요.
+                {localize(
+                  '변경되거나 사용할 수 없는 스킬을 선택 해제하거나 최신 등록 정보로 다시 선택하세요.',
+                )}
               </p>
             )}
             <button
@@ -293,15 +306,20 @@ export function SkillManager({
                 }, false)
               }
             >
-              {busy ? '처리 중…' : session ? '대화에 적용' : '선택한 스킬로 새 대화'}
+              {busy
+                ? localize('처리 중…')
+                : session
+                  ? localize('대화에 적용')
+                  : localize('선택한 스킬로 새 대화')}
             </button>
           </fieldset>
         </section>
         <section aria-labelledby="skill-discovery-title">
-          <h3 id="skill-discovery-title">기본 위치에서 찾기</h3>
+          <h3 id="skill-discovery-title">{localize('기본 위치에서 찾기')}</h3>
           <p>
-            Codex·Claude Code·pi·OpenCode·OpenClaw·Hermes와 Agent Skills의 알려진 사용자 폴더를
-            확인합니다. 프로젝트가 선택되어 있으면 프로젝트 전용 폴더도 함께 확인합니다.
+            {localize(
+              'Codex·Claude Code·pi·OpenCode·OpenClaw·Hermes와 Agent Skills의 알려진 사용자 폴더를 확인합니다. 프로젝트가 선택되어 있으면 프로젝트 전용 폴더도 함께 확인합니다.',
+            )}
           </p>
           <button
             type="button"
@@ -313,17 +331,17 @@ export function SkillManager({
                   setDiscovered(next);
                   setStatus(
                     next.length
-                      ? `${next.length}개의 스킬 폴더를 찾았습니다.`
-                      : '알려진 기본 위치에서 스킬을 찾지 못했습니다.',
+                      ? localize('{0}개의 스킬 폴더를 찾았습니다.', next.length)
+                      : localize('알려진 기본 위치에서 스킬을 찾지 못했습니다.'),
                   );
                 }
               }, false)
             }
           >
-            기본 위치 검색
+            {localize('기본 위치 검색')}
           </button>
           {discovered && discovered.length > 0 && (
-            <ul className="skill-discovery-list" aria-label="발견한 스킬 폴더">
+            <ul className="skill-discovery-list" aria-label={localize('발견한 스킬 폴더')}>
               {discovered.map((candidate) => {
                 const registered = skills.some((skill) =>
                   samePath(skill.source.rootPath, candidate.path),
@@ -334,7 +352,7 @@ export function SkillManager({
                       <strong>{candidate.path.split(/[\\/]/).at(-1)}</strong>
                       <small>
                         {dialectNames[candidate.dialect]} ·{' '}
-                        {candidate.scope === 'project' ? '프로젝트' : '사용자'}
+                        {candidate.scope === 'project' ? localize('프로젝트') : localize('사용자')}
                       </small>
                       <span className="skill-source">{candidate.path}</span>
                     </span>
@@ -349,12 +367,15 @@ export function SkillManager({
                           });
                           if (mounted.current)
                             setStatus(
-                              `${candidate.source} 스킬을 등록했습니다. 사용할 대화에서 선택하세요.`,
+                              localize(
+                                '{0} 스킬을 등록했습니다. 사용할 대화에서 선택하세요.',
+                                candidate.source,
+                              ),
                             );
                         })
                       }
                     >
-                      {registered ? '등록됨' : '등록'}
+                      {registered ? localize('등록됨') : localize('등록')}
                     </button>
                   </li>
                 );
@@ -362,10 +383,10 @@ export function SkillManager({
             </ul>
           )}
         </section>
-        <section className="skill-catalog" aria-label="등록한 스킬">
-          <h3>등록한 스킬</h3>
+        <section className="skill-catalog" aria-label={localize('등록한 스킬')}>
+          <h3>{localize('등록한 스킬')}</h3>
           {loaded && skills.length === 0 && (
-            <p>등록한 스킬이 없습니다. 아래에서 SKILL.md가 있는 폴더를 선택하세요.</p>
+            <p>{localize('등록한 스킬이 없습니다. 아래에서 SKILL.md가 있는 폴더를 선택하세요.')}</p>
           )}
           {skills.map((skill) => {
             const selection = selected.find((entry) => entry.id === skill.id);
@@ -381,7 +402,7 @@ export function SkillManager({
                       unavailable ||
                       busy ||
                       running ||
-                      !skill.invocation.model ||
+                      (!skill.invocation.model && !skill.invocation.user) ||
                       incompatible ||
                       (!selection && selected.length >= 16)
                     }
@@ -391,54 +412,74 @@ export function SkillManager({
                 </label>
                 <p>{skill.description}</p>
                 <small>
-                  {dialectNames[skill.dialect]} · 리소스 {skill.files.length}개
+                  {dialectNames[skill.dialect]}
+                  {localize(' · 리소스 ')}
+                  {skill.files.length}
+                  {localize('개')}
                 </small>
                 <p className="skill-source">{skill.source.rootPath}</p>
                 {!skill.invocation.model && (
                   <p>
-                    모델 호출이 금지된 스킬입니다. 직접 첨부 기능은 아직 지원하지 않아 선택할 수
-                    없습니다.
+                    {skill.invocation.user
+                      ? localize(
+                          '직접 호출 전용입니다. 선택한 뒤 /skill {0} 인자로 실행하세요.',
+                          skill.name,
+                        )
+                      : localize('모델·사용자 호출이 모두 금지된 스킬입니다.')}
+                  </p>
+                )}
+                {!skill.invocation.user && skill.invocation.model && (
+                  <p>
+                    {localize('모델의 자동 호출만 허용하며 슬래시 명령에는 표시하지 않습니다.')}
                   </p>
                 )}
                 {incompatible && (
-                  <p>현재 운영체제를 지원하지 않는 스킬이므로 이 대화에서 선택할 수 없습니다.</p>
+                  <p>
+                    {localize(
+                      '현재 운영체제를 지원하지 않는 스킬이므로 이 대화에서 선택할 수 없습니다.',
+                    )}
+                  </p>
                 )}
-                {stale && skill.invocation.model && (
+                {stale && (skill.invocation.model || skill.invocation.user) && (
                   <div className="skill-conflict">
-                    <p>등록 정보가 변경되었습니다. 아래 정보를 검토한 뒤 새 버전을 선택하세요.</p>
+                    <p>
+                      {localize(
+                        '등록 정보가 변경되었습니다. 아래 정보를 검토한 뒤 새 버전을 선택하세요.',
+                      )}
+                    </p>
                     <button
                       type="button"
                       disabled={unavailable || busy || running}
                       onClick={() => choose(skill, true)}
                     >
-                      새 버전 선택
+                      {localize('새 버전 선택')}
                     </button>
                   </div>
                 )}
                 <details>
-                  <summary>등록 정보·호환성</summary>
+                  <summary>{localize('등록 정보·호환성')}</summary>
                   <dl>
                     {skill.license && (
                       <>
-                        <dt>라이선스</dt>
+                        <dt>{localize('라이선스')}</dt>
                         <dd>{skill.license}</dd>
                       </>
                     )}
                     {skill.compatibility && (
                       <>
-                        <dt>호환성</dt>
+                        <dt>{localize('호환성')}</dt>
                         <dd>{skill.compatibility}</dd>
                       </>
                     )}
                     {skill.platforms?.length && (
                       <>
-                        <dt>지원 운영체제</dt>
+                        <dt>{localize('지원 운영체제')}</dt>
                         <dd>{skill.platforms.join(', ')}</dd>
                       </>
                     )}
-                    <dt>확인 시각</dt>
+                    <dt>{localize('확인 시각')}</dt>
                     <dd>{new Date(skill.inspectedAt).toLocaleString()}</dd>
-                    <dt>등록 버전</dt>
+                    <dt>{localize('등록 버전')}</dt>
                     <dd className="skill-revision">{skill.revision}</dd>
                   </dl>
                   {Object.entries(skill.metadata).length > 0 && (
@@ -451,22 +492,23 @@ export function SkillManager({
                       ))}
                     </dl>
                   )}
-                  <h4>의존성</h4>
+                  <h4>{localize('의존성')}</h4>
                   {skill.dependencies.length ? (
                     <ul>
                       {skill.dependencies.map((dependency, index) => (
                         <li key={index}>
                           {dependency.type}: {dependency.value}
-                          {dependency.transport && ` · ${dependency.transport}`} · 연결 확인 안 됨
+                          {dependency.transport && ` · ${dependency.transport}`}
+                          {localize(' · 연결 확인 안 됨')}
                         </li>
                       ))}
                     </ul>
                   ) : (
-                    <p>선언된 의존성 없음</p>
+                    <p>{localize('선언된 의존성 없음')}</p>
                   )}
                   {skill.diagnostics.length > 0 && (
                     <>
-                      <h4>가져오기 안내</h4>
+                      <h4>{localize('가져오기 안내')}</h4>
                       <ul>
                         {skill.diagnostics.map((diagnostic, index) => (
                           <li key={index}>
@@ -477,7 +519,7 @@ export function SkillManager({
                       </ul>
                     </>
                   )}
-                  <p>등록은 스크립트를 실행하거나 의존성을 설치하지 않습니다.</p>
+                  <p>{localize('등록은 스크립트를 실행하거나 의존성을 설치하지 않습니다.')}</p>
                 </details>
                 <div className="edit-actions">
                   <button
@@ -485,7 +527,7 @@ export function SkillManager({
                     disabled={unavailable || busy}
                     onClick={() => editRegistration(skill)}
                   >
-                    등록 설정 편집
+                    {localize('등록 설정 편집')}
                   </button>
                   <button
                     type="button"
@@ -500,12 +542,14 @@ export function SkillManager({
                         });
                         if (mounted.current)
                           setStatus(
-                            '폴더를 다시 확인했습니다. 변경된 스킬은 새 버전으로 선택하세요.',
+                            localize(
+                              '폴더를 다시 확인했습니다. 변경된 스킬은 새 버전으로 선택하세요.',
+                            ),
                           );
                       })
                     }
                   >
-                    폴더 다시 확인
+                    {localize('폴더 다시 확인')}
                   </button>
                   <button
                     className="danger-button"
@@ -516,12 +560,14 @@ export function SkillManager({
                         await removeSkill(skill.id, skill.revision);
                         if (mounted.current) {
                           if (registration.id === skill.id) setRegistration(blank());
-                          setStatus('등록 목록에서 제거했습니다. 폴더와 파일은 그대로 있습니다.');
+                          setStatus(
+                            localize('등록 목록에서 제거했습니다. 폴더와 파일은 그대로 있습니다.'),
+                          );
                         }
                       })
                     }
                   >
-                    목록에서 제거
+                    {localize('목록에서 제거')}
                   </button>
                 </div>
               </article>
@@ -536,23 +582,27 @@ export function SkillManager({
               await registerSkill({ ...registration, path: registration.path.trim() });
               if (mounted.current) {
                 setRegistration(blank());
-                setStatus('등록했습니다. 위 목록에서 이 대화에 사용할 스킬을 선택하세요.');
+                setStatus(
+                  localize('등록했습니다. 위 목록에서 이 대화에 사용할 스킬을 선택하세요.'),
+                );
               }
             });
           }}
         >
           <fieldset disabled={busy || unavailable}>
-            <h3>{registration.id ? '스킬 등록 설정 편집' : '스킬 폴더 등록'}</h3>
+            <h3>
+              {registration.id ? localize('스킬 등록 설정 편집') : localize('스킬 폴더 등록')}
+            </h3>
             {registrationConflict && (
               <div className="skill-conflict" role="status">
                 <p>
                   {currentRegistration
-                    ? '다른 창에서 등록 정보를 변경했습니다.'
-                    : '이 등록 정보가 제거되었습니다.'}
+                    ? localize('다른 창에서 등록 정보를 변경했습니다.')
+                    : localize('이 등록 정보가 제거되었습니다.')}
                 </p>
                 {currentRegistration ? (
                   <button type="button" onClick={() => editRegistration(currentRegistration)}>
-                    저장된 등록 정보 불러오기
+                    {localize('저장된 등록 정보 불러오기')}
                   </button>
                 ) : (
                   <button
@@ -561,13 +611,13 @@ export function SkillManager({
                       setRegistration(({ id: _id, expectedRevision: _revision, ...value }) => value)
                     }
                   >
-                    새 등록으로 전환
+                    {localize('새 등록으로 전환')}
                   </button>
                 )}
               </div>
             )}
             <label className="field">
-              SKILL.md가 있는 폴더
+              {localize('SKILL.md가 있는 폴더')}
               <div className="input-action">
                 <input
                   required
@@ -576,7 +626,7 @@ export function SkillManager({
                   onChange={(event) =>
                     setRegistration({ ...registration, path: event.target.value })
                   }
-                  placeholder="스킬 하나가 들어 있는 로컬 폴더"
+                  placeholder={localize('스킬 하나가 들어 있는 로컬 폴더')}
                 />
                 <button
                   type="button"
@@ -588,12 +638,12 @@ export function SkillManager({
                     }, false)
                   }
                 >
-                  폴더 선택
+                  {localize('폴더 선택')}
                 </button>
               </div>
             </label>
             <label className="field">
-              스킬 형식
+              {localize('스킬 형식')}
               <select
                 value={registration.dialect}
                 onChange={(event) =>
@@ -614,11 +664,11 @@ export function SkillManager({
                 className="primary-button"
                 disabled={registrationConflict || !registration.path.trim()}
               >
-                {busy ? '처리 중…' : '폴더 확인·등록'}
+                {busy ? localize('처리 중…') : localize('폴더 확인·등록')}
               </button>
               {registration.id && (
                 <button type="button" onClick={() => setRegistration(blank())}>
-                  새 스킬 입력
+                  {localize('새 스킬 입력')}
                 </button>
               )}
             </div>

@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod updates;
+
 use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -19,6 +21,7 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, State,
 };
+use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
@@ -186,9 +189,16 @@ fn start_daemon(app: &tauri::App) -> Result<Daemon, Box<dyn std::error::Error>> 
 fn route_allowed(method: &str, path: &str) -> bool {
     match (method, path) {
         ("GET", "/v1/state")
+        | ("GET", "/v1/openrouter/account")
+        | ("GET", "/v1/browser")
+        | ("POST", "/v1/browser")
+        | ("GET", "/v1/automations")
+        | ("POST", "/v1/automations")
+        | ("POST", "/v1/automations/remove")
         | ("GET", "/v1/runtime")
         | ("GET", "/v1/skills")
         | ("GET", "/v1/mcp")
+        | ("GET", "/v1/mcp/subscriptions")
         | ("GET", "/v1/telegram")
         | ("GET", "/v1/worktrees")
         | ("POST", "/v1/telegram/config")
@@ -198,8 +208,16 @@ fn route_allowed(method: &str, path: &str) -> bool {
         | ("POST", "/v1/worktrees")
         | ("POST", "/v1/worktrees/review")
         | ("POST", "/v1/worktrees/merge")
+        | ("POST", "/v1/worktrees/archive")
+        | ("POST", "/v1/worktrees/undo")
+        | ("GET", "/v1/lsp")
+        | ("POST", "/v1/lsp/register")
+        | ("POST", "/v1/lsp/remove")
+        | ("POST", "/v1/lsp/stop")
+        | ("POST", "/v1/lsp/query")
         | ("POST", "/v1/command-jobs/input")
         | ("POST", "/v1/command-jobs/stop")
+        | ("POST", "/v1/command-jobs/resize")
         | ("POST", "/v1/commands")
         | ("POST", "/v1/projects")
         | ("POST", "/v1/sessions/delete")
@@ -210,9 +228,14 @@ fn route_allowed(method: &str, path: &str) -> bool {
         | ("POST", "/v1/runtime/action")
         | ("POST", "/v1/runtime/downloads")
         | ("POST", "/v1/runtime/downloads/action")
+        | ("POST", "/v1/runtime/engines/catalog")
+        | ("POST", "/v1/runtime/engines/install")
+        | ("POST", "/v1/runtime/engines/action")
         | ("GET", "/v1/backups")
         | ("POST", "/v1/backups/create")
         | ("POST", "/v1/backups/export")
+        | ("POST", "/v1/backups/preview")
+        | ("POST", "/v1/backups/restore")
         | ("POST", "/v1/backups/settings")
         | ("POST", "/v1/backups/delete")
         | ("POST", "/v1/skills/register")
@@ -221,6 +244,7 @@ fn route_allowed(method: &str, path: &str) -> bool {
         | ("POST", "/v1/mcp/register")
         | ("POST", "/v1/mcp/remove")
         | ("POST", "/v1/mcp/content")
+        | ("POST", "/v1/mcp/subscriptions")
         | ("POST", "/v1/mcp/completion")
         | ("POST", "/v1/mcp/oauth/prepare")
         | ("POST", "/v1/mcp/oauth/begin")
@@ -337,6 +361,33 @@ async fn pick_mcp_config(app: tauri::AppHandle) -> Result<Option<Value>, String>
     .map_err(|_| "파일 선택 창을 열지 못했습니다.".to_string())?
 }
 #[tauri::command]
+async fn pick_backup_file(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let selected = app
+            .dialog()
+            .file()
+            .set_title("복원할 Lodex 백업 선택")
+            .add_filter("Lodex backup", &["json"])
+            .blocking_pick_file();
+        let Some(selected) = selected else {
+            return Ok(None);
+        };
+        let path = selected
+            .into_path()
+            .map_err(|_| "로컬 파일 경로가 필요합니다.".to_string())?;
+        let path = dunce::canonicalize(path)
+            .map_err(|_| "백업 파일을 확인하지 못했습니다.".to_string())?;
+        let metadata =
+            std::fs::metadata(&path).map_err(|_| "백업 파일을 확인하지 못했습니다.".to_string())?;
+        if !metadata.is_file() || metadata.len() > 268_435_456 {
+            return Err("256 MiB 이하의 백업 JSON 파일을 선택하세요.".into());
+        }
+        Ok(Some(dunce::simplified(&path).to_string_lossy().to_string()))
+    })
+    .await
+    .map_err(|_| "파일 선택 창을 열지 못했습니다.".to_string())?
+}
+#[tauri::command]
 async fn export_backup(
     app: tauri::AppHandle,
     state: State<'_, Bridge>,
@@ -415,7 +466,11 @@ async fn daemon_request(
         .request(method, format!("http://127.0.0.1:{}{}", port, path))
         .bearer_auth(token)
         .timeout(Duration::from_secs(
-            if path == "/v1/runtime/action" || path.starts_with("/v1/worktrees") {
+            if path == "/v1/runtime/action"
+                || path.starts_with("/v1/worktrees")
+                || path == "/v1/backups/preview"
+                || path == "/v1/backups/restore"
+            {
                 200
             } else if path == "/v1/mcp/register"
                 || path == "/v1/mcp/content"
@@ -644,8 +699,35 @@ fn show_main_window(app: &tauri::AppHandle) {
     }
 }
 
+#[tauri::command]
+fn autostart_status(app: tauri::AppHandle) -> Result<bool, String> {
+    app.autolaunch()
+        .is_enabled()
+        .map_err(|_| "자동 시작 설정을 읽지 못했습니다.".into())
+}
+
+#[tauri::command]
+fn configure_autostart(app: tauri::AppHandle, enabled: bool) -> Result<bool, String> {
+    let manager = app.autolaunch();
+    if enabled {
+        manager.enable()
+    } else {
+        manager.disable()
+    }
+    .map_err(|_| "자동 시작 설정을 변경하지 못했습니다.".to_string())?;
+    manager
+        .is_enabled()
+        .map_err(|_| "자동 시작 설정을 확인하지 못했습니다.".into())
+}
+
 fn main() {
     let app = tauri::Builder::default()
+        .manage(updates::AppUpdates::default())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--background"]),
+        ))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
@@ -701,14 +783,23 @@ fn main() {
                 tray = tray.icon(icon.clone());
             }
             tray.build(app)?;
+            if !std::env::args().any(|arg| arg == "--background") {
+                show_main_window(app.handle());
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            updates::check_app_update,
+            updates::install_app_update,
+            updates::open_app_releases,
             daemon_request,
             pick_project_folder,
             pick_runtime_file,
             pick_mcp_config,
             export_backup,
+            pick_backup_file,
+            autostart_status,
+            configure_autostart,
             open_external,
             set_openrouter_key,
             set_telegram_token,
@@ -750,8 +841,13 @@ mod tests {
         assert!(route_allowed("GET", "/v1/state"));
         assert!(route_allowed("POST", "/v1/commands"));
         assert!(route_allowed("POST", "/v1/runtime/inspect"));
+        assert!(route_allowed("POST", "/v1/runtime/engines/catalog"));
+        assert!(route_allowed("POST", "/v1/runtime/engines/install"));
+        assert!(route_allowed("POST", "/v1/runtime/engines/action"));
         assert!(route_allowed("GET", "/v1/backups"));
         assert!(route_allowed("POST", "/v1/backups/export"));
+        assert!(route_allowed("POST", "/v1/backups/preview"));
+        assert!(route_allowed("POST", "/v1/backups/restore"));
         assert!(route_allowed("POST", "/v1/mcp/completion"));
         assert!(route_allowed("POST", "/v1/costs/reconcile"));
         assert!(route_allowed("GET", "/v1/command-jobs?sessionId=test"));

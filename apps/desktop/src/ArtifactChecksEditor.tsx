@@ -1,3 +1,4 @@
+import { t as localize } from './i18n';
 import type { ArtifactCheck } from '@lodex/contracts';
 
 export function ArtifactChecksEditor({
@@ -12,12 +13,16 @@ export function ArtifactChecksEditor({
   return (
     <fieldset className="artifact-checks">
       <legend>{label}</legend>
-      <p>프로젝트의 UTF-8 파일을 확인합니다. 필요한 내용이나 SHA-256을 추가할 수 있습니다.</p>
+      <p>
+        {localize(
+          '프로젝트의 UTF-8 파일을 확인합니다. 필요한 내용이나 SHA-256을 추가할 수 있습니다.',
+        )}
+      </p>
       {checks.map((check, index) => (
         <div key={index}>
           <input
-            aria-label={`${label} ${index + 1} 경로`}
-            placeholder="예: src/app.ts"
+            aria-label={localize('{0} {1} 경로', label, index + 1)}
+            placeholder={localize('예: src/app.ts')}
             value={check.path}
             onChange={(event) =>
               onChange(
@@ -28,8 +33,8 @@ export function ArtifactChecksEditor({
             }
           />
           <input
-            aria-label={`${label} ${index + 1} 필요한 내용`}
-            placeholder="필요한 내용 (선택)"
+            aria-label={localize('{0} {1} 필요한 내용', label, index + 1)}
+            placeholder={localize('필요한 내용 (선택)')}
             value={check.contains ?? ''}
             onChange={(event) =>
               onChange(
@@ -43,7 +48,7 @@ export function ArtifactChecksEditor({
           />
           <input
             aria-label={`${label} ${index + 1} SHA-256`}
-            placeholder="SHA-256 (선택)"
+            placeholder={localize('SHA-256 (선택)')}
             value={check.sha256 ?? ''}
             onChange={(event) =>
               onChange(
@@ -56,7 +61,7 @@ export function ArtifactChecksEditor({
             }
           />
           <button type="button" onClick={() => onChange(checks.filter((_, at) => at !== index))}>
-            삭제
+            {localize('삭제')}
           </button>
         </div>
       ))}
@@ -65,7 +70,7 @@ export function ArtifactChecksEditor({
         disabled={checks.length >= 16}
         onClick={() => onChange([...checks, { path: '' }])}
       >
-        검증 파일 추가
+        {localize('검증 파일 추가')}
       </button>
     </fieldset>
   );

@@ -37,6 +37,8 @@ export interface SkillDependency {
  * The host owns persistence, session selection and cloud transmission policy.
  */
 export interface RegisteredSkill {
+  toolPolicy?: { allowed?: string[]; denied: string[]; unsupported: string[] };
+  argumentHint?: string;
   schemaVersion: 1;
   id: string;
   revision: string;
@@ -84,6 +86,7 @@ export interface SkillProvenance {
 }
 
 export interface SkillDocument {
+  toolPolicy?: RegisteredSkill['toolPolicy'];
   /** Exact decoded SKILL.md, including frontmatter and any UTF-8 BOM. */
   text: string;
   body: string;
@@ -91,6 +94,7 @@ export interface SkillDocument {
 }
 
 export interface SkillResource {
+  toolPolicy?: RegisteredSkill['toolPolicy'];
   text: string;
   provenance: SkillProvenance;
 }

@@ -1,19 +1,49 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { writeFile, unlink } from 'node:fs/promises';
-import { join, dirname } from 'node:path';
+import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createTwoFilesPatch } from 'diff';
-import { AppError, type Project, type WorktreePreview, type ChangeSet } from '@lodex/contracts';
-import { readText, resolveTarget, runProjectTool, writeChanges, checkChanges } from '@lodex/tools';
+import {
+  AppError,
+  type WorktreePreview,
+  type WorktreeResolution,
+  type ToolDefinition,
+} from '@lodex/contracts';
+import { withProjectWrite } from '@lodex/tools';
 import type { Store } from '@lodex/storage';
 import type { Worktrees } from './worktrees';
 import { z } from 'zod';
-import type { ToolDefinition } from '@lodex/contracts';
-export const worktreeReviewSchema = z.strictObject({ worktreeId: z.uuid() });
+import {
+  byteHash,
+  decodeText,
+  readWorktreeFile,
+  replaceWorktreeFile,
+  MAX_WORKTREE_TEXT,
+} from './worktree-files';
+
+export const worktreeReviewSchema = z.strictObject({
+  worktreeId: z.uuid(),
+  offset: z.number().int().min(0).default(0),
+  limit: z.number().int().min(1).max(50).default(20),
+  paths: z.array(z.string().min(1).max(4096)).min(1).max(50).optional(),
+  reviewVersion: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/)
+    .optional(),
+});
 export const worktreeMergeSchema = z.strictObject({
   previewId: z.uuid(),
-  resolutions: z.record(z.string().max(4096), z.string().max(32768).nullable()).default({}),
+  resolutions: z
+    .record(
+      z.string().max(4096),
+      z.union([
+        z.string().max(MAX_WORKTREE_TEXT),
+        z.null(),
+        z.strictObject({ choice: z.enum(['ours', 'theirs']) }),
+      ]),
+    )
+    .default({}),
 });
 export const worktreeTools: ToolDefinition[] = [
   {
@@ -21,7 +51,7 @@ export const worktreeTools: ToolDefinition[] = [
     function: {
       name: 'review_worktree',
       description:
-        "Compare an isolated worktree against its base and the current selected source project. Returns a review ID, diffs, and three-way conflicts. Never applies files. Only this project's worktrees can be inspected.",
+        'Review one page or selected paths of an isolated worktree against its base and current source. Follow nextOffset with reviewVersion to inspect all changes. Each review ID applies only its returned files; other pages remain untouched. Binary files require explicit ours/theirs choices. Never changes files.',
       parameters: z.toJSONSchema(worktreeReviewSchema),
     },
   },
@@ -30,22 +60,31 @@ export const worktreeTools: ToolDefinition[] = [
     function: {
       name: 'merge_worktree',
       description:
-        'Apply an exact prior review to the selected source project under its permission policy. Resolve every conflicting path with the desired complete UTF-8 text (null means deletion). Refuses changed source/worktree files and unresolved conflict markers. Leaves the Git index and commits untouched. Review actual outcomes; a partial merge is not a pass.',
+        'Apply one exact prior reviewed page under the permission policy. Resolve conflicting UTF-8 paths using complete text, null for deletion, or {choice:"ours"|"theirs"}; binary files require a choice. Refuses changed files or review version. Durable originals allow undo, Git index remains untouched. Review other pages separately.',
       parameters: z.toJSONSchema(worktreeMergeSchema),
     },
   },
 ];
-const run = promisify(execFile);
-const hash = (text: string | null) =>
-  text === null ? null : createHash('sha256').update(text).digest('hex');
-async function text(project: Project, path: string, signal: AbortSignal) {
-  try {
-    return await readText(project, path, signal);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-    throw error;
-  }
-}
+const run = promisify(execFile),
+  PAGE_BYTES = 6 * 1024 * 1024;
+const markers = /^(?:<{7}|={7}|>{7}|\|{7})(?: |$)/m;
+type SavedPreview = {
+  preview: WorktreePreview;
+  identities: Map<string, { before: string | null; theirs: string | null }>;
+};
+const backupSchema = z.strictObject({
+  worktreeId: z.uuid(),
+  sourceProjectId: z.uuid(),
+  previewId: z.uuid(),
+  files: z.array(
+    z.strictObject({
+      path: z.string(),
+      before: z.string().nullable(),
+      beforeHash: z.string().nullable(),
+      afterHash: z.string().nullable(),
+    }),
+  ),
+});
 async function mergeText(
   current: string,
   base: string,
@@ -57,28 +96,31 @@ async function mergeText(
   try {
     for (const [index, value] of [current, base, theirs].entries())
       await writeFile(names[index]!, value, { flag: 'wx', mode: 0o600 });
-    const args = [
-      'merge-file',
-      '--diff3',
-      '-p',
-      '-L',
-      'Current project',
-      '-L',
-      'Base',
-      '-L',
-      'Subagent worktree',
-      ...names,
-    ];
     try {
       return {
         merged: (
-          await run('git', args, {
-            cwd: folder,
-            signal,
-            windowsHide: true,
-            maxBuffer: 1048576,
-            timeout: 30000,
-          })
+          await run(
+            'git',
+            [
+              'merge-file',
+              '--diff3',
+              '-p',
+              '-L',
+              'Current project',
+              '-L',
+              'Base',
+              '-L',
+              'Subagent worktree',
+              ...names,
+            ],
+            {
+              cwd: folder,
+              signal,
+              windowsHide: true,
+              maxBuffer: MAX_WORKTREE_TEXT * 4,
+              timeout: 30000,
+            },
+          )
         ).stdout,
         conflict: false,
       };
@@ -98,57 +140,74 @@ async function mergeText(
   }
 }
 export class WorktreeReviews {
-  private previews = new Map<string, WorktreePreview>();
+  private previews = new Map<string, SavedPreview>();
   private queue: Promise<unknown> = Promise.resolve();
   constructor(
-    private store: Store,
+    _store: Store,
     private worktrees: Worktrees,
   ) {}
-  private async projects(id: string) {
+  private async projects(id: string, signal: AbortSignal) {
     const record = this.worktrees.list().find((record) => record.id === id);
     if (!record?.projectId || record.status !== 'ready')
       throw new AppError('WORKTREE_NOT_READY', '검토할 Worktree를 찾을 수 없습니다.');
-    const source = await this.store.project(record.sourceProjectId),
-      child = await this.store.project(record.projectId);
-    if (child.path !== record.path)
-      throw new AppError('WORKTREE_PATH', 'Worktree 경로가 변경되었습니다.');
+    const { source, child } = await this.worktrees.verifyOwnership(record, signal);
     return { record, source, child };
   }
-  async preview(id: string, signal: AbortSignal): Promise<WorktreePreview> {
-    const { record, source, child } = await this.projects(id);
-    const tracked = (
-      await this.worktrees.readGit(
-        child.path,
-        [
-          'diff',
-          '--no-ext-diff',
-          '--no-textconv',
-          '--no-renames',
-          '--name-only',
-          '-z',
-          record.baseCommit,
-          '--',
-        ],
-        signal,
-      )
-    )
-      .split('\0')
-      .filter(Boolean);
-    const untracked = (
-      await this.worktrees.readGit(
-        child.path,
-        ['ls-files', '--others', '--exclude-standard', '-z', '--'],
-        signal,
-      )
-    )
-      .split('\0')
-      .filter(Boolean);
-    const paths = [...new Set([...tracked, ...untracked])];
-    if (paths.length > 8)
+  private async inventory(id: string, signal: AbortSignal) {
+    const context = await this.projects(id, signal),
+      { record, child } = context;
+    const tracked = await this.worktrees.readGit(
+      child.path,
+      [
+        'diff',
+        '--no-ext-diff',
+        '--no-textconv',
+        '--no-renames',
+        '--name-only',
+        '-z',
+        record.baseCommit,
+        '--',
+      ],
+      signal,
+    );
+    const untracked = await this.worktrees.readGit(
+      child.path,
+      ['ls-files', '--others', '--exclude-standard', '-z', '--'],
+      signal,
+    );
+    const paths = [...new Set((tracked + '\0' + untracked).split('\0').filter(Boolean))].sort();
+    const digest = createHash('sha256')
+      .update(record.baseCommit)
+      .update((await this.worktrees.readGit(child.path, ['rev-parse', 'HEAD'], signal)).trim());
+    for (const path of paths) {
+      const file = await readWorktreeFile(child, path, signal);
+      digest.update(JSON.stringify([path, byteHash(file.bytes), file.identity]));
+    }
+    return { ...context, paths, version: digest.digest('hex') };
+  }
+  async preview(
+    id: string,
+    signal: AbortSignal,
+    options: {
+      offset?: number;
+      limit?: number;
+      paths?: string[] | undefined;
+      reviewVersion?: string | undefined;
+    } = {},
+  ): Promise<WorktreePreview> {
+    const input = worktreeReviewSchema.parse({ worktreeId: id, ...options });
+    const { record, source, child, paths, version } = await this.inventory(id, signal);
+    if (input.reviewVersion && input.reviewVersion !== version)
       throw new AppError(
-        'WORKTREE_REVIEW_LIMIT',
-        '한 번에 최대 8개 파일을 검토합니다. 큰 변경은 작업을 나누세요.',
+        'WORKTREE_STALE',
+        'Worktree 변경 목록이 달라졌습니다. 첫 페이지부터 다시 검토하세요.',
+        409,
       );
+    if (input.paths?.some((path) => !paths.includes(path)))
+      throw new AppError('WORKTREE_PATH', '현재 변경 목록에 있는 파일만 선택하세요.');
+    const selected = input.paths
+      ? [...new Set(input.paths)]
+      : paths.slice(input.offset, input.offset + input.limit);
     const basePaths = new Set(
       (
         await this.worktrees.readGit(
@@ -163,226 +222,292 @@ export class WorktreeReviews {
       worktreeId: id,
       sourceProjectId: source.id,
       createdAt: new Date().toISOString(),
+      reviewVersion: version,
+      totalPaths: paths.length,
+      offset: input.offset,
+      nextOffset: null,
+      paths,
       files: [],
     };
-    let bytes = 0;
-    for (const path of paths) {
+    const identities: SavedPreview['identities'] = new Map();
+    let bytes = 0,
+      scanned = 0;
+    for (const path of selected) {
       signal.throwIfAborted();
-      const before = await text(source, path, signal),
-        theirs = await text(child, path, signal);
-      const base = basePaths.has(path)
-        ? await this.worktrees.readGit(child.path, ['show', `${record.baseCommit}:${path}`], signal)
+      const beforeFile = await readWorktreeFile(source, path, signal),
+        theirsFile = await readWorktreeFile(child, path, signal);
+      const baseBytes = basePaths.has(path)
+        ? await this.worktrees.readBlob(child.path, `${record.baseCommit}:${path}`, signal)
         : null;
-      bytes += Buffer.byteLength((before ?? '') + (theirs ?? '') + (base ?? ''));
-      if (
-        bytes > 131072 ||
-        [before, theirs, base].some(
-          (value) => value !== null && (Buffer.byteLength(value) > 32768 || value.includes('\0')),
-        )
-      )
-        throw new AppError(
-          'WORKTREE_TEXT_LIMIT',
-          'UTF-8 텍스트 파일당 32 KiB, 검토당 128 KiB 이하의 변경을 지원합니다.',
+      const before = decodeText(beforeFile.bytes),
+        theirs = decodeText(theirsFile.bytes),
+        base = decodeText(baseBytes);
+      const binary =
+        [before, theirs, base].includes(undefined) ||
+        [beforeFile.bytes, theirsFile.bytes, baseBytes].some(
+          (value) => value !== null && value.length > MAX_WORKTREE_TEXT,
         );
-      if (before === theirs) continue;
-      let merged = theirs,
-        conflict = false;
-      if (before !== base) {
-        if (theirs === base) merged = before;
+      const cost =
+        (beforeFile.bytes?.length ?? 0) +
+        (theirsFile.bytes?.length ?? 0) +
+        (baseBytes?.length ?? 0);
+      if (scanned && bytes + cost > PAGE_BYTES) break;
+      bytes += cost;
+      scanned++;
+      const beforeHash = byteHash(beforeFile.bytes),
+        theirsHash = byteHash(theirsFile.bytes),
+        baseHash = byteHash(baseBytes);
+      if (beforeHash === theirsHash) continue;
+      let merged = theirs ?? null,
+        conflict = binary;
+      if (!binary && beforeHash !== baseHash) {
+        if (theirsHash === baseHash) merged = before ?? null;
         else if (before !== null && theirs !== null && base !== null) {
-          const result = await mergeText(before, base, theirs, child.path, signal);
+          const result = await mergeText(before!, base!, theirs!, child.path, signal);
           merged = result.merged;
           conflict = result.conflict;
         } else conflict = true;
       }
-      const diff = createTwoFilesPatch(
-        'a/' + path,
-        'b/' + path,
-        before ?? '',
-        merged ?? '',
-        '',
-        '',
-        { context: 3, timeout: 500 },
-      );
-      if (diff === undefined)
-        throw new AppError('WORKTREE_DIFF_LIMIT', '파일 비교 시간이 초과되었습니다.');
+      const fullDiff = binary
+        ? '바이트 파일 또는 2 MiB 초과 파일: 해시와 크기를 확인하고 원본 또는 Worktree를 선택하세요.'
+        : createTwoFilesPatch('a/' + path, 'b/' + path, before ?? '', merged ?? '', '', '', {
+            context: 3,
+            timeout: 500,
+          });
+      const diffTruncated = fullDiff === undefined || fullDiff.length > 256 * 1024;
+      const diff =
+        fullDiff === undefined
+          ? '비교 시간이 길어 차이를 생략했습니다. 전체 파일 내용을 확인하세요.'
+          : fullDiff.slice(0, 256 * 1024);
       preview.files.push({
         path,
-        before,
-        theirs,
-        merged,
-        beforeHash: hash(before),
-        theirsHash: hash(theirs),
+        before: binary ? null : before!,
+        theirs: binary ? null : theirs!,
+        merged: binary ? null : merged,
+        beforeHash,
+        theirsHash,
         conflict,
         diff,
+        binary,
+        beforeBytes: beforeFile.bytes?.length ?? 0,
+        theirsBytes: theirsFile.bytes?.length ?? 0,
+        diffTruncated,
       });
+      identities.set(path, { before: beforeFile.identity, theirs: theirsFile.identity });
     }
-    if (this.previews.size >= 64) this.previews.delete(this.previews.keys().next().value!);
-    this.previews.set(preview.id, preview);
+    if (input.paths && scanned !== selected.length)
+      throw new AppError(
+        'WORKTREE_PAGE_LIMIT',
+        '선택한 텍스트가 한 페이지에 너무 큽니다. 파일을 나눠 선택하세요.',
+      );
+    if (!input.paths && input.offset + scanned < paths.length)
+      preview.nextOffset = input.offset + scanned;
+    if ((await this.inventory(id, signal)).version !== version)
+      throw new AppError('WORKTREE_STALE', '검토 중 Worktree 파일이 변경되었습니다.', 409);
+    // Bound retained text while allowing independently reviewed pages.
+    while (
+      this.previews.size >= 16 ||
+      [...this.previews.values()].reduce(
+        (total, value) => total + JSON.stringify(value.preview).length * 2,
+        0,
+      ) >
+        64 * 1024 * 1024
+    )
+      this.previews.delete(this.previews.keys().next().value!);
+    this.previews.set(preview.id, { preview, identities });
     return structuredClone(preview);
   }
   get(previewId: string) {
-    const preview = this.previews.get(previewId);
-    if (!preview)
-      throw new AppError('WORKTREE_REVIEW_EXPIRED', '변경 검토를 다시 불러오세요.', 409);
-    return preview;
+    const saved = this.previews.get(previewId);
+    if (!saved) throw new AppError('WORKTREE_REVIEW_EXPIRED', '변경 검토를 다시 불러오세요.', 409);
+    return structuredClone(saved.preview);
   }
-  async apply(previewId: string, resolutions: Record<string, string | null>, signal: AbortSignal) {
+  async apply(
+    previewId: string,
+    resolutions: Record<string, WorktreeResolution>,
+    signal: AbortSignal,
+  ) {
     const work = this.queue.then(async () => {
       const preview = this.get(previewId),
-        { record, source, child } = await this.projects(preview.worktreeId);
+        saved = this.previews.get(previewId)!;
+      const { record, source, child, version } = await this.inventory(preview.worktreeId, signal);
+      if (version !== preview.reviewVersion)
+        throw new AppError('WORKTREE_STALE', '검토 후 Worktree 변경 목록이 달라졌습니다.', 409);
       if (
         Object.keys(resolutions).some(
           (path) => !preview.files.some((file) => file.path === path && file.conflict),
         )
       )
         throw new AppError('WORKTREE_RESOLUTION', '검토한 충돌 파일만 해결할 수 있습니다.');
-      const files = preview.files.map((file) => ({
-        ...file,
-        next: file.conflict ? resolutions[file.path] : file.merged,
-      }));
-      for (const file of files) {
-        if (
-          file.next === undefined ||
-          (file.conflict &&
-            typeof file.next === 'string' &&
-            /^(?:<{7}|={7}|>{7}|\|{7})(?: |$)/m.test(file.next))
-        )
-          throw new AppError('WORKTREE_CONFLICT', '충돌 내용을 해결한 뒤 적용하세요.', 409);
-        if (
-          file.next !== null &&
-          (Buffer.byteLength(file.next) > 32768 || file.next.includes('\0'))
-        )
-          throw new AppError(
-            'WORKTREE_TEXT_LIMIT',
-            '해결한 파일은 32 KiB 이하의 UTF-8 텍스트여야 합니다.',
-          );
-        if (
-          hash(await text(source, file.path, signal)) !== file.beforeHash ||
-          hash(await text(child, file.path, signal)) !== file.theirsHash
-        )
-          throw new AppError(
-            'WORKTREE_STALE',
-            '검토 후 파일이 변경되었습니다. 다시 비교하세요.',
-            409,
-          );
-      }
-      record.merge = {
-        status: 'applying',
-        previewId,
-        files: files.map((file) => ({
-          path: file.path,
-          beforeHash: file.beforeHash,
-          afterHash: hash(file.next!),
-          applied: false,
-        })),
-      };
-      await this.worktrees.markMerge(record.id, record.merge);
-      try {
-        for (const [index, file] of files.entries()) {
-          signal.throwIfAborted();
+      return withProjectWrite(source, async () => {
+        const files = [];
+        for (const file of preview.files) {
+          const before = await readWorktreeFile(source, file.path, signal),
+            theirs = await readWorktreeFile(child, file.path, signal),
+            ownership = saved.identities.get(file.path)!;
           if (
-            hash(await text(source, file.path, signal)) !== file.beforeHash ||
-            hash(await text(child, file.path, signal)) !== file.theirsHash
+            byteHash(before.bytes) !== file.beforeHash ||
+            byteHash(theirs.bytes) !== file.theirsHash ||
+            before.identity !== ownership.before ||
+            theirs.identity !== ownership.theirs
           )
-            throw new AppError('WORKTREE_STALE', '적용 도중 파일이 변경되었습니다.', 409);
-          if (file.next === file.before) {
-            record.merge.files[index]!.applied = true;
-            continue;
-          }
-          if (file.next === null) {
-            const inspected = JSON.parse(
-              await runProjectTool(
-                source,
-                'inspect_path',
-                JSON.stringify({ path: file.path }),
-                signal,
-              ),
+            throw new AppError(
+              'WORKTREE_STALE',
+              '검토 후 파일 내용이나 소유권이 변경되었습니다.',
+              409,
             );
-            if (inspected.error) throw new AppError('WORKTREE_DELETE', inspected.message);
-            const deleted = JSON.parse(
-              await runProjectTool(
-                source,
-                'delete_path',
-                JSON.stringify({ path: file.path, expectedFingerprint: inspected.fingerprint }),
-                signal,
-                undefined,
-                undefined,
-                async () => true,
-              ),
+          const resolution = file.conflict ? resolutions[file.path] : file.merged;
+          if (
+            resolution === undefined ||
+            (file.binary && !(resolution && typeof resolution === 'object'))
+          )
+            throw new AppError(
+              'WORKTREE_CONFLICT',
+              '충돌 파일과 바이트 파일의 처리 방법을 선택하세요.',
+              409,
             );
-            if (deleted.error) throw new AppError('WORKTREE_DELETE', deleted.message);
-          } else {
-            const parent = dirname(file.path).replaceAll('\\', '/');
-            let current = '';
-            if (parent !== '.')
-              for (const part of parent.split('/')) {
-                current = current ? current + '/' + part : part;
-                try {
-                  await resolveTarget(source, current);
-                } catch (error) {
-                  if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-                  const made = JSON.parse(
-                    await runProjectTool(
-                      source,
-                      'make_directory',
-                      JSON.stringify({ path: current }),
-                      signal,
-                      undefined,
-                      undefined,
-                      async () => true,
-                    ),
-                  );
-                  if (made.error) throw new AppError('WORKTREE_DIRECTORY', made.message);
-                }
-              }
-            const changes: ChangeSet = {
-              status: 'proposed',
-              files: [
-                file.before === null
-                  ? {
-                      kind: 'create',
-                      path: file.path,
-                      content: file.next!,
-                      afterHash: hash(file.next!)!,
-                      stagingId: randomUUID(),
-                      diff: file.diff,
-                    }
-                  : {
-                      path: file.path,
-                      oldText: file.before,
-                      newText: file.next!,
-                      beforeHash: file.beforeHash!,
-                      afterHash: hash(file.next!)!,
-                      diff: file.diff,
-                      status: 'proposed',
-                      offset: 0,
-                    },
-              ],
-            };
-            const inspected = await checkChanges(source, changes, signal);
-            if (['conflict', 'uncertain'].includes(inspected.status))
+          if (
+            typeof resolution === 'string' &&
+            (Buffer.byteLength(resolution) > MAX_WORKTREE_TEXT ||
+              resolution.includes('\0') ||
+              (file.conflict && markers.test(resolution)))
+          )
+            throw new AppError(
+              'WORKTREE_CONFLICT',
+              '2 MiB 이하의 UTF-8 내용으로 충돌 표시를 해결하세요.',
+              409,
+            );
+          const next =
+            resolution && typeof resolution === 'object'
+              ? resolution.choice === 'ours'
+                ? before.bytes
+                : theirs.bytes
+              : resolution === null
+                ? null
+                : Buffer.from(resolution);
+          files.push({ ...file, beforeBytes: before.bytes, beforeIdentity: before.identity, next });
+        }
+        const backupId = randomUUID();
+        await this.worktrees.saveBackup(backupId, {
+          worktreeId: record.id,
+          sourceProjectId: source.id,
+          previewId,
+          files: files.map((file) => ({
+            path: file.path,
+            before: file.beforeBytes?.toString('base64') ?? null,
+            beforeHash: file.beforeHash,
+            afterHash: byteHash(file.next),
+          })),
+        });
+        record.merge = {
+          status: 'applying',
+          previewId,
+          backupId,
+          reviewVersion: preview.reviewVersion!,
+          files: files.map((file) => ({
+            path: file.path,
+            beforeHash: file.beforeHash,
+            afterHash: byteHash(file.next),
+            applied: false,
+          })),
+        };
+        await this.worktrees.markMerge(record.id, record.merge);
+        try {
+          for (const [index, file] of files.entries()) {
+            const currentChild = await readWorktreeFile(child, file.path, signal);
+            if (
+              byteHash(currentChild.bytes) !== file.theirsHash ||
+              currentChild.identity !== saved.identities.get(file.path)!.theirs
+            )
               throw new AppError(
-                'WORKTREE_FILE_CONFLICT',
-                `파일 경로·내용·소유권을 확인하세요: ${file.path} (${inspected.observations?.[0]?.state})`,
+                'WORKTREE_STALE',
+                '적용 도중 Worktree 파일이 변경되었습니다.',
                 409,
               );
-            await writeChanges(source, changes, 'apply', signal);
+            const afterIdentity = await replaceWorktreeFile(
+              source,
+              file.path,
+              file.beforeHash,
+              file.beforeIdentity,
+              file.next,
+              signal,
+            );
+            record.merge.files[index]!.afterIdentity = afterIdentity;
+            record.merge.files[index]!.applied = true;
+            await this.worktrees.markMerge(record.id, record.merge);
+            await this.worktrees.markReviewed(record.id, {
+              [file.path]: { theirsHash: file.theirsHash, sourceHash: byteHash(file.next) },
+            });
           }
-          if (hash(await text(source, file.path, signal)) !== hash(file.next!))
-            throw new AppError('WORKTREE_OUTCOME', '적용 결과가 예상 파일 내용과 다릅니다.');
-          record.merge.files[index]!.applied = true;
+          record.merge.status = 'applied';
           await this.worktrees.markMerge(record.id, record.merge);
+          this.previews.delete(previewId);
+          return this.worktrees.list().find((item) => item.id === record.id)!;
+        } catch (error) {
+          record.merge.status = 'partial';
+          await this.worktrees.markMerge(record.id, record.merge);
+          throw error;
         }
-        record.merge.status = 'applied';
-        await this.worktrees.markMerge(record.id, record.merge);
-        this.previews.delete(previewId);
-        return record;
-      } catch (error) {
-        record.merge.status = 'partial';
-        await this.worktrees.markMerge(record.id, record.merge);
-        throw error;
-      }
+      });
+    });
+    this.queue = work.catch(() => undefined);
+    return work;
+  }
+  async undo(id: string, signal: AbortSignal) {
+    const work = this.queue.then(async () => {
+      const { record, source } = await this.projects(id, signal),
+        merge = record.merge;
+      if (!merge?.backupId || merge.status === 'reverted')
+        throw new AppError('WORKTREE_UNDO', '되돌릴 Worktree 변경이 없습니다.');
+      const backup = backupSchema.parse(await this.worktrees.loadBackup(merge.backupId));
+      if (
+        backup.worktreeId !== id ||
+        backup.sourceProjectId !== source.id ||
+        backup.previewId !== merge.previewId
+      )
+        throw new AppError('WORKTREE_BACKUP', '백업과 적용 기록이 일치하지 않습니다.');
+      return withProjectWrite(source, async () => {
+        const files = [];
+        for (const file of merge.files.filter((file) => file.applied)) {
+          const stored = backup.files.find((item) => item.path === file.path),
+            current = await readWorktreeFile(source, file.path, signal);
+          const before =
+            stored?.before === null
+              ? null
+              : stored
+                ? Buffer.from(stored.before, 'base64')
+                : undefined;
+          if (
+            !stored ||
+            before === undefined ||
+            byteHash(before) !== file.beforeHash ||
+            stored.afterHash !== file.afterHash ||
+            byteHash(current.bytes) !== file.afterHash ||
+            current.identity !== file.afterIdentity
+          )
+            throw new AppError(
+              'WORKTREE_UNDO_CONFLICT',
+              '적용 후 바뀐 파일이 있어 되돌리지 않았습니다: ' + file.path,
+              409,
+            );
+          files.push({ file, current, before });
+        }
+        for (const { file, current, before } of files.reverse()) {
+          await replaceWorktreeFile(
+            source,
+            file.path,
+            file.afterHash,
+            current.identity,
+            before,
+            signal,
+          );
+          file.applied = false;
+          await this.worktrees.markMerge(id, merge);
+        }
+        merge.status = 'reverted';
+        await this.worktrees.markMerge(id, merge);
+        return this.worktrees.list().find((item) => item.id === id)!;
+      });
     });
     this.queue = work.catch(() => undefined);
     return work;

@@ -14,14 +14,16 @@ import { WorktreeManager } from './WorktreeManager';
 import { DataManager } from './DataManager';
 
 describe('central settings screen', () => {
-  it('exposes eight keyboard-accessible categories and one panel', () => {
+  it('exposes keyboard-accessible settings categories and one panel', () => {
     const html = renderToStaticMarkup(
       <SettingsScreen selected="telegram" onSelect={vi.fn()} onClose={vi.fn()}>
         <SettingsSurface embedded>content</SettingsSurface>
       </SettingsScreen>,
     );
     expect(html.match(/<dialog\b/g)).toHaveLength(1);
-    expect(html.match(/role="tab"/g)).toHaveLength(8);
+    expect(html.match(/role="tab"/g)).toHaveLength(settingsSections.length);
+    expect(html).toContain('브라우저');
+    expect(html).toContain('예약 실행');
     expect(html.match(/role="tabpanel"/g)).toHaveLength(1);
     expect(html.match(/aria-selected="true"/g)).toHaveLength(1);
     expect(html).toContain('설정 화면 닫기');

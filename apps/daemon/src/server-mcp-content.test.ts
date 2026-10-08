@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
-import { createServer } from 'node:http';
+import { createServer, type ServerResponse } from 'node:http';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -37,13 +37,24 @@ interface RpcRequest {
   };
 }
 
-async function fixture({ cloud = false }: { cloud?: boolean } = {}) {
+async function fixture({
+  cloud = false,
+  subscriptions = false,
+}: { cloud?: boolean; subscriptions?: boolean } = {}) {
   const rpc: RpcRequest[] = [];
+  const streams = new Set<ServerResponse>();
   const data = {
     description: 'Selected reference',
     text: 'RESOURCE_FIXTURE: document reviewed by the user.',
   };
   const mcp = createServer(async (request, response) => {
+    if (request.method === 'GET' && subscriptions) {
+      response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
+      response.write(': ready\n\n');
+      streams.add(response);
+      response.on('close', () => streams.delete(response));
+      return;
+    }
     if (request.method !== 'POST') {
       response.writeHead(405).end();
       return;
@@ -60,7 +71,11 @@ async function fixture({ cloud = false }: { cloud?: boolean } = {}) {
     if (message.method === 'initialize')
       result = {
         protocolVersion: '2025-11-25',
-        capabilities: { resources: {}, prompts: {}, completions: {} },
+        capabilities: {
+          resources: subscriptions ? { subscribe: true, listChanged: true } : {},
+          prompts: {},
+          completions: {},
+        },
         serverInfo: { name: 'Content API fixture', version: '1' },
       };
     if (message.method === 'resources/list')
@@ -132,7 +147,12 @@ async function fixture({ cloud = false }: { cloud?: boolean } = {}) {
           hasMore: false,
         },
       };
-    response.writeHead(200, { 'Content-Type': 'application/json' });
+    if (subscriptions && ['resources/subscribe', 'resources/unsubscribe'].includes(message.method))
+      result = {};
+    response.writeHead(200, {
+      'Content-Type': 'application/json',
+      ...(subscriptions ? { 'Mcp-Session-Id': 'subscription-fixture' } : {}),
+    });
     response.end(
       JSON.stringify({
         jsonrpc: '2.0',
@@ -289,10 +309,132 @@ async function fixture({ cloud = false }: { cloud?: boolean } = {}) {
     send,
     completed,
     modelRequests,
+    streams,
+    notify: (method: string, uri?: string) => {
+      for (const stream of streams)
+        stream.write(
+          `data: ${JSON.stringify({ jsonrpc: '2.0', method, ...(uri ? { params: { uri } } : {}) })}\n\n`,
+        );
+    },
   };
 }
 
 describe('MCP reviewed content API', () => {
+  it('subscribes only reviewed attachments and never refreshes model context without a new preview', async () => {
+    const f = await fixture({ subscriptions: true, cloud: true });
+    expect(f.registration.supportsResourceSubscriptions).toBe(true);
+    const preview = await f.preview();
+    expect((await f.attach(preview.id)).status).toBe(200);
+    const current = await f.store.session(f.session.id),
+      attachment = current.mcpAttachments![0]!;
+    const subscribe = {
+      sessionId: current.id,
+      attachmentId: attachment.id,
+      expectedVersion: current.version,
+      action: 'subscribe',
+    };
+    const response = await f.request('/v1/mcp/subscriptions', subscribe);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      subscriptions: [{ status: 'watching', uri: 'fixture://reference' }],
+    });
+    await expect.poll(() => f.streams.size).toBe(1);
+    const reads = f.rpc.filter((item) => item.method === 'resources/read').length;
+    f.data.text = 'UNREVIEWED: new private content';
+    f.notify('notifications/resources/updated', 'fixture://unrelated');
+    expect(
+      (await (await f.request('/v1/mcp/subscriptions?sessionId=' + current.id)).json())
+        .subscriptions[0].status,
+    ).toBe('watching');
+    f.notify('notifications/resources/updated', 'fixture://reference');
+    await expect
+      .poll(
+        async () =>
+          (await (await f.request('/v1/mcp/subscriptions?sessionId=' + current.id)).json())
+            .subscriptions[0].status,
+      )
+      .toBe('changed');
+    expect((await f.store.session(current.id)).mcpAttachments).toEqual(current.mcpAttachments);
+    expect(f.rpc.filter((item) => item.method === 'resources/read')).toHaveLength(reads);
+    expect(f.modelRequests).toHaveLength(0);
+    expect((await f.request('/v1/mcp/subscriptions', subscribe)).status).toBe(200);
+    expect(f.rpc.filter((item) => item.method === 'resources/subscribe')).toHaveLength(1);
+    expect((await f.send()).status).toBe(200);
+    await f.completed();
+    expect(JSON.stringify(f.modelRequests)).toContain('RESOURCE_FIXTURE');
+    expect(JSON.stringify(f.modelRequests)).not.toContain('UNREVIEWED');
+    expect((await f.remove(attachment.id)).status).toBe(200);
+    expect(
+      (await (await f.request('/v1/mcp/subscriptions?sessionId=' + current.id)).json())
+        .subscriptions,
+    ).toEqual([]);
+    expect(f.rpc.filter((item) => item.method === 'resources/unsubscribe')).toHaveLength(1);
+    await expect.poll(() => f.streams.size).toBe(0);
+  });
+  it('shows unsupported subscriptions without polling or opening another MCP connection', async () => {
+    const f = await fixture();
+    const preview = await f.preview();
+    expect((await f.attach(preview.id)).status).toBe(200);
+    const session = await f.store.session(f.session.id),
+      before = f.rpc.length;
+    const input = {
+      sessionId: session.id,
+      attachmentId: session.mcpAttachments![0]!.id,
+      expectedVersion: session.version,
+      action: 'subscribe',
+    };
+    const response = await f.request('/v1/mcp/subscriptions', input);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ subscriptions: [{ status: 'unsupported' }] });
+    expect(
+      (await f.request('/v1/mcp/subscriptions', { ...input, attachmentId: crypto.randomUUID() }))
+        .status,
+    ).toBe(404);
+    expect(
+      (await f.request('/v1/mcp/subscriptions', { ...input, expectedVersion: session.version - 1 }))
+        .status,
+    ).toBe(409);
+    await f.request('/v1/mcp/subscriptions?sessionId=' + session.id);
+    expect(f.rpc).toHaveLength(before);
+  });
+  it('notifies catalog changes and closes a subscription when its server is removed', async () => {
+    const f = await fixture({ subscriptions: true });
+    const preview = await f.preview();
+    await f.attach(preview.id);
+    const session = await f.store.session(f.session.id);
+    expect(
+      (
+        await f.request('/v1/mcp/subscriptions', {
+          sessionId: session.id,
+          attachmentId: session.mcpAttachments![0]!.id,
+          expectedVersion: session.version,
+          action: 'subscribe',
+        })
+      ).status,
+    ).toBe(200);
+    await expect.poll(() => f.streams.size).toBe(1);
+    f.notify('notifications/resources/list_changed');
+    await expect
+      .poll(
+        async () =>
+          (await (await f.request('/v1/mcp/subscriptions?sessionId=' + session.id)).json())
+            .subscriptions[0].status,
+      )
+      .toBe('changed');
+    expect(
+      (
+        await f.request('/v1/mcp/remove', {
+          id: f.registration.id,
+          expectedRevision: f.registration.revision,
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (await (await f.request('/v1/mcp/subscriptions?sessionId=' + session.id)).json())
+        .subscriptions,
+    ).toEqual([]);
+    await expect.poll(() => f.streams.size).toBe(0);
+  });
   it('serves catalog-pinned argument completions through the daemon API', async () => {
     const f = await fixture();
     expect(f.registration.supportsCompletions).toBe(true);

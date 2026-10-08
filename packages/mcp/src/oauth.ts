@@ -15,6 +15,8 @@ export interface OAuthTokenRecord extends OAuthBinding {
   refreshToken?: string;
   expiresAt: number | null;
   scopes: string[];
+  /** Dynamic public-client ID; configured clientId stays empty for a stable storage binding. */
+  registeredClientId?: string;
 }
 /** Store only in the application's private .env/keychain, never in session storage. */
 export interface OAuthTokenStore {
@@ -30,6 +32,7 @@ export interface OAuthPreparation extends OAuthBinding {
   origins: string[];
   scopes: string[];
   expiresAt: number;
+  registrationEndpoint?: string;
 }
 export interface OAuthStatus {
   id: string;
@@ -39,6 +42,7 @@ export interface OAuthStatus {
 }
 interface Preparation extends OAuthPreparation {
   issuerRequired: boolean;
+  registeredClientId?: string;
 }
 interface Flow {
   preview: Preparation;
@@ -94,7 +98,10 @@ function endpoint(value: unknown): URL {
   return url;
 }
 function binding(value: OAuthBinding): OAuthBinding {
-  return { resourceUrl: endpoint(value.resourceUrl).href, clientId: text(value.clientId, 1000) };
+  return {
+    resourceUrl: endpoint(value.resourceUrl).href,
+    clientId: value.clientId === '' ? '' : text(value.clientId, 1000),
+  };
 }
 function scopes(value: unknown): string[] {
   if (value === undefined) return [];
@@ -127,6 +134,10 @@ export function validateOAuthTokenRecord(value: unknown, expected: OAuthBinding)
     record.clientId !== selected.clientId
   )
     fail('BINDING', 'OAuth 토큰이 선택한 MCP 서버 및 client ID와 일치하지 않습니다.');
+  const registeredClientId =
+    selected.clientId === '' ? text(record.registeredClientId, 1000) : undefined;
+  if (selected.clientId !== '' && record.registeredClientId !== undefined)
+    fail('BINDING', '사전 등록 client ID와 자동 등록 ID를 함께 사용할 수 없습니다.');
   endpoint(record.issuer);
   const tokenEndpoint = endpoint(record.tokenEndpoint).href;
   if (
@@ -145,6 +156,7 @@ export function validateOAuthTokenRecord(value: unknown, expected: OAuthBinding)
     ...(record.refreshToken === undefined ? {} : { refreshToken: text(record.refreshToken, 8192) }),
     expiresAt: record.expiresAt as number | null,
     scopes: scopes(record.scopes),
+    ...(registeredClientId ? { registeredClientId } : {}),
   };
 }
 function equalSecret(left: string, right: string): boolean {
@@ -206,7 +218,8 @@ function bearerChallenge(header: string): Record<string, string> {
   return result;
 }
 
-/** Explicit, pre-registered public clients only. No client registration, OAuth UI, or tool replay. */
+/** Public clients only. Dynamic registration happens after explicit endpoint review.
+ * Registration, token exchange and rotating refresh requests are never replayed. */
 export class McpOAuthManager {
   private readonly preparations = new Map<string, Preparation>();
   private readonly flows = new Map<string, Flow>();
@@ -376,7 +389,16 @@ export class McpOAuthManager {
         !Array.isArray(metadata.token_endpoint_auth_methods_supported) ||
         !metadata.token_endpoint_auth_methods_supported.includes('none')
       )
-        fail('CLIENT', 'client secret이 없는 사전 등록 public client가 필요합니다.');
+        fail('CLIENT', 'client secret이 없는 public client 인증이 필요합니다.');
+      const registrationEndpoint =
+        selected.clientId === ''
+          ? metadata.registration_endpoint
+            ? endpoint(metadata.registration_endpoint).href
+            : fail(
+                'REGISTRATION',
+                '이 서버는 자동 client 등록을 지원하지 않습니다. 발급받은 client ID를 입력하세요.',
+              )
+          : undefined;
       const challengeScope = challengeValues.scope;
       const requestedScopes = scopes(
         input.scopes ??
@@ -394,6 +416,7 @@ export class McpOAuthManager {
         tokenEndpoint,
         scopes: requestedScopes,
         expiresAt: this.now() + this.ttl,
+        ...(registrationEndpoint ? { registrationEndpoint } : {}),
         origins: [
           ...new Set([
             resource.origin,
@@ -401,6 +424,7 @@ export class McpOAuthManager {
             issuerUrl.origin,
             new URL(authorizationEndpoint).origin,
             new URL(tokenEndpoint).origin,
+            ...(registrationEndpoint ? [new URL(registrationEndpoint).origin] : []),
           ]),
         ].sort(),
         issuerRequired: metadata.authorization_response_iss_parameter_supported === true,
@@ -574,10 +598,66 @@ export class McpOAuthManager {
         consumed: false,
       };
       this.flows.set(preparation.id, flow);
+      if (preparation.registrationEndpoint) {
+        try {
+          const registered = await this.json(
+            preparation.registrationEndpoint,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+              body: JSON.stringify({
+                client_name: 'Lodex',
+                application_type: 'native',
+                redirect_uris: [redirectUri],
+                grant_types: ['authorization_code', 'refresh_token'],
+                response_types: ['code'],
+                token_endpoint_auth_method: 'none',
+                ...(preparation.scopes.length ? { scope: preparation.scopes.join(' ') } : {}),
+              }),
+            },
+            flow.controller.signal,
+          );
+          flow.controller.signal.throwIfAborted();
+          if (
+            !registered ||
+            registered.token_endpoint_auth_method !== 'none' ||
+            registered.client_secret !== undefined ||
+            !Array.isArray(registered.redirect_uris) ||
+            registered.redirect_uris.length !== 1 ||
+            registered.redirect_uris[0] !== redirectUri ||
+            (registered.response_types !== undefined &&
+              (!Array.isArray(registered.response_types) ||
+                registered.response_types.length !== 1 ||
+                registered.response_types[0] !== 'code')) ||
+            (registered.grant_types !== undefined &&
+              (!Array.isArray(registered.grant_types) ||
+                !registered.grant_types.includes('authorization_code') ||
+                registered.grant_types.some(
+                  (grant) => !['authorization_code', 'refresh_token'].includes(String(grant)),
+                )))
+          )
+            fail(
+              'REGISTRATION',
+              'OAuth 자동 등록 응답이 요청한 public client 및 callback과 일치하지 않습니다.',
+            );
+          if (
+            registered.scope !== undefined &&
+            (typeof registered.scope !== 'string' ||
+              scopes(registered.scope.split(' ').filter(Boolean)).some(
+                (scope) => !preparation.scopes.includes(scope),
+              ))
+          )
+            fail('SCOPE', 'OAuth 자동 등록 응답이 검토한 scope를 초과했습니다.');
+          preparation.registeredClientId = text(registered.client_id, 1000);
+        } catch (error) {
+          this.finish(flow, 'failed', safeError(error).message);
+          throw error;
+        }
+      }
       const authorization = new URL(preparation.authorizationEndpoint);
       authorization.search = new URLSearchParams({
         response_type: 'code',
-        client_id: preparation.clientId,
+        client_id: preparation.registeredClientId ?? preparation.clientId,
         redirect_uri: redirectUri,
         state,
         code_challenge: createHash('sha256').update(verifier).digest('base64url'),
@@ -625,12 +705,17 @@ export class McpOAuthManager {
     return result;
   }
   private async exchange(
-    expected: OAuthBinding & { issuer: string; tokenEndpoint: string; scopes: string[] },
+    expected: OAuthBinding & {
+      issuer: string;
+      tokenEndpoint: string;
+      scopes: string[];
+      registeredClientId?: string;
+    },
     params: URLSearchParams,
     signal: AbortSignal,
     previousRefresh?: string,
   ): Promise<OAuthTokenRecord> {
-    params.set('client_id', expected.clientId);
+    params.set('client_id', expected.registeredClientId ?? expected.clientId);
     params.set('resource', expected.resourceUrl);
     const response = await this.json(
       expected.tokenEndpoint,
@@ -679,6 +764,7 @@ export class McpOAuthManager {
         version: 1,
         resourceUrl: expected.resourceUrl,
         clientId: expected.clientId,
+        ...(expected.registeredClientId ? { registeredClientId: expected.registeredClientId } : {}),
         issuer: expected.issuer,
         tokenEndpoint: expected.tokenEndpoint,
         accessToken: response.access_token,

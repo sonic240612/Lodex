@@ -1,3 +1,4 @@
+import { t as localize } from './i18n';
 import { activityProposal, type Activity } from '@lodex/contracts';
 import { EditReview, editStatusText } from './EditReview';
 import { PlanReview } from './PlanReview';
@@ -30,10 +31,11 @@ const toolTitles: Record<string, string> = {
   update_task: '작업 상태 갱신',
 };
 export function activityTitle(activity: Activity) {
-  if (activity.label === 'Eco 증분 LLM 압축') return 'Eco 자동 요약';
-  if (activity.kind === 'thinking') return activity.status === 'running' ? '생각 중' : '생각 과정';
+  if (activity.label === 'Eco 증분 LLM 압축') return localize('Eco 자동 요약');
+  if (activity.kind === 'thinking')
+    return activity.status === 'running' ? localize('생각 중') : localize('생각 과정');
   if (activity.mcpCall) return `MCP · ${activity.mcpCall.toolName}`;
-  return toolTitles[activity.label] ?? activity.label;
+  return toolTitles[activity.label] ? localize(toolTitles[activity.label]!) : activity.label;
 }
 function activityTarget(activity: Activity): string {
   if (['Eco 자동 요약', 'Eco 증분 LLM 압축', '컨텍스트 자동 LLM 압축'].includes(activity.label)) {
@@ -43,7 +45,11 @@ function activityTarget(activity: Activity): string {
         typeof result.originalInputTokens === 'number' &&
         typeof result.compactedInputTokens === 'number'
       )
-        return `${result.originalInputTokens.toLocaleString()} → ${result.compactedInputTokens.toLocaleString()} 토큰`;
+        return localize(
+          '{0} → {1} 토큰',
+          result.originalInputTokens.toLocaleString(),
+          result.compactedInputTokens.toLocaleString(),
+        );
     } catch {
       /* The summary is still streaming, or no checkpoint was applied. */
     }
@@ -72,18 +78,18 @@ export function needsAttention(activity: Activity) {
   );
 }
 function activityStatus(activity: Activity) {
-  if (activity.approval?.status === 'pending') return '승인 대기';
-  if (activity.elicitation?.status === 'pending') return '입력 대기';
-  if (activity.mcpCall?.status === 'unknown') return '실행 결과 미확인';
-  if (activity.execution?.cleanupPending) return '실행 환경 정리 필요';
+  if (activity.approval?.status === 'pending') return localize('승인 대기');
+  if (activity.elicitation?.status === 'pending') return localize('입력 대기');
+  if (activity.mcpCall?.status === 'unknown') return localize('실행 결과 미확인');
+  if (activity.execution?.cleanupPending) return localize('실행 환경 정리 필요');
   if (activity.execution)
     return activity.execution.status === 'completed'
-      ? '종료 코드 0'
+      ? localize('종료 코드 0')
       : ['running', 'starting'].includes(activity.execution.status)
-        ? '명령 실행 중'
-        : '명령 중단·실패';
+        ? localize('명령 실행 중')
+        : localize('명령 중단·실패');
   const proposal = activityProposal(activity);
-  return proposal ? editStatusText[proposal.status] : statusText[activity.status];
+  return localize(proposal ? editStatusText[proposal.status] : statusText[activity.status]);
 }
 export function ActivityCards({
   activities,
@@ -117,7 +123,9 @@ export function ActivityCards({
               {activityTarget(activity) && (
                 <code className="activity-target">{activityTarget(activity)}</code>
               )}
-              {activity.fusion && <span className="activity-fusion-label">수정 후 검증</span>}
+              {activity.fusion && (
+                <span className="activity-fusion-label">{localize('수정 후 검증')}</span>
+              )}
             </span>
             <small>{activityStatus(activity)}</small>
             <span className="activity-chevron">
@@ -127,51 +135,58 @@ export function ActivityCards({
           {activity.fusion && (
             <div className="activity-section">
               <span>
-                Action Fusion · 파일 변경·후속 명령 묶음
+                {localize('Action Fusion · 파일 변경·후속 명령 묶음')}
                 {activity.fusion.environment
-                  ? ` · ${activity.fusion.environment === 'host' ? '호스트' : 'Docker'}`
+                  ? ` · ${activity.fusion.environment === 'host' ? localize('호스트') : 'Docker'}`
                   : ''}
               </span>
               <p>
                 {activity.fusion.status === 'succeeded'
-                  ? '변경 적용 후 명령이 종료 코드 0으로 완료됐습니다.'
+                  ? localize('변경 적용 후 명령이 종료 코드 0으로 완료됐습니다.')
                   : activity.fusion.status === 'failed'
-                    ? '변경은 유지되며 후속 명령은 실패하거나 중단됐습니다.'
+                    ? localize('변경은 유지되며 후속 명령은 실패하거나 중단됐습니다.')
                     : activity.fusion.status === 'skipped'
-                      ? '후속 명령을 실행하지 않았습니다. 권한·변경 상태·충돌 결과를 확인하세요.'
-                      : '변경과 후속 명령을 함께 처리합니다.'}
+                      ? localize(
+                          '후속 명령을 실행하지 않았습니다. 권한·변경 상태·충돌 결과를 확인하세요.',
+                        )
+                      : localize('변경과 후속 명령을 함께 처리합니다.')}
               </p>
             </div>
           )}
           {activity.observation && (
             <div className="activity-section">
               <span>
-                ObservationPack · 원문 로컬 보관 · {activity.observation.bytes.toLocaleString()}{' '}
-                bytes
+                {localize('ObservationPack · 원문 로컬 보관 · ')}
+                {activity.observation.bytes.toLocaleString()} bytes
               </span>
               <code>{activity.observation.id}</code>
             </div>
           )}
           {activity.subagents && (
-            <div className="subagent-records" aria-label="서브에이전트 작업">
+            <div className="subagent-records" aria-label={localize('서브에이전트 작업')}>
               {activity.subagents.map((child) => (
                 <details className="activity-card" key={child.id}>
                   <summary>
                     <span className={'activity-dot ' + child.status} />
                     <span>{child.task}</span>
                     <small>
-                      {child.status === 'queued' ? '대기 중' : statusText[child.status]}
+                      {child.status === 'queued'
+                        ? localize('대기 중')
+                        : localize(statusText[child.status])}
                     </small>
                   </summary>
                   <div className="activity-section">
                     <span>
-                      {child.provider} · {child.model} · 모델 {child.modelCalls}회 · 도구{' '}
-                      {child.toolCalls}회
+                      {child.provider} · {child.model}
+                      {localize(' · 모델 ')}
+                      {child.modelCalls}
+                      {localize('회 · 도구')} {child.toolCalls}
+                      {localize('회')}
                       {typeof child.usage?.inputTokens === 'number'
-                        ? ` · 입력 ${child.usage.inputTokens.toLocaleString()} 토큰`
+                        ? localize(' · 입력 {0} 토큰', child.usage.inputTokens.toLocaleString())
                         : ''}
                       {typeof child.usage?.outputTokens === 'number'
-                        ? ` · 출력 ${child.usage.outputTokens.toLocaleString()} 토큰`
+                        ? localize(' · 출력 {0} 토큰', child.usage.outputTokens.toLocaleString())
                         : ''}
                       {typeof child.usage?.costUsd === 'number'
                         ? ` · $${child.usage.costUsd.toFixed(6)}`
@@ -179,13 +194,13 @@ export function ActivityCards({
                     </span>
                     {child.mode === 'build' && (
                       <p>
-                        Worktree에서 파일 수정·명령 실행
+                        {localize('Worktree에서 파일 수정·명령 실행')}
                         {child.worktreeId && <code> · {child.worktreeId}</code>}
                         <br />
-                        설정 → Worktree에서 변경을 검토하고 원본에 적용할 수 있습니다.
+                        {localize('설정 → Worktree에서 변경을 검토하고 원본에 적용할 수 있습니다.')}
                       </p>
                     )}
-                    <pre>{child.text || '결과 대기 중…'}</pre>
+                    <pre>{child.text || localize('결과 대기 중…')}</pre>
                     {child.error && <p role="alert">{child.error}</p>}
                   </div>
                 </details>
@@ -204,22 +219,22 @@ export function ActivityCards({
           {activity.approval && (
             <div className="activity-section approval-record">
               <span>
-                권한 ·{' '}
+                {localize('권한 ·')}{' '}
                 {activity.approval.mode === 'ask'
-                  ? '승인 요청'
+                  ? localize('승인 요청')
                   : activity.approval.mode === 'auto'
-                    ? '대신 승인'
-                    : '전체 접근'}
+                    ? localize('대신 승인')
+                    : localize('전체 접근')}
               </span>
               <small>
                 {activity.approval.status === 'pending'
-                  ? '사용자 결정 대기 중'
+                  ? localize('사용자 결정 대기 중')
                   : activity.approval.status === 'approved'
                     ? activity.approval.decidedBy === 'user'
-                      ? '사용자 승인'
-                      : '정책 자동 승인'
-                    : '사용자 거절'}{' '}
-                · {activity.approval.risk === 'high' ? '높은 위험' : '일반'}
+                      ? localize('사용자 승인')
+                      : localize('정책 자동 승인')
+                    : localize('사용자 거절')}{' '}
+                · {activity.approval.risk === 'high' ? localize('높은 위험') : localize('일반')}
                 {' · '}
                 {activity.approval.actor === 'telegram' ? 'Telegram' : 'Desktop'}
               </small>
@@ -230,27 +245,34 @@ export function ActivityCards({
           {activity.elicitation && (
             <div className="activity-section">
               <span>
-                MCP 사용자 입력 · {activity.elicitation.mode === 'url' ? '외부 링크' : '폼'}
+                {localize('MCP 사용자 입력 · ')}
+                {activity.elicitation.mode === 'url' ? localize('외부 링크') : localize('폼')}
               </span>
               <small>
                 {activity.elicitation.status === 'pending'
-                  ? '사용자 입력 대기 중'
+                  ? localize('사용자 입력 대기 중')
                   : activity.elicitation.status === 'accepted'
-                    ? '제출됨 · 입력값은 저장하지 않음'
+                    ? localize('제출됨 · 입력값은 저장하지 않음')
                     : activity.elicitation.status === 'declined'
-                      ? '거절됨'
-                      : '취소됨'}
+                      ? localize('거절됨')
+                      : localize('취소됨')}
               </small>
               <p>{activity.elicitation.message}</p>
             </div>
           )}
           {activity.execution && (
             <div className="activity-section">
-              <span>명령 · {activity.execution.cwd}</span>
+              <span>
+                {localize('명령 · ')}
+                {activity.execution.cwd}
+              </span>
               <pre>{activity.execution.command}</pre>
-              <span>출력 · 종료 코드 {activity.execution.exitCode ?? '미확인'}</span>
-              <pre>{activity.execution.output || '출력 없음'}</pre>
-              {activity.execution.truncated && <p>출력 일부가 생략되었습니다.</p>}
+              <span>
+                {localize('출력 · 종료 코드 ')}
+                {activity.execution.exitCode ?? localize('미확인')}
+              </span>
+              <pre>{activity.execution.output || localize('출력 없음')}</pre>
+              {activity.execution.truncated && <p>{localize('출력 일부가 생략되었습니다.')}</p>}
               {activity.execution.error && <p role="alert">{activity.execution.error}</p>}
             </div>
           )}
@@ -272,19 +294,31 @@ export function ActivityCards({
             <>
               {activity.arguments !== undefined && (
                 <div className="activity-section">
-                  <span>입력 · {activity.label}</span>
-                  <pre>{activity.arguments || '인자 수신 중…'}</pre>
+                  <span>
+                    {localize('입력 · ')}
+                    {activity.label}
+                  </span>
+                  <pre>{activity.arguments || localize('인자 수신 중…')}</pre>
                 </div>
               )}
               <div className="activity-section">
-                {activity.kind === 'tool' && <span>결과</span>}
+                {activity.kind === 'tool' && <span>{localize('결과')}</span>}
+                {activity.browserImage && (
+                  <img
+                    className="browser-result-image"
+                    src={`data:image/png;base64,${activity.browserImage.base64}`}
+                    alt={localize('브라우저 화면: {0}', activity.browserImage.url)}
+                    loading="lazy"
+                    style={{ maxWidth: '100%', borderRadius: 10 }}
+                  />
+                )}
                 <pre>
                   {activity.text ||
                     (activity.status === 'running'
-                      ? '수신 중…'
+                      ? localize('수신 중…')
                       : activity.kind === 'thinking'
-                        ? '제공자가 읽을 수 있는 thinking 내용을 반환하지 않았습니다.'
-                        : '결과가 없습니다.')}
+                        ? localize('제공자가 읽을 수 있는 thinking 내용을 반환하지 않았습니다.')
+                        : localize('결과가 없습니다.'))}
                 </pre>
               </div>
             </>
@@ -295,7 +329,7 @@ export function ActivityCards({
   );
   if (inline) return cards;
   return (
-    <details className="activity-feed" aria-label="생각과 도구 활동">
+    <details className="activity-feed" aria-label={localize('생각과 도구 활동')}>
       <summary className="activity-feed-summary">
         <span
           className={'activity-feed-indicator' + (current ? ' running' : '')}
@@ -304,14 +338,22 @@ export function ActivityCards({
           <Icon name={current ? 'bolt' : attention ? 'info' : 'check'} size={16} />
         </span>
         <span className="activity-feed-heading">
-          {current ? activityTitle(current) : `활동 ${activities.length}개`}
+          {current ? activityTitle(current) : localize('활동 {0}개', activities.length)}
           {current && activityTarget(current) && (
             <span className="activity-target">{activityTarget(current)}</span>
           )}
         </span>
-        {attention > 0 && <span className="activity-attention">확인 필요 {attention}</span>}
+        {attention > 0 && (
+          <span className="activity-attention">
+            {localize('확인 필요 ')}
+            {attention}
+          </span>
+        )}
         <span className="activity-count">
-          {[tools ? `도구 ${tools}` : '', thoughts ? `생각 ${thoughts}` : '']
+          {[
+            tools ? localize('도구 {0}', tools) : '',
+            thoughts ? localize('생각 {0}', thoughts) : '',
+          ]
             .filter(Boolean)
             .join(' · ')}
         </span>

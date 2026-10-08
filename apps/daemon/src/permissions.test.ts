@@ -32,6 +32,12 @@ describe('permission policy', () => {
         destructive: true,
       }),
     ).toMatchObject({ action: 'prompt', risk: 'high' });
+    expect(
+      permissionDecision('auto', { kind: 'file', paths: ['image.png'], binary: true }),
+    ).toMatchObject({ action: 'prompt', risk: 'high' });
+    expect(
+      permissionDecision('full', { kind: 'file', paths: ['image.png'], binary: true }).action,
+    ).toBe('allow');
   });
 
   it.each([

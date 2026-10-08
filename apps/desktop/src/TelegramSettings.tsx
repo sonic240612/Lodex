@@ -1,3 +1,4 @@
+import { t as localize } from './i18n';
 import { SettingsSurface } from './SettingsSurface';
 import { useEffect, useRef, useState } from 'react';
 import type { TelegramStatus, TelegramConfig, Session } from '@lodex/contracts';
@@ -86,7 +87,11 @@ export function TelegramSettings({
       setStatus(result);
       setDraft(result.config);
       setToken('');
-      setNotice(value ? '봇 토큰을 OS 보안 저장소에 저장했습니다.' : '봇 토큰을 제거했습니다.');
+      setNotice(
+        value
+          ? localize('봇 토큰을 OS 보안 저장소에 저장했습니다.')
+          : localize('봇 토큰을 제거했습니다.'),
+      );
     } catch (error) {
       setError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -106,13 +111,18 @@ export function TelegramSettings({
     >
       <div className="dialog-header">
         <h2>Telegram</h2>
-        <button className="icon-button" aria-label="닫기" disabled={busy} onClick={onClose}>
+        <button
+          className="icon-button"
+          aria-label={localize('닫기')}
+          disabled={busy}
+          onClick={onClose}
+        >
           <Icon name="close" />
         </button>
       </div>
       <div className="integration-body">
         <label className="field">
-          봇 토큰
+          {localize('봇 토큰')}
           <div className="input-action">
             <input
               type="password"
@@ -125,7 +135,7 @@ export function TelegramSettings({
                 status?.tokenSource === 'environment' ||
                 status?.tokenSource === 'env_file'
               }
-              placeholder={status?.configured ? '새 토큰으로 교체' : '123456789:AA…'}
+              placeholder={status?.configured ? localize('새 토큰으로 교체') : '123456789:AA…'}
               onChange={(event) => setToken(event.target.value)}
             />
             <button
@@ -140,7 +150,7 @@ export function TelegramSettings({
               }
               onClick={() => void saveToken(token.trim())}
             >
-              토큰 저장
+              {localize('토큰 저장')}
             </button>
             {status?.configured && (
               <button
@@ -154,22 +164,24 @@ export function TelegramSettings({
                 }
                 onClick={() => void saveToken(null)}
               >
-                제거
+                {localize('제거')}
               </button>
             )}
           </div>
           <small>
             {status?.tokenSource === 'env_file'
-              ? '.env에서 불러왔습니다.'
+              ? localize('.env에서 불러왔습니다.')
               : status?.tokenSource === 'environment'
-                ? '환경 변수에서 불러왔습니다.'
-                : '직접 저장한 토큰은 OS 보안 저장소에서 관리합니다.'}
+                ? localize('환경 변수에서 불러왔습니다.')
+                : localize('직접 저장한 토큰은 OS 보안 저장소에서 관리합니다.')}
           </small>
-          {status?.config.enabled && <small>토큰을 변경하려면 먼저 연결을 끄고 저장하세요.</small>}
+          {status?.config.enabled && (
+            <small>{localize('토큰을 변경하려면 먼저 연결을 끄고 저장하세요.')}</small>
+          )}
         </label>
         <p role="status">
-          {status?.configured ? '토큰 설정됨' : '토큰 미설정'} ·{' '}
-          {status?.running ? '수신 중' : '연결 꺼짐'}
+          {status?.configured ? localize('토큰 설정됨') : localize('토큰 미설정')} ·{' '}
+          {status?.running ? localize('수신 중') : localize('연결 꺼짐')}
           {status?.bot ? ' · @' + status.bot.username : ''}
         </p>
         {notice && <p role="status">{notice}</p>}
@@ -181,12 +193,12 @@ export function TelegramSettings({
         >
           <fieldset disabled={busy || !nativeDesktop}>
             <label>
-              연결할 대화
+              {localize('연결할 대화')}
               <select
                 value={draft.sessionId ?? ''}
                 onChange={(event) => setDraft({ ...draft, sessionId: event.target.value || null })}
               >
-                <option value="">대화 선택</option>
+                <option value="">{localize('대화 선택')}</option>
                 {sessions.map((session) => (
                   <option key={session.id} value={session.id}>
                     {session.title}
@@ -200,7 +212,7 @@ export function TelegramSettings({
                 checked={draft.enabled}
                 onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })}
               />
-              Telegram 연결 켜기
+              {localize('Telegram 연결 켜기')}
             </label>
             <label className="check-row">
               <input
@@ -208,7 +220,7 @@ export function TelegramSettings({
                 checked={draft.allowBuild}
                 onChange={(event) => setDraft({ ...draft, allowBuild: event.target.checked })}
               />
-              Build 모드 원격 요청 허용
+              {localize('Build 모드 원격 요청 허용')}
             </label>
             <label className="check-row">
               <input
@@ -218,37 +230,43 @@ export function TelegramSettings({
                   setDraft({ ...draft, transmissionConsent: event.target.checked })
                 }
               />
-              선택한 대화의 요청·답변·목표를 Telegram으로 전송 허용
+              {localize('선택한 대화의 요청·답변·목표를 Telegram으로 전송 허용')}
             </label>
             <button className="primary-button" disabled={!status}>
-              연결 설정 저장
+              {localize('연결 설정 저장')}
             </button>
           </fieldset>
         </form>
         {status?.config.enabled && !status.owner && (
           <section className="integration-section">
-            <h3>계정 연결</h3>
+            <h3>{localize('계정 연결')}</h3>
             <button disabled={busy} onClick={() => void action('pair')}>
-              연결 코드 만들기
+              {localize('연결 코드 만들기')}
             </button>
             {pair && pair.expiresAt > Date.now() && (
               <p>
-                봇의 개인 채팅에서 <code>/pair {pair.code}</code> 전송 · 5분 이내
+                {localize('봇의 개인 채팅에서 ')}
+                <code>/pair {pair.code}</code>
+                {localize(' 전송 · 5분 이내')}
               </p>
             )}
             {status.candidate && (
               <>
                 <p>
-                  연결 요청: {status.candidate.name}
+                  {localize('연결 요청: ')}
+                  {status.candidate.name}
                   <br />
-                  사용자 {status.candidate.userId} · 채팅 {status.candidate.chatId}
+                  {localize('사용자 ')}
+                  {status.candidate.userId}
+                  {localize(' · 채팅 ')}
+                  {status.candidate.chatId}
                 </p>
                 <button
                   className="primary-button"
                   disabled={busy}
                   onClick={() => void action('approve')}
                 >
-                  이 계정 연결 승인
+                  {localize('이 계정 연결 승인')}
                 </button>
               </>
             )}
@@ -257,26 +275,34 @@ export function TelegramSettings({
         {status?.owner && (
           <section className="integration-section">
             <p>
-              연결 계정: {status.owner.name} · {status.owner.userId}
+              {localize('연결 계정: ')}
+              {status.owner.name} · {status.owner.userId}
             </p>
             <button className="danger-button" disabled={busy} onClick={() => void action('unpair')}>
-              계정 연결 해제
+              {localize('계정 연결 해제')}
             </button>
           </section>
         )}
         <p>
-          <code>/ask 메시지</code> · <code>/status</code> · <code>/plan 내용</code> ·{' '}
-          <code>/approve</code> · <code>/deny</code> · <code>/stop</code>
+          <code>{localize('/ask 메시지')}</code> · <code>/status</code> ·{' '}
+          <code>{localize('/plan 내용')}</code> · <code>/approve</code> · <code>/deny</code> ·{' '}
+          <code>/stop</code>
         </p>
         <p>
-          일반 텍스트는 Build로, /plan 내용은 Plan으로 요청합니다. 원격 Build는 위 설정에서 허용해야
-          합니다. 앱이 실행 중일 때만 연결됩니다.
+          {localize(
+            '일반 텍스트는 Build로, /plan 내용은 Plan으로 요청합니다. 원격 Build는 위 설정에서 허용해야 합니다. 앱이 실행 중일 때만 연결됩니다.',
+          )}
         </p>
-        <p>연결 해제 후에도 이미 시작한 작업은 계속됩니다. 실행을 멈추려면 대화에서 중지하세요.</p>
+        <p>
+          {localize(
+            '연결 해제 후에도 이미 시작한 작업은 계속됩니다. 실행을 멈추려면 대화에서 중지하세요.',
+          )}
+        </p>
         {!!status?.unknownDeliveries && (
           <p role="status">
-            전달 결과 미확인 {status.unknownDeliveries}건 · 중복 전송을 피하려고 자동 재전송하지
-            않았습니다.
+            {localize('전달 결과 미확인 ')}
+            {status.unknownDeliveries}
+            {localize('건 · 중복 전송을 피하려고 자동 재전송하지 않았습니다.')}
           </p>
         )}
         {(error || status?.error) && (

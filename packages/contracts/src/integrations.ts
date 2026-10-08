@@ -32,13 +32,16 @@ export interface TelegramStatus {
 }
 export interface WorktreeRecord {
   merge?: {
-    status: 'applying' | 'applied' | 'partial' | 'interrupted';
+    status: 'applying' | 'applied' | 'partial' | 'interrupted' | 'reverted';
     previewId: string;
+    backupId?: string;
+    reviewVersion?: string;
     files: {
       path: string;
       beforeHash: string | null;
       afterHash: string | null;
       applied: boolean;
+      afterIdentity?: string | null;
     }[];
   };
   id: string;
@@ -48,7 +51,15 @@ export interface WorktreeRecord {
   path: string;
   projectId?: string;
   createdAt: string;
-  status: 'creating' | 'ready' | 'interrupted';
+  status: 'creating' | 'ready' | 'interrupted' | 'archived';
+  ownership?: {
+    projectIdentity: string;
+    gitFileHash: string;
+    projectExactIdentity?: string;
+    gitFileIdentity?: string;
+  };
+  reviewed?: Record<string, { theirsHash: string | null; sourceHash: string | null }>;
+  archive?: { commit: string; ref: string; createdAt: string };
   error?: string;
 }
 export interface WorktreePreview {
@@ -56,6 +67,11 @@ export interface WorktreePreview {
   worktreeId: string;
   sourceProjectId: string;
   createdAt: string;
+  reviewVersion?: string;
+  totalPaths?: number;
+  offset?: number;
+  nextOffset?: number | null;
+  paths?: string[];
   files: {
     path: string;
     before: string | null;
@@ -65,5 +81,10 @@ export interface WorktreePreview {
     theirsHash: string | null;
     conflict: boolean;
     diff: string;
+    binary?: boolean;
+    beforeBytes?: number;
+    theirsBytes?: number;
+    diffTruncated?: boolean;
   }[];
 }
+export type WorktreeResolution = string | null | { choice: 'ours' | 'theirs' };

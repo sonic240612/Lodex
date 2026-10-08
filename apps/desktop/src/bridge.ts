@@ -1,3 +1,4 @@
+import { t as localize } from './i18n';
 import { Channel, invoke, isTauri } from '@tauri-apps/api/core';
 import type { DiscoveredSkill, RegisteredSkill, SkillDialect } from '@lodex/skills';
 import type { McpConfig, McpRegistration, McpImport } from '@lodex/mcp';
@@ -13,6 +14,7 @@ import {
   type CommandResult,
   type DomainEvent,
   type ModelDescriptor,
+  type ModelCatalogSnapshot,
   type Session,
   type Snapshot,
   type Project,
@@ -30,13 +32,41 @@ import {
   type RuntimeSettings,
   type ModelDownloadInput,
   type ModelInspection,
+  type EngineCatalog,
+  type EngineInstallInput,
   type BackupSettings,
   type BackupSnapshot,
+  type BackupImportPreview,
+  type BackupImportResult,
   type McpContentInput,
   type McpContentPreview,
   type McpCompletionInput,
   type McpCompletionResult,
+  type McpResourceSubscription,
+  type McpSubscriptionInput,
 } from '@lodex/contracts';
+export async function mcpResourceSubscriptions(
+  sessionId: string,
+): Promise<McpResourceSubscription[]> {
+  if (!nativeDesktop) return [];
+  const result = await invoke<{ subscriptions: McpResourceSubscription[] }>('daemon_request', {
+    method: 'GET',
+    path: '/v1/mcp/subscriptions?sessionId=' + encodeURIComponent(sessionId),
+    body: null,
+  });
+  return result.subscriptions;
+}
+export async function changeMcpResourceSubscription(
+  input: McpSubscriptionInput,
+): Promise<McpResourceSubscription[]> {
+  if (!nativeDesktop) throw new Error('데스크톱 앱에서 변경 알림을 연결하세요.');
+  const result = await invoke<{ subscriptions: McpResourceSubscription[] }>('daemon_request', {
+    method: 'POST',
+    path: '/v1/mcp/subscriptions',
+    body: input,
+  });
+  return result.subscriptions;
+}
 export async function telegramStatus(): Promise<TelegramStatus> {
   if (!nativeDesktop)
     return {
@@ -48,49 +78,139 @@ export async function telegramStatus(): Promise<TelegramStatus> {
     };
   return invoke('daemon_request', { method: 'GET', path: '/v1/telegram', body: null });
 }
+export async function browserSettings(): Promise<import('@lodex/contracts').BrowserSettings> {
+  if (!nativeDesktop) return { version: 0, config: { enabled: false, channel: 'msedge' } };
+  return invoke('daemon_request', { method: 'GET', path: '/v1/browser', body: null });
+}
+export async function automationList(): Promise<import('@lodex/contracts').AutomationSnapshot> {
+  if (!nativeDesktop) return { version: 0, records: [] };
+  return invoke('daemon_request', { method: 'GET', path: '/v1/automations', body: null });
+}
+export async function saveAutomation(
+  automation: import('@lodex/contracts').AutomationInput,
+  version: number,
+): Promise<import('@lodex/contracts').AutomationSnapshot> {
+  if (!nativeDesktop) throw new Error(localize('예약 실행은 데스크톱 앱에서 설정하세요.'));
+  return invoke('daemon_request', {
+    method: 'POST',
+    path: '/v1/automations',
+    body: { version, automation },
+  });
+}
+export async function removeAutomation(
+  id: string,
+  version: number,
+): Promise<import('@lodex/contracts').AutomationSnapshot> {
+  if (!nativeDesktop) throw new Error(localize('예약 실행은 데스크톱 앱에서 설정하세요.'));
+  return invoke('daemon_request', {
+    method: 'POST',
+    path: '/v1/automations/remove',
+    body: { version, id },
+  });
+}
+export async function saveBrowserSettings(
+  body: import('@lodex/contracts').BrowserSettings,
+): Promise<import('@lodex/contracts').BrowserSettings> {
+  if (!nativeDesktop) throw new Error(localize('브라우저 도구는 데스크톱 앱에서 설정하세요.'));
+  return invoke('daemon_request', { method: 'POST', path: '/v1/browser', body });
+}
 export async function telegramAction(
   action: 'config' | 'pair' | 'approve' | 'unpair',
   body: TelegramConfig | { userId: number; chatId: number } | null,
 ): Promise<TelegramStatus | { code: string; expiresAt: number }> {
-  if (!nativeDesktop) throw new Error('Telegram 연결은 데스크톱 앱에서 설정하세요.');
+  if (!nativeDesktop) throw new Error(localize('Telegram 연결은 데스크톱 앱에서 설정하세요.'));
   return invoke('daemon_request', { method: 'POST', path: '/v1/telegram/' + action, body });
 }
 export async function saveTelegramToken(key: string | null): Promise<TelegramStatus> {
-  if (!nativeDesktop) throw new Error('Telegram 토큰은 데스크톱 앱에서 저장할 수 있습니다.');
+  if (!nativeDesktop)
+    throw new Error(localize('Telegram 토큰은 데스크톱 앱에서 저장할 수 있습니다.'));
   return invoke('set_telegram_token', { key });
 }
 export async function worktreeList(): Promise<{ records: WorktreeRecord[] }> {
   if (!nativeDesktop) return { records: [] };
   return invoke('daemon_request', { method: 'GET', path: '/v1/worktrees', body: null });
 }
+export async function languageServerList(): Promise<{
+  servers: import('@lodex/contracts').LanguageServerStatus[];
+}> {
+  if (!nativeDesktop) return { servers: [] };
+  return invoke('daemon_request', { method: 'GET', path: '/v1/lsp', body: null });
+}
+export async function registerLanguageServer(
+  config: import('@lodex/contracts').LanguageServerConfig,
+  id?: string,
+  expectedRevision?: string,
+) {
+  return invoke('daemon_request', {
+    method: 'POST',
+    path: '/v1/lsp/register',
+    body: { config, ...(id ? { id, expectedRevision } : {}) },
+  });
+}
+export async function languageServerAction(
+  action: 'stop' | 'remove',
+  id: string,
+  revision: string,
+): Promise<{ servers: import('@lodex/contracts').LanguageServerStatus[] }> {
+  return invoke('daemon_request', {
+    method: 'POST',
+    path: '/v1/lsp/' + action,
+    body: { id, revision },
+  });
+}
+export async function queryLanguageServer(
+  projectId: string,
+  operation: import('@lodex/contracts').LspOperation,
+  query: { serverId: string; path: string; line: number; column: number },
+): Promise<unknown> {
+  return invoke('daemon_request', {
+    method: 'POST',
+    path: '/v1/lsp/query',
+    body: { projectId, operation, query },
+  });
+}
 export async function createWorktree(
   projectId: string,
 ): Promise<{ record: WorktreeRecord; project: Project }> {
-  if (!nativeDesktop) throw new Error('worktree 생성은 데스크톱 앱에서 사용할 수 있습니다.');
+  if (!nativeDesktop)
+    throw new Error(localize('worktree 생성은 데스크톱 앱에서 사용할 수 있습니다.'));
   return invoke('daemon_request', { method: 'POST', path: '/v1/worktrees', body: { projectId } });
 }
 export const nativeDesktop = isTauri();
 export async function reviewWorktree(
   worktreeId: string,
+  options: { offset?: number; limit?: number; paths?: string[]; reviewVersion?: string } = {},
 ): Promise<import('@lodex/contracts').WorktreePreview> {
-  if (!nativeDesktop) throw new Error('Worktree 검토는 데스크톱 앱에서 사용할 수 있습니다.');
+  if (!nativeDesktop)
+    throw new Error(localize('Worktree 검토는 데스크톱 앱에서 사용할 수 있습니다.'));
   return (
     await invoke<{ preview: import('@lodex/contracts').WorktreePreview }>('daemon_request', {
       method: 'POST',
       path: '/v1/worktrees/review',
-      body: { worktreeId },
+      body: { worktreeId, ...options },
     })
   ).preview;
 }
 export async function mergeWorktree(
   sessionId: string,
   previewId: string,
-  resolutions: Record<string, string | null>,
+  resolutions: Record<string, import('@lodex/contracts').WorktreeResolution>,
 ): Promise<{ record: WorktreeRecord; session: Session }> {
   return invoke('daemon_request', {
     method: 'POST',
     path: '/v1/worktrees/merge',
     body: { sessionId, previewId, resolutions },
+  });
+}
+export async function manageWorktree(
+  action: 'archive' | 'undo',
+  sessionId: string,
+  worktreeId: string,
+): Promise<{ record: WorktreeRecord; session: Session }> {
+  return invoke('daemon_request', {
+    method: 'POST',
+    path: '/v1/worktrees/' + action,
+    body: { sessionId, worktreeId },
   });
 }
 export async function commandJobs(
@@ -108,11 +228,27 @@ export async function commandJobAction(
   action: 'input' | 'stop',
   body: { sessionId: string; jobId: string; input: string; eof: boolean },
 ): Promise<import('@lodex/contracts').CommandJob> {
-  if (!nativeDesktop) throw new Error('실행 작업 관리는 데스크톱 앱에서 사용할 수 있습니다.');
+  if (!nativeDesktop)
+    throw new Error(localize('실행 작업 관리는 데스크톱 앱에서 사용할 수 있습니다.'));
   return (
     await invoke<{ job: import('@lodex/contracts').CommandJob }>('daemon_request', {
       method: 'POST',
       path: '/v1/command-jobs/' + action,
+      body,
+    })
+  ).job;
+}
+export async function resizeCommandTerminal(body: {
+  sessionId: string;
+  jobId: string;
+  cols: number;
+  rows: number;
+}): Promise<import('@lodex/contracts').CommandJob> {
+  if (!nativeDesktop) throw new Error(localize('터미널은 데스크톱 앱에서 사용할 수 있습니다.'));
+  return (
+    await invoke<{ job: import('@lodex/contracts').CommandJob }>('daemon_request', {
+      method: 'POST',
+      path: '/v1/command-jobs/resize',
       body,
     })
   ).job;
@@ -178,7 +314,8 @@ export async function pickMcpConfig(): Promise<{
   text: string;
   cwd?: string;
 } | null> {
-  if (!nativeDesktop) throw new Error('MCP 설정 파일 선택은 데스크톱 앱에서 사용할 수 있습니다.');
+  if (!nativeDesktop)
+    throw new Error(localize('MCP 설정 파일 선택은 데스크톱 앱에서 사용할 수 있습니다.'));
   return invoke('pick_mcp_config');
 }
 export async function registerMcp(
@@ -242,7 +379,7 @@ async function previewCommand(command: Command): Promise<CommandResult> {
     };
     previewSessions.unshift(session);
   } else {
-    if (!session) throw new Error('대화를 찾을 수 없습니다.');
+    if (!session) throw new Error(localize('대화를 찾을 수 없습니다.'));
     if (command.type === 'save_plan') session.plan = command.plan;
     else if (command.type === 'save_task_list') session.taskList = command.taskList;
     else if (command.type === 'set_permission_mode') session.permissionMode = command.mode;
@@ -252,17 +389,17 @@ async function previewCommand(command: Command): Promise<CommandResult> {
       command.type === 'start_goal' ||
       command.type === 'resume_goal'
     )
-      throw new Error('자동 실행은 데스크톱 앱에서 사용할 수 있습니다.');
+      throw new Error(localize('자동 실행은 데스크톱 앱에서 사용할 수 있습니다.'));
     else if (command.type === 'stop_autopilot') {
       if (session.autopilot) session.autopilot.status = 'cancelled';
     } else if (command.type === 'set_mode') session.mode = command.mode;
     else if (command.type === 'compact_context') {
       throw new Error(
-        'LLM 컨텍스트 압축은 데스크톱 앱에서 실제 모델을 연결한 뒤 사용할 수 있습니다.',
+        localize('LLM 컨텍스트 압축은 데스크톱 앱에서 실제 모델을 연결한 뒤 사용할 수 있습니다.'),
       );
     } else if (command.type === 'quick_compact_context') {
       const complete = session.messages.filter((message) => message.status === 'complete');
-      if (!complete.length) throw new Error('압축할 완료된 대화 기록이 없습니다.');
+      if (!complete.length) throw new Error(localize('압축할 완료된 대화 기록이 없습니다.'));
       session.contextCompaction = {
         throughMessageId: complete.at(-1)!.id,
         summary: complete
@@ -276,12 +413,13 @@ async function previewCommand(command: Command): Promise<CommandResult> {
         method: 'fast',
       };
     } else if (command.type === 'configure_execution')
-      throw new Error('명령 실행은 데스크톱 앱에서 설정할 수 있습니다.');
+      throw new Error(localize('명령 실행은 데스크톱 앱에서 설정할 수 있습니다.'));
     else if (command.type === 'adopt_plan') {
       const proposal = session.messages
         .flatMap((m) => m.activities ?? [])
         .find((a) => a.id === command.activityId)?.planProposal;
-      if (!proposal || proposal.status !== 'proposed') throw new Error('검토할 계획이 없습니다.');
+      if (!proposal || proposal.status !== 'proposed')
+        throw new Error(localize('검토할 계획이 없습니다.'));
       session.plan = proposal.plan;
       proposal.status = 'adopted';
     } else if (command.type === 'configure_routing') {
@@ -291,7 +429,7 @@ async function previewCommand(command: Command): Promise<CommandResult> {
       const role = command.role ?? session.mode ?? 'build';
       if (session.routing?.[role]) session.routing = { ...session.routing, [role]: session.config };
     } else if (command.type === 'steer_run') {
-      throw new Error('실행 중 추가 지시는 데스크톱 앱에서 사용할 수 있습니다.');
+      throw new Error(localize('실행 중 추가 지시는 데스크톱 앱에서 사용할 수 있습니다.'));
     } else if (command.type === 'send_message') {
       if (command.mode) session.mode = command.mode;
       const now = new Date().toISOString();
@@ -384,7 +522,7 @@ async function previewCommand(command: Command): Promise<CommandResult> {
       });
     }
   }
-  if (!session) throw new Error('대화를 생성하지 못했습니다.');
+  if (!session) throw new Error(localize('대화를 생성하지 못했습니다.'));
   previewChanged(session);
   return { commandId: command.commandId, session: structuredClone(session), replayed: false };
 }
@@ -422,7 +560,7 @@ export async function deleteSessions(
   for (const target of targets) {
     const session = previewSessions.find((s) => s.id === target.sessionId);
     if (!session || session.version !== target.expectedVersion)
-      throw new Error('대화가 변경되었습니다. 다시 선택해 주세요.');
+      throw new Error(localize('대화가 변경되었습니다. 다시 선택해 주세요.'));
   }
   const ids = targets.map((t) => t.sessionId);
   for (let i = previewSessions.length - 1; i >= 0; i--)
@@ -443,11 +581,11 @@ export async function deleteSessions(
   return result;
 }
 export async function pickProjectFolder(): Promise<string | null> {
-  if (!nativeDesktop) throw new Error('폴더 선택은 데스크톱 앱에서 사용할 수 있습니다.');
+  if (!nativeDesktop) throw new Error(localize('폴더 선택은 데스크톱 앱에서 사용할 수 있습니다.'));
   return invoke('pick_project_folder');
 }
 export async function registeredSkills(): Promise<RegisteredSkill[]> {
-  if (!nativeDesktop) throw new Error('스킬 등록은 데스크톱 앱에서 사용할 수 있습니다.');
+  if (!nativeDesktop) throw new Error(localize('스킬 등록은 데스크톱 앱에서 사용할 수 있습니다.'));
   const result = await invoke<{ skills: RegisteredSkill[] }>('daemon_request', {
     method: 'GET',
     path: '/v1/skills',
@@ -456,7 +594,7 @@ export async function registeredSkills(): Promise<RegisteredSkill[]> {
   return result.skills;
 }
 export async function discoverSkills(projectId?: string): Promise<DiscoveredSkill[]> {
-  if (!nativeDesktop) throw new Error('스킬 검색은 데스크톱 앱에서 사용할 수 있습니다.');
+  if (!nativeDesktop) throw new Error(localize('스킬 검색은 데스크톱 앱에서 사용할 수 있습니다.'));
   const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : '';
   const result = await invoke<{ skills: DiscoveredSkill[] }>('daemon_request', {
     method: 'GET',
@@ -471,7 +609,7 @@ export async function registerSkill(input: {
   id?: string;
   expectedRevision?: string;
 }): Promise<RegisteredSkill> {
-  if (!nativeDesktop) throw new Error('데스크톱 앱에서 스킬 폴더를 선택하세요.');
+  if (!nativeDesktop) throw new Error(localize('데스크톱 앱에서 스킬 폴더를 선택하세요.'));
   const result = await invoke<{ skill: RegisteredSkill }>('daemon_request', {
     method: 'POST',
     path: '/v1/skills/register',
@@ -483,7 +621,7 @@ export async function removeSkill(
   id: string,
   expectedRevision: string,
 ): Promise<RegisteredSkill[]> {
-  if (!nativeDesktop) throw new Error('데스크톱 앱에서 스킬을 관리하세요.');
+  if (!nativeDesktop) throw new Error(localize('데스크톱 앱에서 스킬을 관리하세요.'));
   const result = await invoke<{ skills: RegisteredSkill[] }>('daemon_request', {
     method: 'POST',
     path: '/v1/skills/remove',
@@ -492,7 +630,8 @@ export async function removeSkill(
   return result.skills;
 }
 export async function editAction(action: EditAction): Promise<Session> {
-  if (!nativeDesktop) throw new Error('실제 파일 변경은 데스크톱 앱에서 사용할 수 있습니다.');
+  if (!nativeDesktop)
+    throw new Error(localize('실제 파일 변경은 데스크톱 앱에서 사용할 수 있습니다.'));
   const result = await invoke<{ session: Session }>('daemon_request', {
     method: 'POST',
     path: '/v1/edits',
@@ -501,7 +640,8 @@ export async function editAction(action: EditAction): Promise<Session> {
   return result.session;
 }
 export async function approvalAction(action: ApprovalAction): Promise<Session> {
-  if (!nativeDesktop) throw new Error('실제 권한 결정은 데스크톱 앱에서 사용할 수 있습니다.');
+  if (!nativeDesktop)
+    throw new Error(localize('실제 권한 결정은 데스크톱 앱에서 사용할 수 있습니다.'));
   const result = await invoke<{ session: Session }>('daemon_request', {
     method: 'POST',
     path: '/v1/approvals',
@@ -512,7 +652,7 @@ export async function approvalAction(action: ApprovalAction): Promise<Session> {
 export async function reconcileSessionCosts(
   session: Session,
 ): Promise<{ session: Session; reconciled: number; remaining: number; withoutId: number }> {
-  if (!nativeDesktop) throw new Error('데스크톱 앱에서 비용을 조회하세요.');
+  if (!nativeDesktop) throw new Error(localize('데스크톱 앱에서 비용을 조회하세요.'));
   return invoke('daemon_request', {
     method: 'POST',
     path: '/v1/costs/reconcile',
@@ -520,7 +660,8 @@ export async function reconcileSessionCosts(
   });
 }
 export async function elicitationAction(action: ElicitationAction): Promise<Session> {
-  if (!nativeDesktop) throw new Error('MCP 사용자 입력은 데스크톱 앱에서 사용할 수 있습니다.');
+  if (!nativeDesktop)
+    throw new Error(localize('MCP 사용자 입력은 데스크톱 앱에서 사용할 수 있습니다.'));
   const result = await invoke<{ session: Session }>('daemon_request', {
     method: 'POST',
     path: '/v1/mcp/elicitation',
@@ -529,7 +670,7 @@ export async function elicitationAction(action: ElicitationAction): Promise<Sess
   return result.session;
 }
 export async function checkExecution(image: string): Promise<{ host: string; imageId: string }> {
-  if (!nativeDesktop) throw new Error('데스크톱 앱에서 Docker를 연결하세요.');
+  if (!nativeDesktop) throw new Error(localize('데스크톱 앱에서 Docker를 연결하세요.'));
   return invoke('daemon_request', {
     method: 'GET',
     path: '/v1/execution/check?' + new URLSearchParams({ image }),
@@ -537,11 +678,12 @@ export async function checkExecution(image: string): Promise<{ host: string; ima
   });
 }
 export async function runtimeSnapshot(): Promise<RuntimeSnapshot> {
-  if (!nativeDesktop) throw new Error('로컬 모델 관리는 데스크톱 앱에서 사용할 수 있습니다.');
+  if (!nativeDesktop)
+    throw new Error(localize('로컬 모델 관리는 데스크톱 앱에서 사용할 수 있습니다.'));
   return invoke('daemon_request', { method: 'GET', path: '/v1/runtime', body: null });
 }
 export async function saveLocalProfile(profile: LocalProfileInput): Promise<LocalProfile> {
-  if (!nativeDesktop) throw new Error('데스크톱 앱에서 모델을 등록하세요.');
+  if (!nativeDesktop) throw new Error(localize('데스크톱 앱에서 모델을 등록하세요.'));
   const result = await invoke<{ profile: LocalProfile }>('daemon_request', {
     method: 'POST',
     path: '/v1/runtime/profiles',
@@ -550,7 +692,7 @@ export async function saveLocalProfile(profile: LocalProfileInput): Promise<Loca
   return result.profile;
 }
 export async function inspectLocalModel(modelPath: string): Promise<ModelInspection> {
-  if (!nativeDesktop) throw new Error('데스크톱 앱에서 GGUF 모델을 분석하세요.');
+  if (!nativeDesktop) throw new Error(localize('데스크톱 앱에서 GGUF 모델을 분석하세요.'));
   const result = await invoke<{ inspection: ModelInspection }>('daemon_request', {
     method: 'POST',
     path: '/v1/runtime/inspect',
@@ -562,7 +704,7 @@ export async function runtimeAction(
   profileId: string,
   action: 'load' | 'unload' | 'remove',
 ): Promise<RuntimeSnapshot> {
-  if (!nativeDesktop) throw new Error('데스크톱 앱에서 모델을 관리하세요.');
+  if (!nativeDesktop) throw new Error(localize('데스크톱 앱에서 모델을 관리하세요.'));
   return invoke('daemon_request', {
     method: 'POST',
     path: '/v1/runtime/action',
@@ -570,11 +712,12 @@ export async function runtimeAction(
   });
 }
 export async function configureRuntime(settings: RuntimeSettings): Promise<RuntimeSnapshot> {
-  if (!nativeDesktop) throw new Error('데스크톱 앱에서 설정하세요.');
+  if (!nativeDesktop) throw new Error(localize('데스크톱 앱에서 설정하세요.'));
   return invoke('daemon_request', { method: 'POST', path: '/v1/runtime/settings', body: settings });
 }
 export async function startModelDownload(input: ModelDownloadInput): Promise<RuntimeSnapshot> {
-  if (!nativeDesktop) throw new Error('모델 다운로드는 데스크톱 앱에서 사용할 수 있습니다.');
+  if (!nativeDesktop)
+    throw new Error(localize('모델 다운로드는 데스크톱 앱에서 사용할 수 있습니다.'));
   return invoke('daemon_request', {
     method: 'POST',
     path: '/v1/runtime/downloads',
@@ -583,21 +726,56 @@ export async function startModelDownload(input: ModelDownloadInput): Promise<Run
 }
 export async function modelDownloadAction(
   downloadId: string,
-  action: 'cancel' | 'remove',
+  action: 'cancel' | 'remove' | 'resume',
 ): Promise<RuntimeSnapshot> {
-  if (!nativeDesktop) throw new Error('모델 다운로드는 데스크톱 앱에서 관리하세요.');
+  if (!nativeDesktop) throw new Error(localize('모델 다운로드는 데스크톱 앱에서 관리하세요.'));
   return invoke('daemon_request', {
     method: 'POST',
     path: '/v1/runtime/downloads/action',
     body: { downloadId, action },
   });
 }
+export async function engineCatalog(channel: 'stable' | 'nightly'): Promise<EngineCatalog> {
+  if (!nativeDesktop) throw new Error(localize('엔진 조회는 데스크톱 앱에서 사용할 수 있습니다.'));
+  return invoke('daemon_request', {
+    method: 'POST',
+    path: '/v1/runtime/engines/catalog',
+    body: { channel },
+  });
+}
+export async function installEngine(input: EngineInstallInput): Promise<RuntimeSnapshot> {
+  if (!nativeDesktop) throw new Error(localize('엔진 설치는 데스크톱 앱에서 사용할 수 있습니다.'));
+  return invoke('daemon_request', {
+    method: 'POST',
+    path: '/v1/runtime/engines/install',
+    body: input,
+  });
+}
+export async function engineManagerAction(
+  id: string,
+  action: 'cancel' | 'remove',
+): Promise<RuntimeSnapshot> {
+  if (!nativeDesktop) throw new Error(localize('엔진 관리는 데스크톱 앱에서 사용할 수 있습니다.'));
+  return invoke('daemon_request', {
+    method: 'POST',
+    path: '/v1/runtime/engines/action',
+    body: { id, action },
+  });
+}
 export async function backupSnapshot(): Promise<BackupSnapshot> {
-  if (!nativeDesktop) throw new Error('백업은 데스크톱 앱에서 사용할 수 있습니다.');
+  if (!nativeDesktop) throw new Error(localize('백업은 데스크톱 앱에서 사용할 수 있습니다.'));
   return invoke('daemon_request', { method: 'GET', path: '/v1/backups', body: null });
 }
+export async function autostartStatus(): Promise<boolean> {
+  if (!nativeDesktop) return false;
+  return invoke('autostart_status');
+}
+export async function configureAutostart(enabled: boolean): Promise<boolean> {
+  if (!nativeDesktop) throw new Error(localize('자동 시작은 데스크톱 앱에서 설정하세요.'));
+  return invoke('configure_autostart', { enabled });
+}
 export async function createBackup(): Promise<BackupSnapshot> {
-  if (!nativeDesktop) throw new Error('백업은 데스크톱 앱에서 사용할 수 있습니다.');
+  if (!nativeDesktop) throw new Error(localize('백업은 데스크톱 앱에서 사용할 수 있습니다.'));
   const result = await invoke<{ snapshot: BackupSnapshot }>('daemon_request', {
     method: 'POST',
     path: '/v1/backups/create',
@@ -606,7 +784,7 @@ export async function createBackup(): Promise<BackupSnapshot> {
   return result.snapshot;
 }
 export async function configureBackups(settings: BackupSettings): Promise<BackupSnapshot> {
-  if (!nativeDesktop) throw new Error('백업은 데스크톱 앱에서 설정하세요.');
+  if (!nativeDesktop) throw new Error(localize('백업은 데스크톱 앱에서 설정하세요.'));
   return invoke('daemon_request', {
     method: 'POST',
     path: '/v1/backups/settings',
@@ -614,7 +792,7 @@ export async function configureBackups(settings: BackupSettings): Promise<Backup
   });
 }
 export async function deleteBackup(name: string): Promise<BackupSnapshot> {
-  if (!nativeDesktop) throw new Error('백업은 데스크톱 앱에서 관리하세요.');
+  if (!nativeDesktop) throw new Error(localize('백업은 데스크톱 앱에서 관리하세요.'));
   return invoke('daemon_request', {
     method: 'POST',
     path: '/v1/backups/delete',
@@ -622,15 +800,25 @@ export async function deleteBackup(name: string): Promise<BackupSnapshot> {
   });
 }
 export async function exportBackup(): Promise<{ path: string } | null> {
-  if (!nativeDesktop) throw new Error('내보내기는 데스크톱 앱에서 사용할 수 있습니다.');
+  if (!nativeDesktop) throw new Error(localize('내보내기는 데스크톱 앱에서 사용할 수 있습니다.'));
   return invoke('export_backup');
 }
+export async function previewBackup(): Promise<BackupImportPreview | null> {
+  if (!nativeDesktop) throw new Error(localize('복원은 데스크톱 앱에서 사용할 수 있습니다.'));
+  const path = await invoke<string | null>('pick_backup_file');
+  if (!path) return null;
+  return invoke('daemon_request', { method: 'POST', path: '/v1/backups/preview', body: { path } });
+}
+export async function restoreBackup(token: string): Promise<BackupImportResult> {
+  if (!nativeDesktop) throw new Error(localize('복원은 데스크톱 앱에서 사용할 수 있습니다.'));
+  return invoke('daemon_request', { method: 'POST', path: '/v1/backups/restore', body: { token } });
+}
 export async function pickRuntimeFile(kind: 'engine' | 'model'): Promise<string | null> {
-  if (!nativeDesktop) throw new Error('데스크톱 앱에서 파일을 선택하세요.');
+  if (!nativeDesktop) throw new Error(localize('데스크톱 앱에서 파일을 선택하세요.'));
   return invoke('pick_runtime_file', { kind });
 }
 export async function cleanupCommands(sessionId: string): Promise<Session> {
-  if (!nativeDesktop) throw new Error('데스크톱 앱에서 정리하세요.');
+  if (!nativeDesktop) throw new Error(localize('데스크톱 앱에서 정리하세요.'));
   const result = await invoke<{ session: Session }>('daemon_request', {
     method: 'POST',
     path: '/v1/execution/cleanup',
@@ -639,7 +827,8 @@ export async function cleanupCommands(sessionId: string): Promise<Session> {
   return result.session;
 }
 export async function registerProject(path: string): Promise<Project> {
-  if (!nativeDesktop) throw new Error('프로젝트 등록은 데스크톱 앱에서 사용할 수 있습니다.');
+  if (!nativeDesktop)
+    throw new Error(localize('프로젝트 등록은 데스크톱 앱에서 사용할 수 있습니다.'));
   const result = await invoke<{ project: Project }>('daemon_request', {
     method: 'POST',
     path: '/v1/projects',
@@ -648,33 +837,46 @@ export async function registerProject(path: string): Promise<Project> {
   return result.project;
 }
 export async function models(provider: string, baseUrl: string): Promise<ModelDescriptor[]> {
-  if (provider === 'llama-server') {
+  return (await modelCatalog(provider, baseUrl)).models;
+}
+export async function modelCatalog(
+  provider: string,
+  baseUrl: string,
+  refresh = false,
+): Promise<ModelCatalogSnapshot> {
+  if (['llama-server', 'ollama', 'vllm', 'mlx'].includes(provider)) {
     const parsed = localUrlSchema.safeParse(baseUrl);
     if (!parsed.success) throw new Error(parsed.error.issues[0]!.message);
     baseUrl = parsed.data;
   }
   if (!nativeDesktop)
-    return [
-      {
-        id: 'demo',
-        name: 'UI 미리보기',
-        contextLength: null,
-        maxCompletionTokens: null,
-        defaultTemperature: null,
-        defaultTopP: null,
-        tools: false,
-        pricing: null,
-      },
-    ];
-  const result = await invoke<{ models: ModelDescriptor[] }>('daemon_request', {
+    return {
+      fetchedAt: new Date().toISOString(),
+      source: 'live',
+      stale: false,
+      models: [
+        {
+          id: 'demo',
+          name: 'UI 미리보기',
+          contextLength: null,
+          maxCompletionTokens: null,
+          defaultTemperature: null,
+          defaultTopP: null,
+          tools: false,
+          pricing: null,
+        },
+      ],
+    };
+  return invoke<ModelCatalogSnapshot>('daemon_request', {
     method: 'GET',
-    path: '/v1/models?' + new URLSearchParams({ provider, baseUrl }).toString(),
+    path:
+      '/v1/models?' +
+      new URLSearchParams({ provider, baseUrl, refresh: String(refresh) }).toString(),
     body: null,
   });
-  return result.models;
 }
 export async function saveKey(key: string | null): Promise<void> {
-  if (!nativeDesktop) throw new Error('API 키는 데스크톱 앱에서 저장할 수 있습니다.');
+  if (!nativeDesktop) throw new Error(localize('API 키는 데스크톱 앱에서 저장할 수 있습니다.'));
   await invoke('set_openrouter_key', { key });
 }
 export async function subscribe(

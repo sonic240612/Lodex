@@ -1,3 +1,4 @@
+import { t as localize } from './i18n';
 import { useId } from 'react';
 import type { Activity, AgentMode, PermissionDecision } from '@lodex/contracts';
 
@@ -33,19 +34,19 @@ export function ApprovalBanner({
       aria-describedby={descriptionId}
     >
       <div>
-        <strong id={titleId}>{titles[approval.kind]}</strong>
+        <strong id={titleId}>{localize(titles[approval.kind])}</strong>
         <span id={descriptionId}>{approval.reason}</span>
         <span className="permission-target">{approval.target}</span>
       </div>
       <button disabled={busy} onClick={() => onDecide('reject')}>
-        거절
+        {localize('거절')}
       </button>
       <button
         className="permission-allow"
         disabled={busy || (mode === 'plan' && !['web', 'verification'].includes(approval.kind))}
         onClick={() => onDecide('approve')}
       >
-        수락
+        {localize('수락')}
       </button>
     </div>
   );

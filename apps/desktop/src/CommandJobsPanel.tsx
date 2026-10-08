@@ -1,6 +1,8 @@
+import { t as localize } from './i18n';
 import { useEffect, useState } from 'react';
 import type { CommandJob } from '@lodex/contracts';
 import { nativeDesktop, commandJobs, commandJobAction } from './bridge';
+import { CommandTerminal } from './CommandTerminal';
 
 export function CommandJobsPanel({
   sessionId,
@@ -34,7 +36,7 @@ export function CommandJobsPanel({
       }
     };
     void refresh();
-    const timer = setInterval(() => void refresh(), 1000);
+    const timer = setInterval(() => void refresh(), 500);
     return () => {
       active = false;
       clearInterval(timer);
@@ -45,8 +47,11 @@ export function CommandJobsPanel({
     .slice(-16);
   if (!visible.length && !error) return null;
   return (
-    <section className="command-jobs-panel" aria-label="실행 작업">
-      <strong>실행 작업 · {visible.length}</strong>
+    <section className="command-jobs-panel" aria-label={localize('실행 작업')}>
+      <strong>
+        {localize('실행 작업 · ')}
+        {visible.length}
+      </strong>
       {error && <p role="alert">{error}</p>}
       {visible.map((job) => (
         <CommandJobRow
@@ -99,19 +104,26 @@ export function CommandJobRow({
       <div className="command-job-heading">
         <code>{job.execution?.command ?? job.id}</code>
         <span>
-          {job.execution?.status ?? '시작 중'}
+          {job.execution?.status ?? localize('시작 중')}
           {job.execution?.exitCode !== null && job.execution?.exitCode !== undefined
-            ? ` · 종료 ${job.execution.exitCode}`
+            ? localize(' · 종료 {0}', job.execution.exitCode)
             : ''}
         </span>
         <button type="button" disabled={busy || !running} onClick={() => void action('stop')}>
-          중지
+          {localize('중지')}
         </button>
       </div>
       <details>
-        <summary>{job.background ? '백그라운드' : '실행 중'} · 출력 보기</summary>
-        <pre>{job.execution?.output || '출력 대기 중'}</pre>
-        {job.execution?.truncated && <p>출력 일부가 생략되었습니다.</p>}
+        <summary>
+          {job.background ? localize('백그라운드') : localize('실행 중')} ·{' '}
+          {job.terminal ? localize('터미널 보기') : localize('출력 보기')}
+        </summary>
+        {job.terminal ? (
+          <CommandTerminal job={job} readOnly={readOnly} onUpdate={onUpdate} />
+        ) : (
+          <pre>{job.execution?.output || localize('출력 대기 중')}</pre>
+        )}
+        {job.execution?.truncated && <p>{localize('출력 일부가 생략되었습니다.')}</p>}
         <small>{job.id}</small>
       </details>
       {job.inputOpen && (
@@ -123,23 +135,27 @@ export function CommandJobRow({
           }}
         >
           <textarea
-            aria-label={`명령 입력 ${job.id}`}
+            aria-label={localize('명령 입력 {0}', job.id)}
             value={input}
             onChange={(event) => setInput(event.target.value)}
-            placeholder="실행 중인 프로그램에 보낼 내용 · 줄바꿈을 포함하세요"
+            placeholder={
+              job.terminal
+                ? localize('터미널을 클릭해 직접 입력하거나, 전달할 내용을 여기에 입력하세요.')
+                : localize('실행 중인 프로그램에 보낼 내용 · 줄바꿈을 포함하세요')
+            }
             disabled={busy || readOnly}
             maxLength={8000}
             rows={2}
           />
           <button type="submit" disabled={busy || readOnly || !input}>
-            입력 전달
+            {localize('입력 전달')}
           </button>
           <button
             type="button"
             disabled={busy || readOnly}
             onClick={() => void action('input', true)}
           >
-            입력 종료(EOF)
+            {job.terminal ? localize('EOF 전달') : localize('입력 종료(EOF)')}
           </button>
         </form>
       )}

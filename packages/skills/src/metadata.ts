@@ -172,6 +172,33 @@ export function normalizeSkill(
       fields['user-invocable'] === undefined ||
       boolean(fields['user-invocable'], 'user-invocable', dialect),
   };
+  const toolPolicy: NonNullable<RegisteredSkill['toolPolicy']> = { denied: [], unsupported: [] };
+  for (const field of ['allowed-tools', 'disallowed-tools'] as const) {
+    if (fields[field] === undefined) continue;
+    const value = fields[field];
+    const entries =
+      typeof value === 'string'
+        ? value.split(/[\s,]+/).filter(Boolean)
+        : Array.isArray(value) && value.every((entry) => typeof entry === 'string')
+          ? (value as string[])
+          : null;
+    if (!entries || entries.some((entry) => !/^[A-Za-z][A-Za-z0-9_-]*$/.test(entry))) {
+      toolPolicy.unsupported.push(field);
+      diagnostics.push({
+        code: 'TOOL_POLICY_UNSUPPORTED',
+        field,
+        message:
+          '인자·경로 패턴이 포함된 도구 정책은 지원하지 않습니다. 이 스킬은 정책을 수정하기 전에는 실행할 수 없습니다.',
+      });
+    } else if (field === 'allowed-tools') toolPolicy.allowed = [...new Set(entries)];
+    else toolPolicy.denied = [...new Set(entries)];
+  }
+  if (toolPolicy.allowed || toolPolicy.denied.length)
+    diagnostics.push({
+      code: 'TOOL_POLICY_RESTRICTED',
+      message:
+        '선언한 도구는 Lodex 도구 이름으로 매핑하고 현재 권한 범위 안에서만 허용합니다. 승인을 자동으로 생략하지 않으며, 제한을 별도 실행으로 우회할 수 없도록 서브에이전트 호출도 차단합니다.',
+    });
   const known = new Set([
     'name',
     'description',
@@ -180,11 +207,22 @@ export function normalizeSkill(
     'metadata',
     'disable-model-invocation',
     'user-invocable',
+    'allowed-tools',
+    'disallowed-tools',
+    'argument-hint',
     ...(dialect === 'hermes' ? ['version', 'author', 'platforms', 'aliases', 'category'] : []),
     ...(dialect === 'openclaw' ? ['homepage', 'command-arg-mode'] : []),
   ]);
   for (const field of Object.keys(fields)) {
     if (known.has(field)) continue;
+    if (field === 'hooks') {
+      diagnostics.push({
+        code: 'HOOKS_UNSUPPORTED',
+        field,
+        message: '스킬의 hooks는 실행하지 않습니다. 원본 앱의 이벤트 훅 동작은 지원하지 않습니다.',
+      });
+      continue;
+    }
     diagnostics.push({
       code: ['allowed-tools', 'disallowed-tools', 'command-dispatch', 'command-tool'].includes(
         field,
@@ -204,16 +242,11 @@ export function normalizeSkill(
       code: 'DYNAMIC_PREPROCESSING_UNSUPPORTED',
       message: '동적 셸 삽입을 실행하거나 치환하지 않습니다.',
     });
-  if (/\$(?:ARGUMENTS(?:\[\d+\])?|\d+|\{CLAUDE_[A-Z_]+\})/.test(body))
+  if (/\$\{CLAUDE_(?!SKILL_DIR\})[A-Z_]+\}/.test(body))
     diagnostics.push({
       code: 'SUBSTITUTION_UNSUPPORTED',
-      message: '하네스 전용 인자·경로 치환을 적용하지 않습니다.',
-    });
-  if (/\{baseDir\}/.test(body))
-    diagnostics.push({
-      code: 'BASEDIR_SUBSTITUTION_UNSUPPORTED',
       message:
-        '{baseDir}는 절대 경로로 치환하지 않습니다. 등록된 리소스는 전용 읽기 도구로만 엽니다.',
+        '지원하지 않는 Claude 변수는 원문 그대로 유지합니다. 인자와 스킬 폴더 변수만 치환합니다.',
     });
   const supportedPlatforms = dialect === 'hermes' ? platforms(fields.platforms) : undefined;
   return {
@@ -221,6 +254,12 @@ export function normalizeSkill(
     description,
     metadata,
     invocation,
+    ...(fields['allowed-tools'] !== undefined || fields['disallowed-tools'] !== undefined
+      ? { toolPolicy }
+      : {}),
+    ...(fields['argument-hint'] !== undefined
+      ? { argumentHint: requiredText(fields['argument-hint'], 'argument-hint', 500) }
+      : {}),
     ...(supportedPlatforms ? { platforms: supportedPlatforms } : {}),
     ...(fields.license === undefined
       ? {}

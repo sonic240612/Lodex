@@ -3,16 +3,19 @@ import { AppError, type ToolDefinition } from '@lodex/contracts';
 import {
   readSkill,
   readSkillResource,
+  expandSkillBody,
+  resolveSkillInvocation,
   type RegisteredSkill,
   type SkillProvenance,
 } from '@lodex/skills';
+import { checkSkillDependencies, compileSkillPolicy, type SkillPolicy } from './skill-policy';
 
 const selection = {
   skillId: z.uuid(),
   revision: z.string().regex(/^[a-f0-9]{64}$/),
 };
 const schemas = {
-  read_skill: z.strictObject(selection),
+  read_skill: z.strictObject({ ...selection, arguments: z.string().max(16000).optional() }),
   read_skill_resource: z.strictObject({ ...selection, path: z.string().min(1).max(4096) }),
 };
 const descriptions = {
@@ -42,6 +45,10 @@ export async function runSkillTool(options: {
   /** Maximum UTF-8 bytes of the complete successful JSON tool result. */
   maxBytes: number;
   record: (provenance: SkillProvenance) => void | Promise<void>;
+  availableTools?: readonly ToolDefinition[];
+  dependencies?: readonly { id: string; name: string; transport: string }[];
+  userSkillId?: string;
+  activate?: (policy: SkillPolicy | undefined, skillId: string) => void;
 }): Promise<string> {
   try {
     options.signal.throwIfAborted();
@@ -71,16 +78,27 @@ export async function runSkillTool(options: {
         'SKILL_REVISION',
         '목록과 다른 스킬 버전입니다. 현재 대화의 revision을 사용하세요.',
       );
+    checkSkillDependencies(skill, options.dependencies ?? []);
+    const invocation = options.userSkillId === skill.id ? 'user' : 'model';
     const loaded =
       options.name === 'read_skill'
-        ? await readSkill(skill, 'model', options.signal, { maxBytes: options.maxBytes })
+        ? await readSkill(skill, invocation, options.signal, { maxBytes: options.maxBytes })
         : await readSkillResource(
             skill,
             (args as z.infer<typeof schemas.read_skill_resource>).path,
-            'model',
+            invocation,
             options.signal,
             { maxBytes: options.maxBytes },
           );
+    const policy = compileSkillPolicy(loaded.toolPolicy, options.availableTools ?? []);
+    const content =
+      options.name === 'read_skill' && 'body' in loaded && typeof loaded.body === 'string'
+        ? expandSkillBody(
+            loaded.body,
+            (args as z.infer<typeof schemas.read_skill>).arguments ?? '',
+            skill.source.rootPath,
+          )
+        : loaded.text;
     options.signal.throwIfAborted();
     const result = JSON.stringify({
       skill: {
@@ -89,7 +107,7 @@ export async function runSkillTool(options: {
         revision: skill.revision,
         sourceName: skill.source.rootName,
       },
-      content: loaded.text,
+      content,
       provenance: loaded.provenance,
     });
     if (Buffer.byteLength(result) > options.maxBytes)
@@ -98,6 +116,7 @@ export async function runSkillTool(options: {
         '출처를 포함한 스킬 결과가 이번 호출의 읽기 예산을 초과했습니다. 본문을 생략하지 않았습니다.',
       );
     await options.record(loaded.provenance);
+    options.activate?.(policy, skill.id);
     return result;
   } catch (error) {
     // Cancellation belongs to the run lifecycle, not a recoverable model tool error.
@@ -110,4 +129,35 @@ export async function runSkillTool(options: {
           : '등록된 스킬 자료를 읽을 수 없습니다. 파일과 접근 권한을 확인하고 다시 등록하세요.',
     });
   }
+}
+
+export interface DirectSkill {
+  skill: RegisteredSkill;
+  argumentsText: string;
+  content: string;
+  provenance: SkillProvenance;
+  policy?: SkillPolicy;
+}
+export async function prepareDirectSkill(
+  text: string,
+  skills: RegisteredSkill[],
+  tools: ToolDefinition[],
+  dependencies: readonly { id: string; name: string; transport: string }[],
+  signal: AbortSignal,
+): Promise<DirectSkill | undefined> {
+  const invocation = resolveSkillInvocation(text, skills);
+  if (!invocation) return undefined;
+  checkSkillDependencies(invocation.skill, dependencies);
+  const loaded = await readSkill(invocation.skill, 'user', signal);
+  const policy = compileSkillPolicy(loaded.toolPolicy, tools);
+  return {
+    ...invocation,
+    content: expandSkillBody(
+      loaded.body,
+      invocation.argumentsText,
+      invocation.skill.source.rootPath,
+    ),
+    provenance: loaded.provenance,
+    ...(policy ? { policy } : {}),
+  };
 }

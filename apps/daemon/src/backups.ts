@@ -16,6 +16,7 @@ export class Backups {
   private settings: BackupSettings = backupSettingsSchema.parse({});
   private timer?: NodeJS.Timeout;
   private operation: Promise<unknown> = Promise.resolve();
+  private lastFailure: { at: string; message: string } | undefined;
   private constructor(
     private root: string,
     private build: () => Promise<unknown>,
@@ -78,6 +79,7 @@ export class Backups {
     return {
       settings: structuredClone(this.settings),
       backups: (await this.records()).map(({ path: _path, ...record }) => record),
+      ...(this.lastFailure ? { lastFailure: { ...this.lastFailure } } : {}),
     };
   }
   configure(value: BackupSettings) {
@@ -115,6 +117,7 @@ export class Backups {
       await handle.close();
     }
     await this.prune();
+    this.lastFailure = undefined;
     return {
       backup: {
         name,
@@ -128,7 +131,8 @@ export class Backups {
   }
   remove(name: string) {
     return this.serial(async () => {
-      if (!backupName.test(name)) throw new AppError('BACKUP_NAME', '백업 파일 이름이 올바르지 않습니다.');
+      if (!backupName.test(name))
+        throw new AppError('BACKUP_NAME', '백업 파일 이름이 올바르지 않습니다.');
       await unlink(join(this.root, name));
       return this.snapshot();
     });
@@ -146,7 +150,16 @@ export class Backups {
       const latest = (await this.records())[0];
       if (latest && Date.now() - Date.parse(latest.createdAt) < 24 * 60 * 60 * 1000) return;
       await this.createUnlocked('automatic');
-    }).catch(() => undefined);
+    }).catch((error: unknown) => {
+      // Do not expose filesystem paths, credentials or arbitrary exception text.
+      this.lastFailure = {
+        at: new Date().toISOString(),
+        message:
+          error instanceof AppError && error.code === 'BACKUP_SIZE'
+            ? error.message
+            : '자동 백업에 실패했습니다. 저장 공간과 앱 데이터 폴더의 쓰기 권한을 확인하고 다시 백업하세요.',
+      };
+    });
   }
   async close() {
     if (this.timer) clearInterval(this.timer);

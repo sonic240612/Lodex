@@ -28,6 +28,8 @@ export async function reconcileCosts(store: Store, session: Session, provider: I
         ...call,
         status: 'settled',
         actualCostUsd: usage.costUsd,
+        ...(typeof usage.inputTokens === 'number' ? { inputTokens: usage.inputTokens } : {}),
+        ...(typeof usage.outputTokens === 'number' ? { outputTokens: usage.outputTokens } : {}),
         updatedAt: new Date().toISOString(),
       });
       reconciled++;

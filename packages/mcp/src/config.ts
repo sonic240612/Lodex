@@ -61,9 +61,9 @@ export const mcpConfigSchema = z.discriminatedUnion('transport', [
       .strictObject({
         clientId: z
           .string()
-          .min(1)
           .max(512)
-          .refine((value) => !/[\0\r\n]/.test(value)),
+          .refine((value) => !/[\0\r\n]/.test(value))
+          .default(''),
       })
       .optional(),
   }),
@@ -89,9 +89,9 @@ export const mcpConfigSchema = z.discriminatedUnion('transport', [
       .strictObject({
         clientId: z
           .string()
-          .min(1)
           .max(512)
-          .refine((value) => !/[\0\r\n]/.test(value)),
+          .refine((value) => !/[\0\r\n]/.test(value))
+          .default(''),
       })
       .optional(),
   }),

@@ -1,3 +1,4 @@
+import { t as localize } from './i18n';
 import { useEffect, useState } from 'react';
 import type { Activity, Message } from '@lodex/contracts';
 import { ActivityCards, needsAttention } from './ActivityCards';
@@ -13,7 +14,11 @@ export function workDuration(start: string, end: string | number) {
   const hours = Math.floor(elapsed / 3600),
     minutes = Math.floor(elapsed / 60) % 60,
     seconds = elapsed % 60;
-  return [hours ? `${hours}시간` : '', minutes ? `${minutes}분` : '', !hours ? `${seconds}초` : '']
+  return [
+    hours ? localize('{0}시간', hours) : '',
+    minutes ? localize('{0}분', minutes) : '',
+    !hours ? localize('{0}초', seconds) : '',
+  ]
     .filter(Boolean)
     .join(' ');
 }
@@ -97,7 +102,8 @@ export function AssistantMessage({
           <div className="work-transcript">{transcript}</div>
           <div className="work-live-status" role="status">
             <span className="activity-dot running" />
-            {duration}째 작업 중
+            {duration}
+            {localize('째 작업 중')}
           </div>
         </>
       ) : (
@@ -105,12 +111,19 @@ export function AssistantMessage({
           <details className="work-history" key={message.status}>
             <summary>
               <Icon name="chevron" size={14} />
-              <span>{duration ? `${duration} 동안 작업` : '작업 기록'}</span>
+              <span>{duration ? localize('{0} 동안 작업', duration) : localize('작업 기록')}</span>
               <span className="work-count">
-                도구 {activities.filter((a) => a.kind === 'tool').length}개
+                {localize('도구 ')}
+                {activities.filter((a) => a.kind === 'tool').length}
+                {localize('개')}
               </span>
-              {attention > 0 && <span className="activity-attention">확인 필요 {attention}</span>}
-              {message.status !== 'complete' && <span>중단된 작업</span>}
+              {attention > 0 && (
+                <span className="activity-attention">
+                  {localize('확인 필요 ')}
+                  {attention}
+                </span>
+              )}
+              {message.status !== 'complete' && <span>{localize('중단된 작업')}</span>}
             </summary>
             <div className="work-transcript">{transcript}</div>
           </details>

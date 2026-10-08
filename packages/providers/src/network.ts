@@ -83,7 +83,7 @@ export function connectionError(error: unknown, endpoint: string): AppError {
   if (any('ECONNREFUSED'))
     return new AppError(
       'SERVER_REFUSED',
-      origin + ': 연결이 거부되었습니다. llama-server가 이 주소와 포트에서 실행 중인지 확인하세요.',
+      origin + ': 연결이 거부되었습니다. 모델 서버가 이 주소와 포트에서 실행 중인지 확인하세요.',
       502,
     );
   if (any('EHOSTUNREACH', 'ENETUNREACH', 'ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT', 'TimeoutError'))

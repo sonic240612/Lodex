@@ -11,14 +11,13 @@ import {
   type Prompt,
   type Root,
   type CreateMessageRequestParams,
-  type CreateMessageResult,
+  type CreateMessageResultWithTools,
   type ElicitRequestParams,
   type ElicitResult,
   type Transport,
   type JsonSchemaType,
-  type jsonSchemaValidator,
 } from '@modelcontextprotocol/client';
-import { AjvJsonSchemaValidator } from '@modelcontextprotocol/client/validators/ajv';
+import { createMcpValidator as validators } from './schema';
 import { AppError, localUrlSchema, type ToolDefinition } from '@lodex/contracts';
 import { privateServerFetch } from '@lodex/providers';
 import { OwnedStdioTransport } from './stdio';
@@ -26,7 +25,11 @@ import { validateConfig, resolveReferences, type McpConfig, type SecretResolver 
 export { validateConfig, mcpConfigSchema } from './config';
 export type { McpConfig, SecretResolver } from './config';
 export type { Root } from '@modelcontextprotocol/client';
-export type { CreateMessageRequestParams, CreateMessageResult } from '@modelcontextprotocol/client';
+export type {
+  CreateMessageRequestParams,
+  CreateMessageResultWithTools as CreateMessageResult,
+} from '@modelcontextprotocol/client';
+export { prepareSampling, samplingResult } from './sampling';
 export type {
   ElicitRequestParams,
   ElicitResult,
@@ -94,6 +97,7 @@ export interface McpRegistration {
   prompts?: McpPrompt[];
   resourceTemplates?: McpResourceTemplate[];
   supportsCompletions?: true;
+  supportsResourceSubscriptions?: true;
   inspectedAt: string;
 }
 export interface McpCompletion {
@@ -126,55 +130,6 @@ function boundedShape(value: unknown, byteLimit: number) {
       for (const entry of Object.values(value)) walk(entry, depth + 1);
   };
   walk(value, 0);
-}
-function schemaSafety(schema: JsonSchemaType) {
-  boundedShape(schema, 32768);
-  const walk = (value: unknown) => {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return;
-    const node = value as Record<string, unknown>;
-    if (
-      ['$ref', '$dynamicRef', 'pattern', 'patternProperties', 'format'].some((key) => key in node)
-    )
-      throw new AppError(
-        'MCP_SCHEMA',
-        '참조·정규식·format 검증이 필요한 스키마는 아직 지원하지 않습니다.',
-      );
-    for (const [key, child] of Object.entries(node)) {
-      if (
-        ['properties', '$defs', 'definitions', 'dependentSchemas'].includes(key) &&
-        child &&
-        typeof child === 'object'
-      )
-        Object.values(child).forEach(walk);
-      else if (['allOf', 'anyOf', 'oneOf', 'prefixItems'].includes(key) && Array.isArray(child))
-        child.forEach(walk);
-      else if (
-        [
-          'items',
-          'additionalProperties',
-          'contains',
-          'not',
-          'if',
-          'then',
-          'else',
-          'propertyNames',
-          'unevaluatedProperties',
-          'unevaluatedItems',
-        ].includes(key)
-      )
-        walk(child);
-    }
-  };
-  walk(schema);
-}
-function validators(): jsonSchemaValidator {
-  const ajv = new AjvJsonSchemaValidator();
-  return {
-    getValidator<T>(schema: JsonSchemaType) {
-      schemaSafety(schema);
-      return ajv.getValidator<T>(schema);
-    },
-  };
 }
 async function executableIdentity(config: McpConfig): Promise<string | undefined> {
   if (config.transport !== 'stdio') return undefined;
@@ -327,7 +282,12 @@ function contentLimit(requested?: number) {
     throw new AppError('MCP_SIZE', 'MCP 텍스트 제한은 1~24576바이트여야 합니다.');
   return requested ?? 24576;
 }
-function endpointFetch(endpoint: string, signal: AbortSignal, sameOrigin = false) {
+function endpointFetch(
+  endpoint: string,
+  signal: AbortSignal,
+  sameOrigin = false,
+  persistentEvents = false,
+) {
   const expectedUrl = new URL(endpoint),
     expected = expectedUrl.href;
   const fetcher = localUrlSchema.safeParse(endpoint).success ? privateServerFetch : fetch;
@@ -345,7 +305,9 @@ function endpointFetch(endpoint: string, signal: AbortSignal, sameOrigin = false
       signal: AbortSignal.any([
         signal,
         ...(init?.signal ? [init.signal] : []),
-        AbortSignal.timeout(30000),
+        ...(persistentEvents && (init?.method ?? 'GET') === 'GET'
+          ? []
+          : [AbortSignal.timeout(30000)]),
       ]),
     });
     if (response.status === 401 || response.status === 403) {
@@ -384,6 +346,7 @@ function endpointFetch(endpoint: string, signal: AbortSignal, sameOrigin = false
   };
 }
 export class McpConnection {
+  private subscriptions = new Set<string>();
   private closed = false;
   private invalidated = false;
   private contentInvalidated = false;
@@ -393,16 +356,44 @@ export class McpConnection {
     private transport: Transport,
     private secrets: string[],
     readonly registration: McpRegistration,
+    private resourceEvent?: (event: {
+      kind: 'updated' | 'catalog_changed' | 'disconnected';
+      uri?: string;
+    }) => void,
   ) {
     client.setNotificationHandler('notifications/tools/list_changed', () => {
       this.invalidated = true;
     });
     client.setNotificationHandler('notifications/resources/list_changed', () => {
       this.contentInvalidated = true;
+      if (this.subscriptions.size) this.resourceEvent?.({ kind: 'catalog_changed' });
+    });
+    client.setNotificationHandler('notifications/resources/updated', (notification) => {
+      if (this.closed) return;
+      const uri = notification.params.uri;
+      if (this.subscriptions.has(uri)) this.resourceEvent?.({ kind: 'updated', uri });
     });
     client.setNotificationHandler('notifications/prompts/list_changed', () => {
       this.contentInvalidated = true;
     });
+    if (resourceEvent) {
+      const onclose = client.onclose,
+        onerror = client.onerror;
+      client.onclose = () => {
+        onclose?.();
+        if (!this.closed) {
+          this.closed = true;
+          this.resourceEvent?.({ kind: 'disconnected' });
+        }
+      };
+      client.onerror = (error) => {
+        onerror?.(error);
+        if (!this.closed) {
+          this.resourceEvent?.({ kind: 'disconnected' });
+          void this.close().catch(() => undefined);
+        }
+      };
+    }
   }
   static async connect(options: {
     config: McpConfig;
@@ -415,8 +406,12 @@ export class McpConnection {
     sampling?: (
       params: CreateMessageRequestParams,
       signal: AbortSignal,
-    ) => Promise<CreateMessageResult>;
+    ) => Promise<CreateMessageResultWithTools>;
     elicitation?: (params: ElicitRequestParams, signal: AbortSignal) => Promise<ElicitResult>;
+    resourceEvent?: (event: {
+      kind: 'updated' | 'catalog_changed' | 'disconnected';
+      uri?: string;
+    }) => void;
   }): Promise<McpConnection> {
     const config = validateConfig(options.config);
     options.signal.throwIfAborted();
@@ -442,7 +437,7 @@ export class McpConnection {
     const roots = safeRoots(options.roots);
     const clientCapabilities = {
       ...(roots.length ? { roots: { listChanged: false } } : {}),
-      ...(options.sampling ? { sampling: {} } : {}),
+      ...(options.sampling ? { sampling: { tools: {} } } : {}),
       ...(options.elicitation ? { elicitation: { form: { applyDefaults: false }, url: {} } } : {}),
     };
     const client = new Client(
@@ -488,11 +483,11 @@ export class McpConnection {
         ? new OwnedStdioTransport(config, values, options.supervisorPath)
         : config.transport === 'sse'
           ? new SSEClientTransport(new URL(config.url), {
-              fetch: endpointFetch(config.url, options.signal, true),
+              fetch: endpointFetch(config.url, options.signal, true, !!options.resourceEvent),
               requestInit: { headers: values },
             })
           : new StreamableHTTPClientTransport(new URL(config.url), {
-              fetch: endpointFetch(config.url, options.signal),
+              fetch: endpointFetch(config.url, options.signal, false, !!options.resourceEvent),
               requestInit: { headers: values },
               onInsufficientScope: 'throw',
               reconnectionOptions: {
@@ -563,6 +558,11 @@ export class McpConnection {
         (!options.expected || options.expected.supportsCompletions !== undefined)
           ? true
           : undefined;
+      const supportsResourceSubscriptions =
+        capabilities?.resources?.subscribe === true &&
+        (!options.expected || options.expected.supportsResourceSubscriptions !== undefined)
+          ? true
+          : undefined;
       const catalogRevisions = {
         ...(resources !== undefined
           ? { resources: resources.map((item) => [item.uri, item.revision]) }
@@ -584,6 +584,7 @@ export class McpConnection {
           identity,
           tools: tools.map((tool) => [tool.name, tool.revision]),
           ...(supportsCompletions ? { supportsCompletions } : {}),
+          ...(supportsResourceSubscriptions ? { supportsResourceSubscriptions } : {}),
           ...catalogRevisions,
         }),
         ...(identity ? { executableIdentity: identity } : {}),
@@ -594,6 +595,7 @@ export class McpConnection {
         ...(resourceTemplates !== undefined ? { resourceTemplates } : {}),
         ...(prompts !== undefined ? { prompts } : {}),
         ...(supportsCompletions ? { supportsCompletions } : {}),
+        ...(supportsResourceSubscriptions ? { supportsResourceSubscriptions } : {}),
         inspectedAt: new Date().toISOString(),
       };
       if (options.expected && registration.revision !== options.expected.revision)
@@ -601,7 +603,13 @@ export class McpConnection {
           'MCP_CATALOG_CHANGED',
           'MCP 도구 목록 또는 스키마가 변경되었습니다. 다시 검토하고 선택하세요.',
         );
-      const connected = new McpConnection(client, transport, secrets, registration);
+      const connected = new McpConnection(
+        client,
+        transport,
+        secrets,
+        registration,
+        options.resourceEvent,
+      );
       connected.abortCleanup = () => options.signal.removeEventListener('abort', abort);
       return connected;
     } catch (error) {
@@ -616,6 +624,59 @@ export class McpConnection {
     }
   }
   private abortCleanup = () => {};
+  async subscribeResource(options: {
+    serverRevision: string;
+    entryKey: string;
+    revision: string;
+    kind: 'resource' | 'resource_template';
+    uri: string;
+    signal: AbortSignal;
+  }) {
+    this.checkContent(options.serverRevision, options.signal);
+    if (!this.registration.supportsResourceSubscriptions)
+      throw new AppError(
+        'MCP_SUBSCRIBE_UNSUPPORTED',
+        '현재 MCP 등록 정보에 리소스 변경 알림 지원이 없습니다.',
+      );
+    const chosen =
+      options.kind === 'resource'
+        ? this.registration.resources?.find(
+            (item) =>
+              item.uri === options.entryKey &&
+              item.uri === options.uri &&
+              item.revision === options.revision,
+          )
+        : this.registration.resourceTemplates?.find(
+            (item) =>
+              item.uriTemplate === options.entryKey &&
+              item.revision === options.revision &&
+              new UriTemplate(item.uriTemplate).match(options.uri),
+          );
+    if (!chosen?.supported || !catalogKey(options.uri) || UriTemplate.isTemplate(options.uri))
+      throw new AppError(
+        'MCP_SUBSCRIBE_RESOURCE',
+        '검토한 텍스트 리소스 URI만 구독할 수 있습니다.',
+      );
+    if (this.subscriptions.has(options.uri)) return;
+    this.subscriptions.add(options.uri);
+    try {
+      await this.client.subscribeResource(
+        { uri: options.uri },
+        { signal: options.signal, timeout: 15000 },
+      );
+    } catch (error) {
+      this.subscriptions.delete(options.uri);
+      if (options.signal.aborted) throw options.signal.reason;
+      throw new AppError(
+        'MCP_SUBSCRIBE_FAILED',
+        '변경 알림 연결에 실패했습니다. 자동으로 다시 구독하지 않습니다.',
+      );
+    }
+  }
+  async unsubscribeResource(uri: string, signal: AbortSignal) {
+    if (!this.subscriptions.delete(uri) || this.closed) return;
+    await this.client.unsubscribeResource({ uri }, { signal, timeout: 5000 });
+  }
   private checkContent(serverRevision: string, signal: AbortSignal) {
     signal.throwIfAborted();
     if (

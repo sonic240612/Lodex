@@ -133,3 +133,59 @@ it('cancels a background command and records failure instead of respawning on re
   expect(reopened.list(app.session.id)[0]!.execution?.status).toBe('interrupted');
   await reopened.close();
 }, 30000);
+
+it('exposes PTY input and resize only to the owning conversation and persists dimensions', async () => {
+  const app = await setup(),
+    script = join(app.dir, 'terminal.cjs');
+  await writeFile(
+    script,
+    "process.stdin.setRawMode(true);process.stdout.write('TERMINAL_READY');process.stdin.on('data',data=>{if(data.toString()==='q')process.exit(0);});",
+  );
+  const started = await app.jobs.run(
+    app.session,
+    {
+      project: app.project,
+      argumentsJson: JSON.stringify({
+        command: nodeCommand(script),
+        pty: true,
+        cols: 100,
+        rows: 30,
+        background: true,
+        timeoutMs: 30000,
+      }),
+      signal: AbortSignal.timeout(30000),
+      record: async () => {},
+    },
+    'host',
+    executeHostCommand,
+  );
+  await expect
+    .poll(() => app.jobs.get(app.session.id, started.jobId!).execution?.output, { timeout: 15000 })
+    .toContain('TERMINAL_READY');
+  expect(app.jobs.get(app.session.id, started.jobId!)).toMatchObject({
+    interactive: true,
+    terminal: { cols: 100, rows: 30 },
+    inputOpen: true,
+  });
+  await expect(app.jobs.resize(crypto.randomUUID(), started.jobId!, 110, 35)).rejects.toMatchObject(
+    { code: 'COMMAND_JOB_NOT_FOUND' },
+  );
+  await expect(app.jobs.resize(app.session.id, started.jobId!, 0, 35)).rejects.toThrow();
+  const resized = await app.jobs.resize(app.session.id, started.jobId!, 110, 35);
+  expect(resized.terminal).toEqual({ cols: 110, rows: 35 });
+  await app.jobs.input(app.session.id, started.jobId!, 'q', false);
+  await expect
+    .poll(() => app.jobs.get(app.session.id, started.jobId!).execution?.status, { timeout: 15000 })
+    .toBe('completed');
+  await expect(app.jobs.resize(app.session.id, started.jobId!, 120, 30)).rejects.toMatchObject({
+    code: 'TERMINAL_CLOSED',
+  });
+  await app.jobs.close();
+  const reopened = await CommandJobs.open(app.store);
+  expect(reopened.get(app.session.id, started.jobId!)).toMatchObject({
+    inputOpen: false,
+    terminal: { cols: 110, rows: 35 },
+    execution: { exitCode: 0 },
+  });
+  await reopened.close();
+}, 30000);

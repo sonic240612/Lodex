@@ -1,3 +1,4 @@
+import { t as localize } from './i18n';
 import { SettingsSurface } from './SettingsSurface';
 import { useEffect, useRef, useState } from 'react';
 import {
@@ -21,6 +22,7 @@ import {
   inspectLocalModel,
 } from './bridge';
 import { Icon } from './icons';
+import { EngineInstaller } from './EngineInstaller';
 
 const blank = (): LocalProfileInput => ({
   name: '',
@@ -159,6 +161,9 @@ export function ModelManager({
       modelPath: profile.modelPath,
       settings: profile.settings,
       vramReservationMb: profile.vramReservationMb,
+      ...(profile.ramReservationMb !== undefined
+        ? { ramReservationMb: profile.ramReservationMb }
+        : {}),
     });
     setGpuText(String(profile.settings.gpuLayers));
     setExtra(JSON.stringify(profile.settings.extraArgs, null, 2));
@@ -177,6 +182,7 @@ export function ModelManager({
       modelPath: value.modelPath,
       settings: value.recommendedSettings,
       vramReservationMb: value.recommendedVramReservationMb,
+      ramReservationMb: undefined,
     }));
     setGpuText(String(value.recommendedSettings.gpuLayers));
     setExtra(JSON.stringify(value.recommendedSettings.extraArgs, null, 2));
@@ -192,31 +198,45 @@ export function ModelManager({
       aria-busy={busy}
     >
       <div className="dialog-header">
-        <h2 id="model-manager-title">로컬 모델</h2>
-        <button className="icon-button" aria-label="모델 관리 닫기" onClick={onClose}>
+        <h2 id="model-manager-title">{localize('로컬 모델')}</h2>
+        <button className="icon-button" aria-label={localize('모델 관리 닫기')} onClick={onClose}>
           <Icon name="close" />
         </button>
       </div>
       <div className="settings-body">
         {!nativeDesktop && (
-          <p className="demo-notice">모델 파일 등록과 로딩은 데스크톱 앱에서 사용할 수 있습니다.</p>
+          <p className="demo-notice">
+            {localize('모델 파일 등록과 로딩은 데스크톱 앱에서 사용할 수 있습니다.')}
+          </p>
         )}
-        {!loaded && <p role="status">모델 설정을 불러오는 중…</p>}
+        {!loaded && <p role="status">{localize('모델 설정을 불러오는 중…')}</p>}
         {connectionError && (
           <p role="alert" className="form-error">
             {connectionError}
           </p>
         )}
+        <EngineInstaller
+          state={state.engines}
+          disabled={unavailable || busy}
+          onSnapshot={(next) => {
+            if (mounted.current) setState(next);
+          }}
+          onChoose={(engine) => {
+            setDraft((current) => ({ ...current, enginePath: engine.enginePath }));
+            setTrusted(false);
+          }}
+        />
         <section className="runtime-budget">
-          <h3>VRAM 예약</h3>
+          <h3>{localize('메모리 예약')}</h3>
           <p>
-            등록한 예약량으로 모델을 배치합니다. 실제 VRAM 사용량을 강제로 제한하지 않으며, KV
-            cache와 다른 앱의 사용량에 따라 조정이 필요합니다.
+            {localize(
+              '모델 로딩 전에 예약 예산과 실제 여유 RAM·VRAM을 함께 검사합니다. 예약량은 추정값이며 실행 중의 메모리 사용량을 강제로 제한하지는 않습니다.',
+            )}
           </p>
           <fieldset disabled={busy || !loaded}>
             <div className="settings-grid">
               <label className="field">
-                전체 예산 MiB
+                {localize('VRAM 전체 예산 MiB')}
                 <input
                   type="number"
                   min={0}
@@ -226,7 +246,7 @@ export function ModelManager({
                 />
               </label>
               <label className="field">
-                남겨 둘 공간 MiB
+                {localize('남겨 둘 VRAM MiB')}
                 <input
                   type="number"
                   min={0}
@@ -236,16 +256,51 @@ export function ModelManager({
                 />
               </label>
             </div>
+            <div className="settings-grid">
+              <label className="field">
+                {localize('CUDA 엔진에서 사용할 NVIDIA GPU 번호')}
+                <input
+                  type="number"
+                  min={0}
+                  max={255}
+                  value={budget.gpuIndex}
+                  onChange={(e) => setBudget({ ...budget, gpuIndex: Number(e.target.value) })}
+                />
+                <small>
+                  {localize('아래 자원 목록의 번호입니다. 로드된 모델을 언로드한 뒤 변경하세요.')}
+                </small>
+              </label>
+              <label className="field">
+                {localize('RAM 전체 예산 MiB (0: 시스템 전체)')}
+                <input
+                  type="number"
+                  min={0}
+                  max={4194304}
+                  value={budget.ramBudgetMb}
+                  onChange={(e) => setBudget({ ...budget, ramBudgetMb: Number(e.target.value) })}
+                />
+              </label>
+              <label className="field">
+                {localize('남겨 둘 RAM MiB')}
+                <input
+                  type="number"
+                  min={0}
+                  max={1048576}
+                  value={budget.ramHeadroomMb}
+                  onChange={(e) => setBudget({ ...budget, ramHeadroomMb: Number(e.target.value) })}
+                />
+              </label>
+            </div>
             <label className="check-field">
               <input
                 type="checkbox"
                 checked={budget.autoUnloadIdle}
                 onChange={(e) => setBudget({ ...budget, autoUnloadIdle: e.target.checked })}
               />
-              공간 부족 또는 유휴 시간 초과 시 사용하지 않는 모델 자동 언로드
+              {localize('공간 부족 또는 유휴 시간 초과 시 사용하지 않는 모델 자동 언로드')}
             </label>
             <label className="field runtime-idle-field">
-              유휴 모델 자동 언로드 (분)
+              {localize('유휴 모델 자동 언로드 (분)')}
               <input
                 type="number"
                 min={1}
@@ -256,7 +311,7 @@ export function ModelManager({
                   setBudget({ ...budget, idleUnloadMinutes: Number(e.target.value) })
                 }
               />
-              <small>활성 응답이 없는 관리형 모델에만 적용됩니다.</small>
+              <small>{localize('활성 응답이 없는 관리형 모델에만 적용됩니다.')}</small>
             </label>
             <button
               className="secondary-button"
@@ -271,12 +326,14 @@ export function ModelManager({
                 })
               }
             >
-              VRAM 설정 저장
+              {localize('메모리 설정 저장')}
             </button>
             {budgetConflict && (
               <div role="status">
                 <p>
-                  다른 창에서 VRAM 설정을 변경했습니다. 저장된 설정을 다시 불러온 뒤 편집하세요.
+                  {localize(
+                    '다른 창에서 VRAM 설정을 변경했습니다. 저장된 설정을 다시 불러온 뒤 편집하세요.',
+                  )}
                 </p>
                 <button
                   type="button"
@@ -285,7 +342,7 @@ export function ModelManager({
                     setError('');
                   }}
                 >
-                  저장된 VRAM 설정 불러오기
+                  {localize('저장된 VRAM 설정 불러오기')}
                 </button>
               </div>
             )}
@@ -293,20 +350,20 @@ export function ModelManager({
         </section>
         <section className="runtime-resources" aria-labelledby="runtime-resources-title">
           <div className="resource-heading">
-            <h3 id="runtime-resources-title">현재 자원</h3>
-            <span>{loaded ? '2초 간격 측정' : '측정 대기'}</span>
+            <h3 id="runtime-resources-title">{localize('현재 자원')}</h3>
+            <span>{loaded ? localize('2초 간격 측정') : localize('측정 대기')}</span>
           </div>
           <div className="resource-grid">
             <article>
-              <span>앱 VRAM 예약</span>
+              <span>{localize('앱 VRAM 예약')}</span>
               <strong>
                 {(reservedVramMb / 1024).toFixed(1)} / {(usableVramMb / 1024).toFixed(1)} GiB
               </strong>
               <progress max={Math.max(1, usableVramMb)} value={reservedVramMb} />
-              <small>로드된 관리형 모델의 예약 합계</small>
+              <small>{localize('로드된 관리형 모델의 예약 합계')}</small>
             </article>
             <article>
-              <span>시스템 RAM</span>
+              <span>{localize('시스템 RAM')}</span>
               <strong>
                 {(state.resources.systemRamUsedMb / 1024).toFixed(1)} /{' '}
                 {(state.resources.systemRamTotalMb / 1024).toFixed(1)} GiB
@@ -315,7 +372,10 @@ export function ModelManager({
                 max={Math.max(1, state.resources.systemRamTotalMb)}
                 value={state.resources.systemRamUsedMb}
               />
-              <small>{(state.resources.systemRamFreeMb / 1024).toFixed(1)} GiB 사용 가능</small>
+              <small>
+                {(state.resources.systemRamFreeMb / 1024).toFixed(1)}
+                {localize(' GiB 사용 가능')}
+              </small>
             </article>
             {state.resources.gpus.map((gpu) => (
               <article key={gpu.index}>
@@ -327,21 +387,26 @@ export function ModelManager({
                 </strong>
                 <progress max={Math.max(1, gpu.totalVramMb)} value={gpu.usedVramMb} />
                 <small>
-                  VRAM {(gpu.freeVramMb / 1024).toFixed(1)} GiB 여유
+                  VRAM {(gpu.freeVramMb / 1024).toFixed(1)}
+                  {localize(' GiB 여유')}
                   {gpu.utilizationPercent === null ? '' : ` · GPU ${gpu.utilizationPercent}%`}
                 </small>
               </article>
             ))}
           </div>
           {loaded && state.resources.gpuSource === 'unavailable' && (
-            <p>지원되는 NVIDIA 측정 도구를 찾지 못해 실제 GPU 사용량은 표시할 수 없습니다.</p>
+            <p>
+              {localize(
+                '실제 GPU 사용량을 측정하지 못했습니다. GPU는 설정한 예약 예산만 검사하며 RAM은 실제 여유 공간을 검사합니다.',
+              )}
+            </p>
           )}
         </section>
-        <section className="local-model-list" aria-label="등록한 모델">
-          <h3>Hugging Face에서 GGUF 받기</h3>
+        <section className="local-model-list" aria-label={localize('등록한 모델')}>
+          <h3>{localize('Hugging Face에서 GGUF 받기')}</h3>
           <div className="settings-grid">
             <label className="field">
-              저장소
+              {localize('저장소')}
               <input
                 placeholder="bartowski/model-GGUF"
                 value={download.repository}
@@ -349,7 +414,7 @@ export function ModelManager({
               />
             </label>
             <label className="field">
-              GGUF 파일
+              {localize('GGUF 파일')}
               <input
                 placeholder="model-Q4_K_M.gguf"
                 value={download.file}
@@ -364,7 +429,7 @@ export function ModelManager({
               />
             </label>
             <label className="field">
-              SHA-256 (선택)
+              {localize('SHA-256 (선택 · 분할 모델은 첫 파일)')}
               <input
                 value={download.sha256}
                 onChange={(event) => setDownload({ ...download, sha256: event.target.value })}
@@ -389,8 +454,13 @@ export function ModelManager({
               })
             }
           >
-            다운로드 시작
+            {localize('다운로드 시작')}
           </button>
+          <p className="subtle-note">
+            {localize(
+              '분할 모델은 -00001-of-00002.gguf 형식의 파일 하나를 입력하면 같은 버전의 전체 묶음을 받습니다. 중지하거나 앱을 종료한 뒤에도 이어받을 수 있습니다.',
+            )}
+          </p>
           {state.downloads.map((item) => {
             const percent =
               item.totalBytes && item.totalBytes > 0
@@ -402,14 +472,20 @@ export function ModelManager({
                 <span>
                   {
                     {
-                      downloading: '다운로드 중',
-                      completed: '완료',
-                      failed: '실패',
-                      cancelled: '중지됨',
+                      downloading: localize('다운로드 중'),
+                      completed: localize('완료'),
+                      failed: localize('실패'),
+                      cancelled: localize('중지됨'),
                     }[item.status]
                   }{' '}
                   · {(item.downloadedBytes / 1024 ** 3).toFixed(2)} GiB
                   {percent === null ? '' : ` · ${percent}%`}
+                  {(item.parts?.length ?? 0) > 1 &&
+                    localize(
+                      ' · 분할 파일 {0}/{1} 완료',
+                      item.parts!.filter((part) => part.sha256).length,
+                      item.parts!.length,
+                    )}
                 </span>
                 {item.status === 'downloading' && (
                   <progress
@@ -419,6 +495,20 @@ export function ModelManager({
                 )}
                 {item.error && <p className="danger-text">{item.error}</p>}
                 <div className="edit-actions">
+                  {(item.status === 'failed' || item.status === 'cancelled') && (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() =>
+                        void operation(async () => {
+                          const next = await modelDownloadAction(item.id, 'resume');
+                          if (mounted.current) setState(next);
+                        })
+                      }
+                    >
+                      {localize('이어받기')}
+                    </button>
+                  )}
                   {item.status === 'completed' && item.modelPath && (
                     <button
                       type="button"
@@ -436,7 +526,7 @@ export function ModelManager({
                         }, false)
                       }
                     >
-                      분석 후 등록 양식에 사용
+                      {localize('분석 후 등록 양식에 사용')}
                     </button>
                   )}
                   <button
@@ -452,17 +542,17 @@ export function ModelManager({
                       })
                     }
                   >
-                    {item.status === 'downloading' ? '중지' : '목록·파일 제거'}
+                    {item.status === 'downloading' ? localize('중지') : localize('목록·파일 제거')}
                   </button>
                 </div>
               </article>
             );
           })}
         </section>
-        <section className="local-model-list" aria-label="등록한 모델">
-          <h3>등록한 모델</h3>
+        <section className="local-model-list" aria-label={localize('등록한 모델')}>
+          <h3>{localize('등록한 모델')}</h3>
           {loaded && !state.profiles.length && (
-            <p>등록한 모델이 없습니다. 아래에서 엔진과 GGUF 파일을 선택하세요.</p>
+            <p>{localize('등록한 모델이 없습니다. 아래에서 엔진과 GGUF 파일을 선택하세요.')}</p>
           )}
           {state.profiles.map((profile) => {
             const instance = state.instances.find((i) => i.profileId === profile.id);
@@ -472,22 +562,26 @@ export function ModelManager({
                 <span>
                   {instance
                     ? {
-                        loading: '로딩 중',
-                        ready: '준비됨',
-                        stopped: '언로드됨',
-                        failed: '실행 실패',
+                        loading: localize('로딩 중'),
+                        ready: localize('준비됨'),
+                        stopped: localize('언로드됨'),
+                        failed: localize('실행 실패'),
                       }[instance.status]
-                    : '언로드됨'}{' '}
-                  · {(profile.modelBytes / 1024 ** 3).toFixed(2)} GiB · 설정 예약{' '}
-                  {profile.vramReservationMb} MiB
-                  {!!instance?.leases && ` · 사용 중 ${instance.leases}개 대화`}
+                    : localize('언로드됨')}{' '}
+                  · {(profile.modelBytes / 1024 ** 3).toFixed(2)}
+                  {localize(' GiB · 설정 예약')} {profile.vramReservationMb} MiB
+                  {(profile.modelFiles?.length ?? 0) > 1 &&
+                    localize(' · 분할 {0}개', profile.modelFiles!.length)}
+                  {profile.ramReservationMb !== undefined &&
+                    localize(' · RAM 예약 {0} MiB', profile.ramReservationMb)}
+                  {!!instance?.leases && localize(' · 사용 중 {0}개 대화', instance.leases)}
                 </span>
                 <div className="edit-actions">
                   <button
                     disabled={unavailable || busy || running || instance?.status === 'loading'}
                     onClick={() => void operation(() => onChoose(profile), false)}
                   >
-                    {hasSession ? '이 대화에 적용' : '이 모델 사용'}
+                    {hasSession ? localize('이 대화에 적용') : localize('이 모델 사용')}
                   </button>
                   <button
                     disabled={
@@ -502,14 +596,14 @@ export function ModelManager({
                       })
                     }
                   >
-                    로드
+                    {localize('로드')}
                   </button>
                   <button
                     disabled={
                       unavailable ||
                       busy ||
                       !instance ||
-                      instance.status !== 'ready' ||
+                      !['ready', 'failed'].includes(instance.status) ||
                       instance.leases > 0
                     }
                     onClick={() =>
@@ -518,7 +612,7 @@ export function ModelManager({
                       })
                     }
                   >
-                    언로드
+                    {localize('언로드')}
                   </button>
                   <button
                     disabled={
@@ -529,7 +623,7 @@ export function ModelManager({
                     }
                     onClick={() => editProfile(profile)}
                   >
-                    설정 편집
+                    {localize('설정 편집')}
                   </button>
                   <button
                     className="danger-button"
@@ -546,41 +640,43 @@ export function ModelManager({
                       })
                     }
                   >
-                    목록에서 제거
+                    {localize('목록에서 제거')}
                   </button>
                 </div>
                 {instance?.error && <p className="danger-text">{instance.error}</p>}
+                {instance?.memoryWarning && <p className="subtle-note">{instance.memoryWarning}</p>}
                 <details>
-                  <summary>엔진 정보·로그</summary>
+                  <summary>{localize('엔진 정보·로그')}</summary>
                   <p>{profile.engineVersion}</p>
                   <p>{profile.modelPath}</p>
                   {(profile.modelName || profile.modelArchitecture || profile.tokenizerModel) && (
                     <p>
-                      {profile.modelName || '이름 정보 없음'}
+                      {profile.modelName || localize('이름 정보 없음')}
                       {profile.modelArchitecture ? ` · ${profile.modelArchitecture}` : ''}
                       {profile.tokenizerModel ? ` · tokenizer ${profile.tokenizerModel}` : ''}
                     </p>
                   )}
                   <p>
-                    모델 컨텍스트 {profile.nativeContextSize?.toLocaleString() ?? '메타데이터 없음'}{' '}
-                    · Chat template{' '}
+                    {localize('모델 컨텍스트 ')}
+                    {profile.nativeContextSize?.toLocaleString() ?? localize('메타데이터 없음')} ·
+                    Chat template{' '}
                     {profile.settings.chatTemplate
-                      ? '사용자 지정'
+                      ? localize('사용자 지정')
                       : profile.embeddedChatTemplate
-                        ? 'GGUF 내장'
-                        : 'llama.cpp 자동 판정'}
+                        ? localize('GGUF 내장')
+                        : localize('llama.cpp 자동 판정')}
                     {' · '}Tool template{' '}
                     {profile.settings.chatTemplate
-                      ? '사용자 지정에서 판정'
+                      ? localize('사용자 지정에서 판정')
                       : profile.embeddedToolTemplate
-                        ? 'GGUF 내장'
-                        : '별도 메타데이터 없음'}
+                        ? localize('GGUF 내장')
+                        : localize('별도 메타데이터 없음')}
                   </p>
                   <p>
-                    GGUF v{profile.ggufVersion} 헤더 확인 · 전체 파일 무결성 검사는 아직 수행하지
-                    않음
+                    GGUF v{profile.ggufVersion}
+                    {localize(' 헤더 확인 · 전체 파일 무결성 검사는 아직 수행하지 않음')}
                   </p>
-                  <pre>{instance?.log || '실행 로그 없음'}</pre>
+                  <pre>{instance?.log || localize('실행 로그 없음')}</pre>
                 </details>
               </article>
             );
@@ -593,7 +689,9 @@ export function ModelManager({
             void operation(async () => {
               const gpu = gpuText.trim();
               if (!['auto', 'all'].includes(gpu) && !/^\d+$/.test(gpu))
-                throw new Error('GPU layers에 auto, all 또는 0 이상의 정수를 입력하세요.');
+                throw new Error(
+                  localize('GPU layers에 auto, all 또는 0 이상의 정수를 입력하세요.'),
+                );
               const settings = engineSettingsSchema.parse({
                 ...draft.settings,
                 gpuLayers: ['auto', 'all'].includes(gpu) ? gpu : Number(gpu),
@@ -605,17 +703,17 @@ export function ModelManager({
           }}
         >
           <fieldset disabled={busy || !loaded}>
-            <h3>{draft.id ? '모델 설정 편집' : '모델 등록'}</h3>
+            <h3>{draft.id ? localize('모델 설정 편집') : localize('모델 등록')}</h3>
             {profileConflict && (
               <div role="status">
                 <p>
                   {savedProfile
-                    ? '다른 창에서 모델 설정을 변경했습니다. 다시 불러온 뒤 편집하세요.'
-                    : '이 모델은 목록에서 제거되었습니다. 새 모델로 등록할 수 있습니다.'}
+                    ? localize('다른 창에서 모델 설정을 변경했습니다. 다시 불러온 뒤 편집하세요.')
+                    : localize('이 모델은 목록에서 제거되었습니다. 새 모델로 등록할 수 있습니다.')}
                 </p>
                 {savedProfile ? (
                   <button type="button" onClick={() => editProfile(savedProfile)}>
-                    저장된 모델 설정 불러오기
+                    {localize('저장된 모델 설정 불러오기')}
                   </button>
                 ) : (
                   <button
@@ -625,13 +723,13 @@ export function ModelManager({
                       setTrusted(false);
                     }}
                   >
-                    새 모델로 전환
+                    {localize('새 모델로 전환')}
                   </button>
                 )}
               </div>
             )}
             <label className="field">
-              이름
+              {localize('이름')}
               <input
                 required
                 maxLength={200}
@@ -641,7 +739,9 @@ export function ModelManager({
             </label>
             {(['enginePath', 'modelPath'] as const).map((key) => (
               <label className="field" key={key}>
-                {key === 'enginePath' ? 'llama-server 실행 파일' : 'GGUF 모델 파일'}
+                {key === 'enginePath'
+                  ? localize('llama-server 실행 파일')
+                  : localize('GGUF 모델 파일')}
                 <div className="input-action">
                   <input
                     required
@@ -670,7 +770,7 @@ export function ModelManager({
                       }, false)
                     }
                   >
-                    파일 선택
+                    {localize('파일 선택')}
                   </button>
                 </div>
               </label>
@@ -686,20 +786,24 @@ export function ModelManager({
                   }, false)
                 }
               >
-                GGUF 분석·권장값 적용
+                {localize('GGUF 분석·권장값 적용')}
               </button>
             </div>
             {inspection && (
               <p role="status">
-                {inspection.modelName || '이름 정보 없음'}
+                {inspection.modelName || localize('이름 정보 없음')}
                 {inspection.modelArchitecture ? ` · ${inspection.modelArchitecture}` : ''}
-                {inspection.layerCount ? ` · ${inspection.layerCount} layers` : ''} · 권장 컨텍스트{' '}
-                {inspection.recommendedSettings.contextSize.toLocaleString()} · 예상 KV cache{' '}
+                {inspection.layerCount ? ` · ${inspection.layerCount} layers` : ''}
+                {localize(' · 권장 컨텍스트')}{' '}
+                {inspection.recommendedSettings.contextSize.toLocaleString()}
+                {localize(' · 예상 KV cache')}{' '}
                 {inspection.estimatedKvCacheMb === null
-                  ? '메타데이터 부족'
+                  ? localize('메타데이터 부족')
                   : `${inspection.estimatedKvCacheMb.toLocaleString()} MiB`}
                 {' · '}Tool template{' '}
-                {inspection.embeddedToolTemplate ? 'GGUF 내장' : '별도 메타데이터 없음'}
+                {inspection.embeddedToolTemplate
+                  ? localize('GGUF 내장')
+                  : localize('별도 메타데이터 없음')}
                 <br />
                 <small>{inspection.recommendation}</small>
               </p>
@@ -707,9 +811,9 @@ export function ModelManager({
             <div className="settings-grid">
               {(
                 [
-                  ['contextSize', '컨텍스트 길이', 1024, 2097152],
-                  ['threads', '생성 스레드', 1, 1024],
-                  ['batchThreads', '프리필 스레드', 1, 1024],
+                  ['contextSize', localize('컨텍스트 길이'), 1024, 2097152],
+                  ['threads', localize('생성 스레드'), 1, 1024],
+                  ['batchThreads', localize('프리필 스레드'), 1, 1024],
                   ['batchSize', 'Batch', 1, 65536],
                   ['microBatchSize', 'Micro batch', 1, 65536],
                 ] as const
@@ -729,10 +833,10 @@ export function ModelManager({
               <label className="field">
                 GPU layers
                 <input value={gpuText} onChange={(e) => setGpuText(e.target.value)} />
-                <small>auto, all 또는 0 이상의 정수</small>
+                <small>{localize('auto, all 또는 0 이상의 정수')}</small>
               </label>
               <label className="field">
-                VRAM 예약 MiB
+                {localize('VRAM 예약 MiB')}
                 <input
                   type="number"
                   min={0}
@@ -740,6 +844,21 @@ export function ModelManager({
                   value={draft.vramReservationMb}
                   onChange={(e) =>
                     setDraft({ ...draft, vramReservationMb: Number(e.target.value) })
+                  }
+                />
+              </label>
+              <label className="field">
+                {localize('RAM 예약 MiB (비워 두면 자동 계산)')}
+                <input
+                  type="number"
+                  min={0}
+                  max={4194304}
+                  value={draft.ramReservationMb ?? ''}
+                  onChange={(e) =>
+                    setDraft({
+                      ...draft,
+                      ramReservationMb: e.target.value === '' ? undefined : Number(e.target.value),
+                    })
                   }
                 />
               </label>
@@ -781,18 +900,18 @@ export function ModelManager({
               KV cache GPU offload
             </label>
             <details>
-              <summary>고급 설정</summary>
+              <summary>{localize('고급 설정')}</summary>
               <label className="field">
                 Chat template
                 <textarea
                   rows={4}
                   value={draft.settings.chatTemplate}
                   onChange={(e) => settings('chatTemplate', e.target.value)}
-                  placeholder="비워 두면 GGUF의 템플릿 사용"
+                  placeholder={localize('비워 두면 GGUF의 템플릿 사용')}
                 />
               </label>
               <label className="field">
-                추가 엔진 인자 (JSON 배열)
+                {localize('추가 엔진 인자 (JSON 배열)')}
                 <textarea
                   rows={4}
                   value={extra}
@@ -801,8 +920,9 @@ export function ModelManager({
                 />
               </label>
               <p>
-                설치한 엔진의 옵션 목록을 검사합니다. 모델 경로·네트워크·인증과 위 관리 설정은 추가
-                인자로 덮어쓸 수 없습니다.
+                {localize(
+                  '설치한 엔진의 옵션 목록을 검사합니다. 모델 경로·네트워크·인증과 위 관리 설정은 추가 인자로 덮어쓸 수 없습니다.',
+                )}
               </p>
             </details>
             <label className="check-field">
@@ -811,18 +931,18 @@ export function ModelManager({
                 checked={trusted}
                 onChange={(e) => setTrusted(e.target.checked)}
               />
-              선택한 엔진 실행 파일을 신뢰하며 정보 조회와 모델 로딩에 사용
+              {localize('선택한 엔진 실행 파일을 신뢰하며 정보 조회와 모델 로딩에 사용')}
             </label>
             <div className="edit-actions">
               <button
                 className="primary-button"
                 disabled={unavailable || busy || !trusted || profileConflict}
               >
-                {busy ? '처리 중…' : '엔진 확인·모델 저장'}
+                {busy ? localize('처리 중…') : localize('엔진 확인·모델 저장')}
               </button>
               {draft.id && (
                 <button type="button" onClick={resetDraft}>
-                  새 모델 입력
+                  {localize('새 모델 입력')}
                 </button>
               )}
             </div>

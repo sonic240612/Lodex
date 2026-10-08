@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomUUID } from 'node:crypto';
 import type { RegisteredSkill } from '@lodex/skills';
 import type { McpRegistration } from '@lodex/mcp';
+import type { BackupImportData, BackupImportCatalog } from './backup-import';
 import {
   AppError,
   emptyUsage,
@@ -13,6 +14,8 @@ import {
   modelConfigSchema,
   agentRoutingConfigSchema,
   resolveModelConfig,
+  resolveAuxiliaryModel,
+  taskCostTotals,
   planSchema,
   type Command,
   type CommandResult,
@@ -87,13 +90,50 @@ function invalidateSessionVerification(session: Session) {
   }
 }
 function updateMessageCostUsage(message: Message) {
-  if (!message.usage || !message.costCalls?.length) return;
+  if (!message.costCalls?.length) return;
+  message.usage ??= emptyUsage('openrouter');
   message.usage.costUsd = message.costCalls.every((call) => call.status === 'settled')
     ? message.costCalls.reduce((sum, call) => sum + call.actualCostUsd!, 0)
     : null;
   message.usage.billing = message.usage.costUsd === null ? 'pending_reconciliation' : 'reported';
   const generationId = message.costCalls.at(-1)?.generationId;
   if (generationId) message.usage.generationId = generationId;
+}
+
+// Billing metadata may arrive while a summary is generated. It does not change
+// the source, but every instruction, selection and transcript change does.
+function compactionSourceHash(session: Session): string {
+  const { version: _version, updatedAt: _updatedAt, ...source } = session;
+  return createHash('sha256')
+    .update(
+      JSON.stringify({
+        ...source,
+        ...(source.autopilot
+          ? {
+              autopilot: {
+                ...source.autopilot,
+                spentCostUsd: 0,
+                reservedCostUsd: 0,
+                costUnconfirmed: false,
+              },
+            }
+          : {}),
+        messages: source.messages.map(({ costCalls: _calls, usage, ...message }) => ({
+          ...message,
+          ...(usage
+            ? {
+                usage: {
+                  ...usage,
+                  costUsd: null,
+                  billing: null,
+                  generationId: null,
+                },
+              }
+            : { usage }),
+        })),
+      }),
+    )
+    .digest('hex');
 }
 
 // Additive JSON fields are defaulted on all read paths, including old SSE events.
@@ -150,6 +190,7 @@ function hydrate(session: Session): Session {
 }
 
 export interface RunUpdate {
+  inferenceConfig?: Session['config'];
   finalResponseOffset?: number;
   taskList?: TaskList;
   autopilot?: AutopilotState;
@@ -173,7 +214,7 @@ export class StorageEngine {
       'PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;',
     );
     const row = this.db.prepare('PRAGMA user_version').get() as { user_version: number };
-    if (row.user_version > 16) {
+    if (row.user_version > 17) {
       this.db.close();
       throw new AppError(
         'DATABASE_VERSION',
@@ -245,6 +286,12 @@ export class StorageEngine {
     // verified completion from a model claim. Refuse silent downgrade writes.
     if (row.user_version < 15) this.db.exec('PRAGMA user_version=15;');
     if (row.user_version < 16) this.db.exec('PRAGMA user_version=16;');
+    if (row.user_version < 17)
+      this.db.exec(`BEGIN IMMEDIATE;
+      CREATE TABLE IF NOT EXISTS manual_compactions (
+        id TEXT PRIMARY KEY, hash TEXT NOT NULL, session_id TEXT NOT NULL, source_hash TEXT NOT NULL
+      );
+      PRAGMA user_version=17; COMMIT;`);
   }
   integration(name: string): { version: number; document: unknown } | null {
     const row = this.db
@@ -254,7 +301,15 @@ export class StorageEngine {
   }
   saveIntegration(name: string, expectedVersion: number, document: unknown): number {
     if (
-      !['telegram', 'worktrees', 'command_jobs'].includes(name) ||
+      ![
+        'telegram',
+        'worktrees',
+        'command_jobs',
+        'model_catalog',
+        'browser',
+        'automations',
+        'language_servers',
+      ].includes(name) ||
       Buffer.byteLength(JSON.stringify(document)) > 2097152
     )
       throw new AppError('INTEGRATION_STATE', '연동 기록 형식 또는 크기를 확인하세요.');
@@ -304,6 +359,99 @@ export class StorageEngine {
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
       lastSeq: seq.seq,
     };
+  }
+  backupImportCatalog(): BackupImportCatalog {
+    const catalog = {
+      sessionIds: (
+        this.db.prepare('SELECT id FROM sessions ORDER BY id').all() as { id: string }[]
+      ).map((row) => row.id),
+      deletedSessionIds: (
+        this.db.prepare('SELECT id FROM deleted_sessions ORDER BY id').all() as { id: string }[]
+      ).map((row) => row.id),
+      projects: this.projects(),
+      profiles: this.localProfiles(),
+      skills: this.registeredSkills(),
+      mcp: this.registeredMcp(),
+      integrations: (['browser', 'automations', 'language_servers'] as const).flatMap((name) => {
+        const saved = this.integration(name);
+        return saved ? [{ name, document: saved.document, version: saved.version }] : [];
+      }),
+    };
+    return {
+      ...catalog,
+      fingerprint: createHash('sha256').update(JSON.stringify(catalog)).digest('hex'),
+    };
+  }
+  importBackup(data: BackupImportData, expectedFingerprint: string): void {
+    this.transaction(() => {
+      if (this.backupImportCatalog().fingerprint !== expectedFingerprint)
+        throw new AppError(
+          'BACKUP_CHANGED',
+          '대화 또는 등록 정보가 변경되었습니다. 백업 미리보기를 다시 확인하세요.',
+          409,
+        );
+      const insert = (table: string, entries: { id: string }[]) => {
+        const statement = this.db.prepare(`INSERT INTO ${table}(id,document) VALUES(?,?)`);
+        for (const entry of entries) statement.run(entry.id, JSON.stringify(entry));
+      };
+      for (const project of data.projects)
+        this.db
+          .prepare('INSERT INTO projects(id,path,document) VALUES(?,?,?)')
+          .run(project.id, project.path, JSON.stringify(project));
+      insert('runtime_profiles', data.profiles);
+      insert('skill_registrations', data.skills);
+      insert('mcp_registrations', data.mcp);
+      for (const integration of data.integrations ?? []) {
+        if (
+          !['browser', 'automations', 'language_servers'].includes(integration.name) ||
+          Buffer.byteLength(JSON.stringify(integration.document)) > 2097152
+        )
+          throw new AppError('BACKUP_INTEGRATION', '복원할 통합 설정이 올바르지 않습니다.');
+        this.db
+          .prepare('INSERT INTO integration_state(name,version,document) VALUES(?,?,?)')
+          .run(integration.name, 1, JSON.stringify(integration.document));
+      }
+      if (data.projects.length)
+        this.db.prepare('INSERT INTO events(session_id,document) VALUES(?,?)').run(
+          '',
+          JSON.stringify({
+            protocolVersion: 1,
+            type: 'projects_changed',
+            projects: this.projects(),
+            createdAt: new Date().toISOString(),
+          }),
+        );
+      const usedIds = new Set(this.backupImportCatalog().sessionIds);
+      for (const source of data.sessions) {
+        if (usedIds.has(source.id))
+          throw new AppError('BACKUP_CHANGED', '이미 존재하는 대화를 덮어쓸 수 없습니다.', 409);
+        usedIds.add(source.id);
+        // Imported records never become runnable jobs or re-enable remote approval.
+        const session = hydrate(structuredClone(source));
+        session.permissionMode = 'ask';
+        session.run = null;
+        session.execution = defaultExecutionConfig();
+        session.skills = [];
+        session.mcp = [];
+        session.skillCloudConsent = false;
+        session.mcpCloudConsent = false;
+        session.config.cloudConsent = false;
+        session.config.projectCloudConsent = false;
+        for (const role of ['plan', 'build', 'subagent', 'summary', 'review'] as const) {
+          const config = session.routing?.[role];
+          if (config) {
+            config.cloudConsent = false;
+            config.projectCloudConsent = false;
+          }
+        }
+        for (const task of session.taskList?.tasks ?? [])
+          if (task.model) {
+            task.model.cloudConsent = false;
+            task.model.projectCloudConsent = false;
+          }
+        this.persist(session);
+      }
+    });
   }
   session(id: string): Session {
     const row = this.db.prepare('SELECT document FROM sessions WHERE id=?').get(id) as
@@ -533,7 +681,18 @@ export class StorageEngine {
     const row = this.db
       .prepare('SELECT hash, result FROM commands WHERE id=?')
       .get(command.commandId) as { hash: string; result: string } | undefined;
-    if (!row) return null;
+    if (!row) {
+      const pending = this.db
+        .prepare('SELECT hash FROM manual_compactions WHERE id=?')
+        .get(command.commandId) as { hash: string } | undefined;
+      if (pending && pending.hash !== this.hash(command))
+        throw new AppError(
+          'COMMAND_REUSE',
+          '같은 명령 ID를 다른 내용으로 재사용할 수 없습니다.',
+          409,
+        );
+      return null;
+    }
     if (row.hash !== this.hash(command))
       throw new AppError(
         'COMMAND_REUSE',
@@ -588,6 +747,7 @@ export class StorageEngine {
       for (const id of sessionIds) {
         this.db.prepare('DELETE FROM sessions WHERE id=?').run(id);
         this.db.prepare('DELETE FROM events WHERE session_id=?').run(id);
+        this.db.prepare('DELETE FROM manual_compactions WHERE session_id=?').run(id);
         // Keep only command hashes to reject retries; erase the old conversation payload.
         this.db
           .prepare("UPDATE commands SET result=? WHERE json_extract(result,'$.session.id')=?")
@@ -666,6 +826,80 @@ export class StorageEngine {
       }),
     );
   }
+  beginManualCompaction(
+    command: Extract<Command, { type: 'compact_context' }>,
+    reservedCostUsd = 0,
+  ): {
+    session: Session;
+    call?: ModelCallRecord;
+  } {
+    return this.transaction(() => {
+      const hash = this.hash(command);
+      const previous = this.db
+        .prepare('SELECT hash FROM manual_compactions WHERE id=?')
+        .get(command.commandId) as { hash: string } | undefined;
+      if (previous || this.receipt(command))
+        throw new AppError(
+          previous && previous.hash !== hash ? 'COMMAND_REUSE' : 'COMPACTION_ALREADY_ATTEMPTED',
+          '이미 처리한 압축 요청입니다. 기존 요약과 비용 기록을 확인한 뒤 새 요청으로 다시 시도하세요.',
+          409,
+        );
+      const session = this.session(command.sessionId);
+      if (session.version !== command.expectedVersion)
+        throw new AppError(
+          'VERSION_CONFLICT',
+          '대화가 변경되었습니다. 최신 상태에서 다시 시도하세요.',
+          409,
+        );
+      if (session.run?.status === 'running')
+        throw new AppError('BUSY', '응답이 끝난 뒤 컨텍스트를 압축하세요.', 409);
+      const config = resolveAuxiliaryModel(session, 'summary');
+      let call: ModelCallRecord | undefined;
+      if (config.provider === 'openrouter') {
+        const message = session.messages.findLast((entry) => entry.role === 'assistant');
+        if (!message) throw new AppError('COMPACTION_EMPTY', '압축할 완료된 응답이 없습니다.');
+        const now = new Date().toISOString();
+        call = {
+          id: randomUUID(),
+          budgetId: session.autopilot
+            ? (session.autopilot.costBudgetId ?? session.autopilot.runId)
+            : 'unbudgeted-' + command.commandId,
+          runId: command.commandId,
+          messageId: message.id,
+          model: config.model,
+          purpose: 'manual_compaction',
+          reservedCostUsd,
+          status: 'reserved',
+          createdAt: now,
+          updatedAt: now,
+        };
+        if (!Number.isFinite(reservedCostUsd) || reservedCostUsd < 0)
+          throw new AppError('COST_RECORD', '올바른 요약 비용 예약이 필요합니다.');
+        if (session.autopilot) {
+          if (session.autopilot.costUnconfirmed)
+            throw new AppError('COST_UNCONFIRMED', '기존 비용을 정산한 뒤 요약하세요.');
+          if (
+            session.autopilot.spentCostUsd + session.autopilot.reservedCostUsd + reservedCostUsd >
+            session.autopilot.limits.costUsd + 1e-12
+          )
+            throw new AppError('COST_BUDGET', '요약 호출이 기존 공유 비용 예산을 초과합니다.');
+          session.autopilot.costBaseline ??= {
+            spent: session.autopilot.spentCostUsd,
+            reserved: session.autopilot.reservedCostUsd,
+            unconfirmed: session.autopilot.costUnconfirmed,
+          };
+        }
+        (message.costCalls ??= []).push(call);
+        updateCostTotals(session);
+        updateMessageCostUsage(message);
+        this.persist(session);
+      }
+      this.db
+        .prepare('INSERT INTO manual_compactions(id,hash,session_id,source_hash) VALUES(?,?,?,?)')
+        .run(command.commandId, hash, session.id, compactionSourceHash(session));
+      return { session, ...(call ? { call } : {}) };
+    });
+  }
   apply(
     command: Command,
     context?: ContextManifest,
@@ -704,7 +938,22 @@ export class StorageEngine {
         };
       } else {
         session = this.session(command.sessionId);
-        if ('expectedVersion' in command && command.expectedVersion !== session.version)
+        const manual =
+          command.type === 'compact_context'
+            ? (this.db
+                .prepare('SELECT hash,source_hash FROM manual_compactions WHERE id=?')
+                .get(command.commandId) as { hash: string; source_hash: string } | undefined)
+            : undefined;
+        if (manual && manual.hash !== this.hash(command))
+          throw new AppError(
+            'COMMAND_REUSE',
+            '같은 명령 ID를 다른 내용으로 재사용할 수 없습니다.',
+            409,
+          );
+        if (
+          (manual && manual.source_hash !== compactionSourceHash(session)) ||
+          (!manual && 'expectedVersion' in command && command.expectedVersion !== session.version)
+        )
           throw new AppError(
             'VERSION_CONFLICT',
             '대화가 변경되었습니다. 최신 상태를 불러온 뒤 다시 시도하세요.',
@@ -930,8 +1179,11 @@ export class StorageEngine {
                   '선택한 스킬이 변경되었습니다. 다시 선택하세요.',
                   409,
                 );
-              if (!registered.invocation.model)
-                throw new AppError('SKILL_INVOCATION', '모델 호출이 허용되지 않은 스킬입니다.');
+              if (!registered.invocation.model && !registered.invocation.user)
+                throw new AppError(
+                  'SKILL_INVOCATION',
+                  '모델·사용자 호출이 모두 금지된 스킬입니다.',
+                );
             }
             session.skills = skills;
             session.skillCloudConsent = command.skillCloudConsent;
@@ -1058,6 +1310,8 @@ export class StorageEngine {
       this.db
         .prepare('INSERT INTO commands(id,hash,result) VALUES (?,?,?)')
         .run(command.commandId, this.hash(command), JSON.stringify(result));
+      if (command.type === 'compact_context')
+        this.db.prepare('DELETE FROM manual_compactions WHERE id=?').run(command.commandId);
       return result;
     });
   }
@@ -1068,6 +1322,8 @@ export class StorageEngine {
       const message = session.messages.find((m) => m.id === session.run?.messageId);
       if (!message) throw new AppError('CORRUPT_RUN', '실행 메시지를 찾을 수 없습니다.', 500);
       if (update.text !== undefined) message.content = update.text;
+      if (update.inferenceConfig)
+        message.inferenceConfig = modelConfigSchema.parse(update.inferenceConfig);
       if (update.finalResponseOffset !== undefined) {
         if (
           !Number.isSafeInteger(update.finalResponseOffset) ||
@@ -1263,7 +1519,10 @@ export class StorageEngine {
     });
   }
   recordWorkspaceChange(sessionId: string, label: string, text: string): Session {
-    if (label !== 'worktree_merge' || Buffer.byteLength(text) > 65536)
+    if (
+      !['worktree_merge', 'worktree_undo', 'worktree_archive'].includes(label) ||
+      Buffer.byteLength(text) > 1048576
+    )
       throw new AppError('WORKSPACE_CHANGE', '잘못된 작업 기록입니다.');
     return this.transaction(() => {
       const session = this.session(sessionId);
@@ -1276,14 +1535,18 @@ export class StorageEngine {
       };
       if (!Array.isArray(change.files))
         throw new AppError('WORKSPACE_CHANGE', '잘못된 변경 기록입니다.');
-      const completed = change.status === 'applied';
+      const completed = ['applied', 'reverted', 'archived'].includes(change.status);
       invalidateSessionVerification(session);
       session.messages.push({
         id: randomUUID(),
         role: 'assistant',
         createdAt: now,
         content: completed
-          ? 'Worktree 변경을 원본 프로젝트에 적용했습니다.'
+          ? label === 'worktree_archive'
+            ? '복구용 Git 스냅샷을 보관하고 Worktree 폴더를 정리했습니다.'
+            : label === 'worktree_undo'
+              ? '최근 Worktree 적용을 되돌렸습니다.'
+              : 'Worktree 변경을 원본 프로젝트에 적용했습니다.'
           : 'Worktree 변경 적용이 중단되었습니다. 적용된 파일과 남은 변경을 확인하세요.',
         status: 'complete',
         error: null,
@@ -1302,7 +1565,12 @@ export class StorageEngine {
               actor: 'desktop',
               mode: session.permissionMode ?? 'ask',
               risk: change.files.some((file) => file.afterHash === null) ? 'high' : 'low',
-              reason: '사용자가 Worktree 변경 검토에서 적용을 선택했습니다.',
+              reason:
+                label === 'worktree_archive'
+                  ? '사용자가 복구 스냅샷 저장과 Worktree 정리를 선택했습니다.'
+                  : label === 'worktree_undo'
+                    ? '사용자가 최근 Worktree 적용 되돌리기를 선택했습니다.'
+                    : '사용자가 Worktree 변경 검토에서 적용을 선택했습니다.',
               status: 'approved',
               decidedBy: 'user',
               requestedAt: now,
@@ -1351,7 +1619,7 @@ export class StorageEngine {
       if (!existing) {
         const unbudgeted =
           call.budgetId === 'unbudgeted-' + call.runId &&
-          call.reservedCostUsd === 0 &&
+          (call.reservedCostUsd === 0 || call.purpose !== undefined || call.taskId !== undefined) &&
           session.autopilot?.runId !== call.runId;
         if (
           call.status !== 'reserved' ||
@@ -1373,6 +1641,21 @@ export class StorageEngine {
           throw new AppError('COST_RECORD', '중복 요청 기록입니다.', 409);
         if (!unbudgeted && session.autopilot?.costUnconfirmed)
           throw new AppError('COST_UNCONFIRMED', '공유 실행의 미확정 비용을 먼저 정산하세요.');
+        if (call.taskId) {
+          const task = session.taskList?.tasks.find((item) => item.id === call.taskId);
+          if (!task || task.status === 'completed')
+            throw new AppError('COST_RECORD', '진행할 작업의 비용만 예약할 수 있습니다.');
+          if (task.costUsd !== undefined) {
+            const costs = taskCostTotals(session, task.id);
+            if (costs.unconfirmed)
+              throw new AppError('COST_UNCONFIRMED', '작업의 미확정 비용을 먼저 정산하세요.');
+            if (costs.spent + costs.reserved + call.reservedCostUsd > task.costUsd + 1e-12)
+              throw new AppError(
+                'TASK_COST_BUDGET',
+                '이 작업의 OpenRouter 비용 예산을 초과합니다.',
+              );
+          }
+        }
         if (
           !unbudgeted &&
           session.autopilot &&
@@ -1397,6 +1680,8 @@ export class StorageEngine {
           'runId',
           'messageId',
           'model',
+          'purpose',
+          'taskId',
           'reservedCostUsd',
           'createdAt',
         ] as const)

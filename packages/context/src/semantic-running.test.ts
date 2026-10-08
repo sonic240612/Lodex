@@ -32,6 +32,39 @@ const request = (): InferenceRequest => ({
   ],
 });
 
+it('chunks with the summary role context while retaining the working model and budget', async () => {
+  const base = request();
+  base.config.model = 'builder';
+  const calls: InferenceRequest[] = [];
+  const result = await compactRunningContextWithModel({
+    request: base,
+    continuation: [],
+    summaryConfig: {
+      ...base.config,
+      model: 'small-summary',
+      contextBudgetTokens: 4096,
+      maxTokens: 512,
+      autoMaxTokens: false,
+    },
+    measure,
+    signal: new AbortController().signal,
+    summarize: async (input) => {
+      calls.push(structuredClone(input));
+      measureRequest(input);
+      return 'The initial investigation is complete. Preserve public APIs and permissions; implementation and validation remain pending.';
+    },
+  });
+  expect(calls.length).toBeGreaterThan(1);
+  expect(
+    calls.every(
+      (call) => call.config.model === 'small-summary' && call.config.contextBudgetTokens === 4096,
+    ),
+  ).toBe(true);
+  expect(result?.request.config.model).toBe('builder');
+  expect(result?.checkpoint.model).toBe('small-summary');
+  expect(result?.checkpoint.contextBudgetTokens).toBe(8000);
+});
+
 it('retries a token-limited summary with room for reasoning, without accepting partial text', async () => {
   const base = request();
   base.config.contextBudgetTokens = 32768;

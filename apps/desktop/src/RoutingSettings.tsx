@@ -1,14 +1,20 @@
+import { t as localize } from './i18n';
 import { SettingsSurface } from './SettingsSurface';
 import { useEffect, useRef, useState } from 'react';
 import {
   agentRoutingConfigSchema,
+  defaultProviderBaseUrl,
+  isLocalProvider,
   type AgentRoutingConfig,
   type ModelConfig,
   type LocalProfile,
   type ModelDescriptor,
 } from '@lodex/contracts';
-import { models, nativeDesktop, runtimeSnapshot } from './bridge';
+import { nativeDesktop, runtimeSnapshot } from './bridge';
+import { useModelCatalog } from './useModelCatalog';
+import { selectCatalogModel } from './model-catalog';
 import { Icon } from './icons';
+import { LocalModelFields } from './LocalModelFields';
 
 function automaticOutputTokens(context: number, descriptor?: ModelDescriptor) {
   return Math.max(
@@ -19,20 +25,6 @@ function automaticOutputTokens(context: number, descriptor?: ModelDescriptor) {
       1048576,
     ),
   );
-}
-
-function applyModelDefaults(config: ModelConfig, descriptor: ModelDescriptor): ModelConfig {
-  const context = Math.min(descriptor.contextLength ?? config.contextBudgetTokens, 2097152);
-  return {
-    ...config,
-    model: descriptor.id,
-    contextBudgetTokens: context,
-    temperature: descriptor.defaultTemperature ?? 0.7,
-    topP: descriptor.defaultTopP ?? 0.95,
-    maxTokens: config.autoMaxTokens
-      ? automaticOutputTokens(context, descriptor)
-      : Math.min(config.maxTokens, descriptor.maxCompletionTokens ?? 1048576),
-  };
 }
 
 export function RoutingSettings({
@@ -54,7 +46,13 @@ export function RoutingSettings({
 }) {
   const [draft, setDraft] = useState<AgentRoutingConfig>(routing ?? { subagentsEnabled: false });
   const [profiles, setProfiles] = useState<LocalProfile[]>([]);
-  const [catalog, setCatalog] = useState<ModelDescriptor[]>([]);
+  const usesOpenRouter = (['plan', 'build', 'subagent', 'summary', 'review'] as const).some(
+    (role) => draft[role]?.provider === 'openrouter',
+  );
+  const { catalog, catalogError, catalogNotice, catalogLoading, refreshCatalog } = useModelCatalog(
+    { ...base, provider: 'openrouter' },
+    nativeDesktop && usesOpenRouter,
+  );
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
   const dialog = useRef<HTMLDialogElement>(null);
@@ -75,38 +73,6 @@ export function RoutingSettings({
       live = false;
     };
   }, []);
-  useEffect(() => {
-    if (
-      !nativeDesktop ||
-      catalog.length ||
-      !(['plan', 'build', 'subagent'] as const).some(
-        (role) => draft[role]?.provider === 'openrouter',
-      )
-    )
-      return;
-    let live = true;
-    void models('openrouter', '')
-      .then((items) => {
-        if (!live) return;
-        setCatalog(items);
-        setDraft((current) => {
-          const next = { ...current };
-          for (const role of ['plan', 'build', 'subagent'] as const) {
-            const config = current[role];
-            const descriptor = items.find((item) => item.id === config?.model);
-            if (config?.provider === 'openrouter' && descriptor)
-              next[role] = applyModelDefaults(config, descriptor);
-          }
-          return next;
-        });
-      })
-      .catch((failure) => {
-        if (live) setError(failure instanceof Error ? failure.message : String(failure));
-      });
-    return () => {
-      live = false;
-    };
-  }, [catalog.length, draft.build?.provider, draft.plan?.provider, draft.subagent?.provider]);
   return (
     <SettingsSurface
       embedded={embedded}
@@ -120,8 +86,13 @@ export function RoutingSettings({
       }}
     >
       <header>
-        <h2 id="routing-title">역할별 모델</h2>
-        <button className="icon-button" aria-label="닫기" disabled={saving} onClick={onClose}>
+        <h2 id="routing-title">{localize('역할별 모델')}</h2>
+        <button
+          className="icon-button"
+          aria-label={localize('닫기')}
+          disabled={saving}
+          onClick={onClose}
+        >
           <Icon name="close" />
         </button>
       </header>
@@ -137,7 +108,37 @@ export function RoutingSettings({
         }}
       >
         <div className="settings-content">
-          <p>기본 모델: {base.model || '미설정'}. 역할을 지정하지 않으면 이 모델을 사용합니다.</p>
+          {usesOpenRouter && (
+            <>
+              <button
+                type="button"
+                className="secondary-button"
+                disabled={catalogLoading || saving}
+                onClick={() => void refreshCatalog()}
+              >
+                {catalogLoading
+                  ? localize('모델 목록 조회 중…')
+                  : localize('OpenRouter 모델 목록 새로고침')}
+              </button>
+              {catalogError && (
+                <p className="form-error" role="alert">
+                  {catalogError}
+                </p>
+              )}
+              {catalogNotice && (
+                <p className="field-hint" role="status">
+                  {catalogNotice}
+                </p>
+              )}
+            </>
+          )}
+          <p>
+            {localize('기본 모델: ')}
+            {base.model || localize('미설정')}
+            {localize(
+              '. 요약·검토 역할을 지정하지 않으면 현재 작업 모델을 사용합니다. 다른 역할은 기본 모델을 사용합니다.',
+            )}
+          </p>
           <label className="check-row">
             <input
               type="checkbox"
@@ -145,14 +146,14 @@ export function RoutingSettings({
               disabled={running || saving}
               onChange={(event) => setDraft({ ...draft, subagentsEnabled: event.target.checked })}
             />
-            서브에이전트 사용
+            {localize('서브에이전트 사용')}
           </label>
           <p className="field-note">
-            한 번에 최대 3개 작업을 별도 컨텍스트에서 진행합니다. Plan에서는 읽기만 허용하고,
-            Build에서는 별도 Worktree의 수정과 허용된 명령을 실행할 수 있습니다. 부모의 권한·호출
-            예산·중지 신호를 공유합니다. 로컬 추론은 순서대로 실행합니다.
+            {localize(
+              '한 번에 최대 3개 작업을 별도 컨텍스트에서 진행합니다. Plan에서는 읽기만 허용하고, Build에서는 별도 Worktree의 수정과 허용된 명령을 실행할 수 있습니다. 부모의 권한·호출 예산·중지 신호를 공유합니다. 로컬 추론은 순서대로 실행합니다.',
+            )}
           </p>
-          {(['plan', 'build', 'subagent'] as const).map((role) => {
+          {(['plan', 'build', 'subagent', 'summary', 'review'] as const).map((role) => {
             const config = draft[role];
             const change = (update: Partial<ModelConfig>) =>
               setDraft((old) => ({ ...old, [role]: { ...(old[role] ?? base), ...update } }));
@@ -160,13 +161,17 @@ export function RoutingSettings({
               <fieldset key={role} disabled={running || saving} className="routing-role">
                 <legend>
                   {role === 'plan'
-                    ? 'Plan · 계획'
+                    ? localize('Plan · 계획')
                     : role === 'build'
-                      ? 'Build · 작업'
-                      : '서브에이전트 · 작업'}
+                      ? localize('Build · 작업')
+                      : role === 'summary'
+                        ? localize('요약 · 컨텍스트 압축')
+                        : role === 'review'
+                          ? localize('검토 · 결과 확인')
+                          : localize('서브에이전트 · 작업')}
                 </legend>
                 <label>
-                  연결
+                  {localize('연결')}
                   <select
                     value={
                       !config
@@ -216,6 +221,7 @@ export function RoutingSettings({
                           [role]: {
                             ...external,
                             provider: value as ModelConfig['provider'],
+                            baseUrl: defaultProviderBaseUrl(value as ModelConfig['provider']),
                             model: '',
                             cloudConsent: false,
                             projectCloudConsent: false,
@@ -223,28 +229,35 @@ export function RoutingSettings({
                         }));
                     }}
                   >
-                    <option value="default">기본 모델 사용</option>
-                    <option value="llama-server">외부 llama-server</option>
+                    <option value="default">{localize('기본 모델 사용')}</option>
+                    <option value="llama-server">{localize('외부 llama-server')}</option>
+                    <option value="ollama">Ollama</option>
+                    <option value="vllm">vLLM</option>
+                    <option value="mlx">MLX</option>
                     <option value="openrouter">OpenRouter</option>
                     {profiles.map((profile) => (
                       <option key={profile.id} value={'managed:' + profile.id}>
-                        {profile.name} · 관리 모델 v{profile.version}
+                        {profile.name}
+                        {localize(' · 관리 모델 v')}
+                        {profile.version}
                       </option>
                     ))}
                     {config?.managedModelId &&
                       !profiles.some((profile) => profile.id === config.managedModelId) && (
                         <option value={'managed:' + config.managedModelId}>
-                          등록이 없는 모델 · 다시 선택
+                          {localize('등록이 없는 모델 · 다시 선택')}
                         </option>
                       )}
-                    {config?.provider === 'demo' && <option value="demo">데모</option>}
+                    {config?.provider === 'demo' && (
+                      <option value="demo">{localize('데모')}</option>
+                    )}
                   </select>
                 </label>
                 {config && (
                   <>
-                    {!config.managedModelId && (
+                    {!config.managedModelId && !isLocalProvider(config.provider) && (
                       <label>
-                        모델 ID
+                        {localize('모델 ID')}
                         <input
                           list={
                             config.provider === 'openrouter'
@@ -259,26 +272,21 @@ export function RoutingSettings({
                             if (config.provider === 'openrouter' && descriptor)
                               setDraft((old) => ({
                                 ...old,
-                                [role]: applyModelDefaults(old[role] ?? base, descriptor),
+                                [role]: selectCatalogModel(old[role] ?? base, descriptor),
                               }));
                             else change({ model });
                           }}
                         />
                       </label>
                     )}
-                    {config.provider === 'llama-server' && !config.managedModelId && (
-                      <label>
-                        서버 주소
-                        <input
-                          value={config.baseUrl}
-                          onChange={(event) => change({ baseUrl: event.target.value })}
-                        />
-                      </label>
+                    {isLocalProvider(config.provider) && !config.managedModelId && (
+                      <LocalModelFields config={config} onChange={(next) => change(next)} />
                     )}
                     {config.managedModelId && (
                       <p>
-                        엔진 설정 v{config.managedModelVersion} · 모델 관리에서 변경 후 다시
-                        선택하세요.
+                        {localize('엔진 설정 v')}
+                        {config.managedModelVersion}
+                        {localize(' · 모델 관리에서 변경 후 다시 선택하세요.')}
                       </p>
                     )}
                     <div className="routing-numbers">
@@ -286,8 +294,8 @@ export function RoutingSettings({
                         [
                           ['temperature', 'Temperature', 0, 2, 0.1],
                           ['topP', 'Top P', 0.01, 1, 0.01],
-                          ['maxTokens', '최대 출력 토큰', 1, 1048576, 1],
-                          ['contextBudgetTokens', '컨텍스트 예산', 1024, 2097152, 1],
+                          ['maxTokens', localize('최대 출력 토큰'), 1, 1048576, 1],
+                          ['contextBudgetTokens', localize('컨텍스트 예산'), 1024, 2097152, 1],
                         ] as const
                       ).map(([key, label, min, max, step]) => (
                         <label
@@ -337,7 +345,7 @@ export function RoutingSettings({
                           change({ useDefaultTemperature: event.target.checked })
                         }
                       />
-                      Temperature 기본값 사용
+                      {localize('Temperature 기본값 사용')}
                     </label>
                     <label className="check-row">
                       <input
@@ -345,7 +353,7 @@ export function RoutingSettings({
                         checked={config.useDefaultTopP}
                         onChange={(event) => change({ useDefaultTopP: event.target.checked })}
                       />
-                      Top P 기본값 사용
+                      {localize('Top P 기본값 사용')}
                     </label>
                     <label className="check-row">
                       <input
@@ -363,7 +371,7 @@ export function RoutingSettings({
                           })
                         }
                       />
-                      최대 출력 자동 · 컨텍스트의 20%
+                      {localize('최대 출력 자동 · 컨텍스트의 20%')}
                     </label>
                     <label className="check-row">
                       <input
@@ -382,7 +390,7 @@ export function RoutingSettings({
                             required
                             onChange={(event) => change({ cloudConsent: event.target.checked })}
                           />
-                          이 역할의 요청을 OpenRouter로 전송 허용
+                          {localize('이 역할의 요청을 OpenRouter로 전송 허용')}
                         </label>
                         <label className="check-row">
                           <input
@@ -392,7 +400,7 @@ export function RoutingSettings({
                               change({ projectCloudConsent: event.target.checked })
                             }
                           />
-                          프로젝트 내용과 작업 결과 전송 허용
+                          {localize('프로젝트 내용과 작업 결과 전송 허용')}
                         </label>
                       </>
                     )}
@@ -402,7 +410,7 @@ export function RoutingSettings({
             );
           })}
           {hasMessages && (
-            <p>대화 기록을 유지하고 다음 요청부터 변경한 역할별 모델을 사용합니다.</p>
+            <p>{localize('대화 기록을 유지하고 다음 요청부터 변경한 역할별 모델을 사용합니다.')}</p>
           )}
           <datalist id="routing-openrouter-models">
             {catalog.map((model) => (
@@ -419,10 +427,10 @@ export function RoutingSettings({
         </div>
         <footer>
           <button type="button" disabled={saving} onClick={onClose}>
-            취소
+            {localize('취소')}
           </button>
           <button className="primary-button" disabled={saving || running}>
-            {saving ? '저장 중…' : '저장'}
+            {saving ? localize('저장 중…') : localize('저장')}
           </button>
         </footer>
       </form>

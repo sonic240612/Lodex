@@ -2,7 +2,7 @@ import type { PermissionDecision, PermissionMode } from '@lodex/contracts';
 
 export type PermissionRequest =
   | { kind: 'verification'; target: string }
-  | { kind: 'file'; paths: string[]; destructive?: boolean }
+  | { kind: 'file'; paths: string[]; destructive?: boolean; binary?: boolean }
   | { kind: 'web'; target: string }
   | {
       kind: 'command';
@@ -88,7 +88,7 @@ export function permissionDecision(
 
   if (request.kind === 'file') {
     const secret = request.paths.some(secretPath);
-    const high = secret || request.destructive === true;
+    const high = secret || request.destructive === true || request.binary === true;
     if (mode === 'auto' && !high)
       return {
         kind: 'file',
@@ -109,7 +109,9 @@ export function permissionDecision(
         ? '비밀 또는 인증 설정으로 사용될 수 있는 파일을 변경합니다.'
         : request.destructive
           ? '프로젝트 파일이나 폴더를 삭제합니다. 이 작업은 자동으로 되돌릴 수 없습니다.'
-          : '프로젝트 파일을 변경합니다.',
+          : request.binary
+            ? '일반 텍스트 비교로 확인할 수 없는 파일을 교체합니다.'
+            : '프로젝트 파일을 변경합니다.',
       action: 'prompt',
     };
   }

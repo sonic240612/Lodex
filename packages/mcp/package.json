@@ -7,9 +7,12 @@
   "dependencies": {
     "@lodex/contracts": "0.1.0",
     "@lodex/providers": "0.1.0",
-    "@modelcontextprotocol/client": "2.0.0",
-    "@modelcontextprotocol/core": "2.0.0",
+    "@modelcontextprotocol/client": "2.3.1",
+    "@modelcontextprotocol/core": "2.3.1",
+    "ajv": "8.18.0",
+    "ajv-formats": "3.0.1",
     "jsonc-parser": "3.3.1",
+    "re2js": "2.8.6",
     "smol-toml": "1.9.0",
     "yaml": "2.9.1",
     "zod": "4.6.2"

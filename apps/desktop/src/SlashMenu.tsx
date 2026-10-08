@@ -1,3 +1,4 @@
+import { t as localize } from './i18n';
 import { useEffect, useRef } from 'react';
 import type { SlashCommand } from './slash-commands';
 import { GlassPopover } from './GlassMotion';
@@ -24,9 +25,9 @@ export function SlashMenu({
       className="slash-menu"
       id="composer-slash-menu"
       role="listbox"
-      aria-label="슬래시 명령"
+      aria-label={localize('슬래시 명령')}
     >
-      <div className="slash-menu-hint">↑ ↓ 이동 · Tab 선택 · Esc 닫기</div>
+      <div className="slash-menu-hint">{localize('↑ ↓ 이동 · Tab 선택 · Esc 닫기')}</div>
       {commands.map((command, index) => (
         <button
           type="button"
@@ -39,7 +40,7 @@ export function SlashMenu({
           onMouseDown={(event) => event.preventDefault()}
           onClick={() => onSelect(command)}
         >
-          <code>/{command.id}</code>
+          <code>{command.insertText?.trim() ?? '/' + command.id}</code>
           <span>
             <strong>{command.label}</strong>
             <small>{command.description}</small>

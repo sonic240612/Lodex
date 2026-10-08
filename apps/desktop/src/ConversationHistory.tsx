@@ -1,8 +1,10 @@
+import { t as localize } from './i18n';
 import { useEffect, useRef, useState } from 'react';
 import type { Session } from '@lodex/contracts';
 import { deleteSessions, snapshot } from './bridge';
 import { useWorkspace } from './state';
 import { Icon } from './icons';
+import { historySelection, historySelectionLimit } from './history-selection';
 
 export function ConversationHistory({
   sessions,
@@ -26,8 +28,14 @@ export function ConversationHistory({
   useEffect(() => {
     if (confirm) dialog.current?.showModal();
   }, [confirm]);
-  const chosen = sessions.filter((s) => selected.includes(s.id));
-  const selectable = sessions.filter((s) => s.run?.status !== 'running');
+  const { chosen, allSelected, partlySelected, limited, allIds } = historySelection(
+    sessions,
+    selected,
+  );
+  const selectAll = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (selectAll.current) selectAll.current.indeterminate = partlySelected;
+  }, [partlySelected, selecting]);
   async function remove() {
     if (!confirm || pending) return;
     setPending(true);
@@ -67,7 +75,7 @@ export function ConversationHistory({
               setSelected([]);
             }}
           >
-            {selecting ? '취소' : '선택'}
+            {selecting ? localize('취소') : localize('선택')}
           </button>
         )}
       </div>
@@ -76,29 +84,29 @@ export function ConversationHistory({
           <label>
             <input
               type="checkbox"
-              aria-label="대화 전체 선택"
-              checked={!!selectable.length && selectable.every((s) => selected.includes(s.id))}
-              onChange={(e) =>
-                setSelected(e.target.checked ? selectable.slice(0, 100).map((s) => s.id) : [])
-              }
+              ref={selectAll}
+              aria-label={limited ? localize('대화 최대 100개 선택') : localize('대화 전체 선택')}
+              checked={allSelected}
+              onChange={(e) => setSelected(e.target.checked ? allIds : [])}
             />{' '}
-            전체
+            {limited ? localize('최대 100개') : localize('전체')}
           </label>
           <button
             className="history-action danger-text"
             disabled={!chosen.length || !workspace.connected}
             onClick={() => setConfirm(chosen)}
           >
-            삭제 ({chosen.length})
+            {localize('삭제 (')}
+            {chosen.length})
           </button>
         </div>
       )}
       <div className="history">
         {!sessions.length && (
           <p className="history-empty">
-            첫 대화를 시작하면
+            {localize('첫 대화를 시작하면')}
             <br />
-            이곳에 기록이 쌓입니다.
+            {localize('이곳에 기록이 쌓입니다.')}
           </p>
         )}
         {sessions.map((item) => (
@@ -106,21 +114,21 @@ export function ConversationHistory({
             {selecting && (
               <input
                 type="checkbox"
-                aria-label={item.title + ' 선택'}
+                aria-label={item.title + localize(' 선택')}
                 title={
                   item.run?.status === 'running'
-                    ? '응답을 중지한 뒤 삭제할 수 있습니다.'
+                    ? localize('응답을 중지한 뒤 삭제할 수 있습니다.')
                     : item.title
                 }
                 disabled={
                   item.run?.status === 'running' ||
-                  (!selected.includes(item.id) && selected.length >= 100)
+                  (!selected.includes(item.id) && chosen.length >= historySelectionLimit)
                 }
                 checked={selected.includes(item.id)}
                 onChange={(e) =>
                   setSelected(
                     e.target.checked
-                      ? [...selected, item.id]
+                      ? [...chosen.map((session) => session.id), item.id]
                       : selected.filter((id) => id !== item.id),
                   )
                 }
@@ -149,10 +157,15 @@ export function ConversationHistory({
           aria-labelledby="delete-title"
           aria-describedby="delete-description"
         >
-          <h2 id="delete-title">대화 {confirm.length}개 삭제</h2>
+          <h2 id="delete-title">
+            {localize('대화 ')}
+            {confirm.length}
+            {localize('개 삭제')}
+          </h2>
           <p id="delete-description">
-            메시지, 활동 기록, Goal과 할 일이 삭제됩니다. 이 작업은 되돌릴 수 없습니다. 프로젝트
-            폴더의 파일은 유지됩니다.
+            {localize(
+              '메시지, 활동 기록, Goal과 할 일이 삭제됩니다. 이 작업은 되돌릴 수 없습니다. 프로젝트 폴더의 파일은 유지됩니다.',
+            )}
           </p>
           <ul>
             {confirm.map((s) => (
@@ -161,10 +174,10 @@ export function ConversationHistory({
           </ul>
           <div className="dialog-actions">
             <button autoFocus disabled={pending} onClick={() => setConfirm(null)}>
-              취소
+              {localize('취소')}
             </button>
             <button className="danger-button" disabled={pending} onClick={() => void remove()}>
-              {pending ? '삭제 중…' : '삭제'}
+              {pending ? localize('삭제 중…') : localize('삭제')}
             </button>
           </div>
         </dialog>

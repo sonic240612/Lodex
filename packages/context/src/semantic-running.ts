@@ -3,6 +3,7 @@ import {
   RUN_INPUT_PREFIX,
   type InferenceMessage,
   type InferenceRequest,
+  type ModelConfig,
   type RunContextCompaction,
 } from '@lodex/contracts';
 import { measureRequest, SEMANTIC_COMPACTION_PROMPT } from './index';
@@ -46,6 +47,7 @@ export function ecoCompactionBatch(
  */
 export async function compactRunningContextWithModel(options: {
   request: InferenceRequest;
+  summaryConfig?: ModelConfig;
   continuation: readonly InferenceMessage[];
   previous?: RunContextCompaction;
   historyThroughMessageId?: string | undefined;
@@ -57,6 +59,8 @@ export async function compactRunningContextWithModel(options: {
 }) {
   const { request, continuation, previous, signal } = options;
   const budget = request.config.contextBudgetTokens;
+  const summaryConfig = options.summaryConfig ?? request.config;
+  const summaryBudget = summaryConfig.contextBudgetTokens;
   const target = Math.floor(budget * AUTO_COMPACTION_TARGET);
   const suffix = options.suffix ?? [];
   const start = previous?.throughContinuationCount ?? 0;
@@ -80,7 +84,7 @@ export async function compactRunningContextWithModel(options: {
     summary: '',
     method: 'semantic',
     strategy: options.incremental ? 'incremental' : 'threshold',
-    model: request.config.model,
+    model: summaryConfig.model,
     throughContinuationCount: start,
     historyCompacted: options.incremental
       ? !!previous?.historyCompacted || options.incremental.compactHistory
@@ -120,7 +124,7 @@ export async function compactRunningContextWithModel(options: {
   let maxTokens = Math.max(
     1,
     Math.min(
-      request.config.maxTokens,
+      summaryConfig.maxTokens,
       options.incremental ? (options.incremental.maxTokens ?? 512) : 8192,
       Math.max(256, target - fixedTokens),
     ),
@@ -128,7 +132,7 @@ export async function compactRunningContextWithModel(options: {
   const summaryRequest = (summary: string, chunk: string, tighter = false): InferenceRequest => ({
     purpose: 'context_summary',
     config: {
-      ...request.config,
+      ...summaryConfig,
       maxTokens,
       autoMaxTokens: false,
       useDefaultTemperature: true,
@@ -155,7 +159,11 @@ export async function compactRunningContextWithModel(options: {
   });
   const available = (candidate: InferenceRequest) => {
     const measured = measureRequest(candidate, { enforce: false });
-    return budget - measured.outputReserveTokens - measured.safetyReserveTokens;
+    return (
+      candidate.config.contextBudgetTokens -
+      measured.outputReserveTokens -
+      measured.safetyReserveTokens
+    );
   };
   const summarize = async (candidate: InferenceRequest) => {
     signal.throwIfAborted();
@@ -169,10 +177,10 @@ export async function compactRunningContextWithModel(options: {
       const measured = measureRequest(candidate, { enforce: false });
       const input = await options.measure(candidate);
       const expanded = Math.min(
-        request.config.maxTokens,
+        summaryConfig.maxTokens,
         8192,
         Math.max(2048, candidate.config.maxTokens * 4),
-        budget - input - measured.safetyReserveTokens,
+        summaryBudget - input - measured.safetyReserveTokens,
       );
       if (expanded <= candidate.config.maxTokens) throw error;
       const retry = { ...candidate, config: { ...candidate.config, maxTokens: expanded } };
@@ -193,7 +201,7 @@ export async function compactRunningContextWithModel(options: {
   while (offset < source.length) {
     signal.throwIfAborted();
     // Start conservatively; exact token counting, when supported, is still authoritative.
-    let size = Math.min(source.length - offset, Math.max(1, Math.floor(budget * 0.6)));
+    let size = Math.min(source.length - offset, Math.max(1, Math.floor(summaryBudget * 0.6)));
     let candidate: InferenceRequest;
     for (;;) {
       // Never cut a UTF-16 surrogate pair between chunks.

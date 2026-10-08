@@ -26,6 +26,7 @@ async function fixture(
     plain?: boolean;
     goal?: boolean;
     sampling?: boolean;
+    samplingTools?: boolean;
     elicitation?: boolean;
     secretElicitation?: boolean;
   } = {},
@@ -35,6 +36,8 @@ async function fixture(
     samplingResponses = 0,
     elicitationResponses = 0;
   let pendingSample: { id: number; response: ServerResponse } | undefined;
+  const samplingReplies: unknown[] = [];
+  let clientCapabilities: unknown;
   let pendingElicitation: { id: number; response: ServerResponse } | undefined;
   let description = 'Echo fixture';
   const mcp = createServer(async (req, res) => {
@@ -46,11 +49,52 @@ async function fixture(
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(Buffer.from(chunk));
     const message = JSON.parse(Buffer.concat(chunks).toString());
-    if (options.sampling && message.id === 88 && !message.method) {
+    if (options.sampling && (message.id === 88 || message.id === 90) && !message.method) {
       samplingResponses++;
+      samplingReplies.push(message);
       res.writeHead(202);
       res.end();
       const pending = pendingSample;
+      if (options.samplingTools && message.id === 88 && message.result?.stopReason === 'toolUse') {
+        const call = message.result.content.find(
+          (block: { type: string }) => block.type === 'tool_use',
+        );
+        pending?.response.write(
+          `data: ${JSON.stringify({
+            jsonrpc: '2.0',
+            id: 90,
+            method: 'sampling/createMessage',
+            params: {
+              messages: [
+                { role: 'user', content: { type: 'text', text: 'Weather' } },
+                { role: 'assistant', content: message.result.content },
+                {
+                  role: 'user',
+                  content: [
+                    {
+                      type: 'tool_result',
+                      toolUseId: call.id,
+                      content: [{ type: 'text', text: 'Sunny' }],
+                    },
+                  ],
+                },
+              ],
+              tools: [
+                {
+                  name: 'server_weather',
+                  inputSchema: {
+                    type: 'object',
+                    properties: { city: { type: 'string' } },
+                    required: ['city'],
+                  },
+                },
+              ],
+              maxTokens: 64,
+            },
+          })}\n\n`,
+        );
+        return;
+      }
       pendingSample = undefined;
       pending?.response.end(
         `data: ${JSON.stringify({
@@ -99,6 +143,7 @@ async function fixture(
     let result: unknown = {};
     if (message.method === 'initialize') {
       connections++;
+      clientCapabilities = message.params.capabilities;
       result = {
         protocolVersion: '2025-11-25',
         capabilities: { tools: {} },
@@ -140,6 +185,22 @@ async function fixture(
               ],
               maxTokens: 64,
               includeContext: 'none',
+              ...(options.samplingTools
+                ? {
+                    tools: [
+                      {
+                        name: 'server_weather',
+                        inputSchema: {
+                          type: 'object',
+                          properties: { city: { type: 'string' } },
+                          required: ['city'],
+                        },
+                      },
+                    ],
+                    toolChoice: { mode: 'required' },
+                    stopSequences: ['END'],
+                  }
+                : {}),
             },
           })}\n\n`,
         );
@@ -206,7 +267,19 @@ async function fixture(
       const name = request.tools?.find((tool) => tool.function.name.startsWith('mcp_'))?.function
         .name;
       const hasToolResult = request.messages.some((message) => message.role === 'tool');
-      if (name && !options.plain && !hasToolResult) {
+      if (
+        request.tools?.some((tool) => tool.function.name === 'server_weather') &&
+        !hasToolResult
+      ) {
+        yield {
+          type: 'tool_call_delta',
+          index: 0,
+          id: 'server-call',
+          name: 'server_weather',
+          arguments: '{"city":"Seoul"}',
+        };
+        yield { type: 'finished', reason: 'tool_calls' };
+      } else if (name && !options.plain && !hasToolResult) {
         yield {
           type: 'tool_call_delta',
           index: 0,
@@ -309,6 +382,8 @@ async function fixture(
     calls: () => calls,
     connections: () => connections,
     samplingResponses: () => samplingResponses,
+    samplingReplies,
+    clientCapabilities: () => clientCapabilities,
     elicitationResponses: () => elicitationResponses,
     change: () => {
       description = 'Changed definition';
@@ -316,6 +391,46 @@ async function fixture(
   };
 }
 describe('MCP session integration', () => {
+  it('returns sampling tool calls to the MCP server and accepts its follow-up results', async () => {
+    const f = await fixture({ sampling: true, samplingTools: true });
+    const full = (
+      await f.store.apply(
+        makeCommand({
+          type: 'set_permission_mode',
+          sessionId: f.session.id,
+          expectedVersion: f.session.version,
+          mode: 'full',
+        }),
+      )
+    ).session;
+    expect((await f.send(full)).status).toBe(200);
+    await expect.poll(async () => (await f.store.session(full.id)).run?.status).toBe('completed');
+    expect(f.clientCapabilities()).toMatchObject({ sampling: { tools: {} } });
+    expect(f.calls()).toBe(1);
+    expect(f.samplingResponses()).toBe(2);
+    expect(f.samplingReplies[0]).toMatchObject({
+      result: {
+        stopReason: 'toolUse',
+        content: [{ type: 'tool_use', name: 'server_weather', input: { city: 'Seoul' } }],
+      },
+    });
+    expect(f.requests).toHaveLength(4);
+    expect(f.requests[1]).toMatchObject({
+      toolChoice: 'required',
+      stopSequences: ['END'],
+      tools: [{ function: { name: 'server_weather' } }],
+    });
+    expect(f.requests[1]!.tools).toHaveLength(1);
+    expect(f.requests[2]!.messages.at(-1)).toEqual({
+      role: 'tool',
+      toolCallId: 'server-call',
+      content: 'Sunny',
+    });
+    const session = await f.store.session(full.id);
+    expect(
+      session.messages.at(-1)?.activities?.some((activity) => activity.label === 'server_weather'),
+    ).toBe(false);
+  });
   it('runs approved MCP sampling with isolated context and shared model accounting', async () => {
     const f = await fixture({ sampling: true });
     const full = (

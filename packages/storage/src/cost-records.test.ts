@@ -7,6 +7,7 @@ import {
   autopilotLimitsSchema,
   defaultModelConfig,
   makeCommand,
+  taskListSchema,
   type ModelCallRecord,
 } from '@lodex/contracts';
 import { Store } from './index';
@@ -17,7 +18,7 @@ afterEach(async () => {
   for (const store of stores.splice(0)) await store.close();
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
-async function fixture() {
+async function fixture(taskCostUsd?: number) {
   const root = await mkdtemp(join(tmpdir(), 'lodex-cost-records-'));
   roots.push(root);
   const path = join(root, 'state.sqlite');
@@ -33,6 +34,20 @@ async function fixture() {
       }),
     )
   ).session;
+  const taskId = crypto.randomUUID();
+  if (taskCostUsd !== undefined)
+    session = (
+      await store.apply(
+        makeCommand({
+          type: 'save_task_list',
+          sessionId: session.id,
+          expectedVersion: session.version,
+          taskList: taskListSchema.parse({
+            tasks: [{ id: taskId, title: 'Budgeted task', costUsd: taskCostUsd }],
+          }),
+        }),
+      )
+    ).session;
   session = (
     await store.apply(
       makeCommand({
@@ -56,9 +71,39 @@ async function fixture() {
     createdAt: now,
     updatedAt: now,
   };
-  return { store, session, call, path };
+  return { store, session, call, path, taskId };
 }
 describe('durable request cost records', () => {
+  it('intersects task reservations with the shared budget and keeps unsettled task costs reserved', async () => {
+    const { store, session, call, taskId } = await fixture(0.1);
+    const request = { ...call, taskId, purpose: 'review' as const, reservedCostUsd: 0.06 };
+    await store.recordModelCall(session.id, request);
+    await expect(
+      store.recordModelCall(session.id, { ...request, id: crypto.randomUUID() }),
+    ).rejects.toMatchObject({ code: 'TASK_COST_BUDGET' });
+    await store.recordModelCall(session.id, { ...request, status: 'unconfirmed' });
+    await expect(
+      store.recordModelCall(session.id, {
+        ...request,
+        id: crypto.randomUUID(),
+        reservedCostUsd: 0.001,
+      }),
+    ).rejects.toMatchObject({ code: 'COST_UNCONFIRMED' });
+    await store.recordModelCall(session.id, { ...request, status: 'settled', actualCostUsd: 0.02 });
+    await store.recordModelCall(session.id, {
+      ...request,
+      id: crypto.randomUUID(),
+      reservedCostUsd: 0.08,
+    });
+    const larger = await fixture(2);
+    await expect(
+      larger.store.recordModelCall(larger.session.id, {
+        ...larger.call,
+        taskId: larger.taskId,
+        reservedCostUsd: 1.1,
+      }),
+    ).rejects.toMatchObject({ code: 'COST_BUDGET' });
+  });
   it('rejects a new shared reservation after uncertainty while allowing the existing request to settle', async () => {
     const { store, session, call } = await fixture();
     await store.recordModelCall(session.id, call);
@@ -95,7 +140,7 @@ describe('durable request cost records', () => {
     });
     expect(upgraded.autopilot?.costBudgetId).toBe(call.budgetId);
     const check = new DatabaseSync(path);
-    expect(check.prepare('PRAGMA user_version').get()?.user_version).toBe(16);
+    expect(check.prepare('PRAGMA user_version').get()?.user_version).toBe(17);
     check.close();
   });
   it('enforces the shared budget atomically and prevents duplicate generation charges', async () => {

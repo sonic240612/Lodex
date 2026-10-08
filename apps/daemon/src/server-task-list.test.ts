@@ -219,7 +219,8 @@ it('saves a Plan to-do list, switches to Build, then runs each item without star
     expect(saved.taskList?.active).toBe(false);
     expect(saved.autopilot).toBeUndefined();
     expect(saved.plan).toEqual(defaultPlan());
-    expect(buildCalls).toBe(5);
+    expect(buildCalls).toBe(4);
+    expect(saved.messages.at(-1)?.content).toContain('작업 목록을 완료했습니다.');
   } finally {
     await app.close();
   }

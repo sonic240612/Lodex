@@ -1,3 +1,4 @@
+import { t as localize } from './i18n';
 import { useState } from 'react';
 import { defaultExecutionConfig, type ExecutionConfig, type Session } from '@lodex/contracts';
 import { checkExecution, cleanupCommands, nativeDesktop, sendCommand } from './bridge';
@@ -27,12 +28,14 @@ export function ExecutionPanel({ session }: { session: Session }) {
   return (
     <details className="execution-panel">
       <summary>
-        명령 실행 · {session.execution?.backend === 'docker' ? 'Docker' : '꺼짐'}
-        {pending ? ' · 정리 필요' : ''}
+        {localize('명령 실행 · ')}
+        {session.execution?.backend === 'docker' ? 'Docker' : localize('꺼짐')}
+        {pending ? localize(' · 정리 필요') : ''}
       </summary>
       <p>
-        Build 모드에서 모델이 명령을 실행하고 결과를 읽습니다. Docker의 Linux 이미지와 /bin/sh가
-        필요합니다.
+        {localize(
+          'Build 모드에서 모델이 명령을 실행하고 결과를 읽습니다. Docker의 Linux 이미지와 /bin/sh가 필요합니다.',
+        )}
       </p>
       <fieldset
         disabled={
@@ -40,9 +43,9 @@ export function ExecutionPanel({ session }: { session: Session }) {
         }
       >
         <label>
-          개발 이미지
+          {localize('개발 이미지')}
           <input
-            aria-label="Docker 이미지"
+            aria-label={localize('Docker 이미지')}
             value={draft.image}
             maxLength={256}
             onChange={(event) => setDraft({ ...draft, image: event.target.value })}
@@ -53,11 +56,11 @@ export function ExecutionPanel({ session }: { session: Session }) {
             void operation(async () => {
               const result = await checkExecution(draft.image);
               setDraft({ ...draft, image: result.imageId });
-              setNote('로컬 엔진과 이미지를 확인했습니다. 이미지 ID로 고정했습니다.');
+              setNote(localize('로컬 엔진과 이미지를 확인했습니다. 이미지 ID로 고정했습니다.'));
             })
           }
         >
-          엔진·이미지 확인
+          {localize('엔진·이미지 확인')}
         </button>
         <div className="execution-limits">
           <label>
@@ -72,7 +75,7 @@ export function ExecutionPanel({ session }: { session: Session }) {
             />
           </label>
           <label>
-            메모리 MB
+            {localize('메모리 MB')}
             <input
               type="number"
               min={256}
@@ -89,7 +92,7 @@ export function ExecutionPanel({ session }: { session: Session }) {
             checked={draft.network === 'bridge'}
             onChange={(e) => setDraft({ ...draft, network: e.target.checked ? 'bridge' : 'none' })}
           />
-          컨테이너 외부 네트워크 허용
+          {localize('컨테이너 외부 네트워크 허용')}
         </label>
         <label className="check-field">
           <input
@@ -97,12 +100,12 @@ export function ExecutionPanel({ session }: { session: Session }) {
             checked={draft.projectAccess}
             onChange={(e) => setDraft({ ...draft, projectAccess: e.target.checked })}
           />
-          이 대화의 명령에 프로젝트 폴더 전체 읽기·쓰기 허용
+          {localize('이 대화의 명령에 프로젝트 폴더 전체 읽기·쓰기 허용')}
         </label>
         <p>
-          명령은 폴더 안의 .env 등 비공개 파일도 읽거나 수정할 수 있습니다. 명령으로 변경한 파일에는
-          수정안 되돌리기가 적용되지 않습니다. OpenRouter 사용 시 명령 출력도 전송됩니다. Lodex의
-          API 키 환경 변수와 홈 폴더는 컨테이너에 전달하지 않습니다.
+          {localize(
+            '명령은 폴더 안의 .env 등 비공개 파일도 읽거나 수정할 수 있습니다. 명령으로 변경한 파일에는 수정안 되돌리기가 적용되지 않습니다. OpenRouter 사용 시 명령 출력도 전송됩니다. Lodex의 API 키 환경 변수와 홈 폴더는 컨테이너에 전달하지 않습니다.',
+          )}
         </p>
         <div className="edit-actions">
           <button
@@ -126,11 +129,11 @@ export function ExecutionPanel({ session }: { session: Session }) {
                   ).session,
                 );
                 setDraft(execution);
-                setNote('이 대화의 Build 모드에서 명령 실행을 허용했습니다.');
+                setNote(localize('이 대화의 Build 모드에서 명령 실행을 허용했습니다.'));
               })
             }
           >
-            설정 적용·실행 허용
+            {localize('설정 적용·실행 허용')}
           </button>
           <button
             onClick={() =>
@@ -145,11 +148,11 @@ export function ExecutionPanel({ session }: { session: Session }) {
                     })
                   ).session,
                 );
-                setNote('명령 실행을 껐습니다.');
+                setNote(localize('명령 실행을 껐습니다.'));
               })
             }
           >
-            끄기
+            {localize('끄기')}
           </button>
         </div>
         {pending && (
@@ -157,11 +160,11 @@ export function ExecutionPanel({ session }: { session: Session }) {
             onClick={() =>
               void operation(async () => {
                 workspace.upsert(await cleanupCommands(session.id));
-                setNote('컨테이너 정리 결과를 갱신했습니다.');
+                setNote(localize('컨테이너 정리 결과를 갱신했습니다.'));
               })
             }
           >
-            남은 컨테이너 정리
+            {localize('남은 컨테이너 정리')}
           </button>
         )}
       </fieldset>

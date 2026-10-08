@@ -1,6 +1,13 @@
+import { t as localize } from './i18n';
 import { SettingsSurface } from './SettingsSurface';
+import { AppUpdates } from './AppUpdates';
+import { BackupRestorePreview } from './BackupRestorePreview';
 import { useEffect, useRef, useState } from 'react';
-import { backupSettingsSchema, type BackupSnapshot } from '@lodex/contracts';
+import {
+  backupSettingsSchema,
+  type BackupSnapshot,
+  type BackupImportPreview,
+} from '@lodex/contracts';
 import {
   backupSnapshot,
   configureBackups,
@@ -8,6 +15,10 @@ import {
   deleteBackup,
   exportBackup,
   nativeDesktop,
+  autostartStatus,
+  configureAutostart,
+  previewBackup,
+  restoreBackup,
 } from './bridge';
 import { Icon } from './icons';
 
@@ -24,13 +35,26 @@ export function DataManager({
     backups: [],
   });
   const [draft, setDraft] = useState(state.settings);
-  const [busy, setBusy] = useState(false);
+  const [dataBusy, setBusy] = useState(false);
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const busy = dataBusy || updateBusy;
   const [loaded, setLoaded] = useState(!nativeDesktop);
   const [error, setError] = useState('');
   const [status, setStatus] = useState('');
+  const [autostart, setAutostart] = useState<boolean | null>(null);
+  const [restorePreview, setRestorePreview] = useState<BackupImportPreview | null>(null);
   useEffect(() => {
     dialog.current?.showModal();
     let active = true;
+    if (nativeDesktop)
+      void autostartStatus()
+        .then((value) => {
+          if (active) setAutostart(value);
+        })
+        .catch(() => {
+          if (active)
+            setError(localize('자동 시작 설정을 읽지 못했습니다. 설정을 다시 열어 주세요.'));
+        });
     if (nativeDesktop)
       void backupSnapshot()
         .then((value) => {
@@ -42,8 +66,18 @@ export function DataManager({
         .catch((failure) => {
           if (active) setError(failure instanceof Error ? failure.message : String(failure));
         });
+    const timer = nativeDesktop
+      ? setInterval(() => {
+          void backupSnapshot()
+            .then((value) => {
+              if (active) setState(value);
+            })
+            .catch(() => undefined);
+        }, 30000)
+      : undefined;
     return () => {
       active = false;
+      clearInterval(timer);
     };
   }, []);
   async function operation(work: () => Promise<void>) {
@@ -64,34 +98,68 @@ export function DataManager({
       embedded={embedded}
       className="settings-dialog"
       ref={dialog}
-      onCancel={onClose}
+      onCancel={(event) => {
+        if (busy) event.preventDefault();
+        else onClose();
+      }}
       aria-labelledby="data-manager-title"
       aria-busy={busy}
     >
       <div className="dialog-header">
-        <h2 id="data-manager-title">데이터와 백업</h2>
-        <button className="icon-button" aria-label="데이터 관리 닫기" onClick={onClose}>
+        <h2 id="data-manager-title">{localize('데이터와 백업')}</h2>
+        <button
+          className="icon-button"
+          aria-label={localize('데이터 관리 닫기')}
+          disabled={busy}
+          onClick={onClose}
+        >
           <Icon name="close" />
         </button>
       </div>
       <div className="settings-body">
+        <AppUpdates disabled={dataBusy} onBusyChange={setUpdateBusy} />
         {!nativeDesktop && (
-          <p className="demo-notice">백업은 데스크톱 앱에서 사용할 수 있습니다.</p>
+          <p className="demo-notice">{localize('백업은 데스크톱 앱에서 사용할 수 있습니다.')}</p>
         )}
-        {!loaded && !error && <p role="status">백업 목록을 불러오는 중…</p>}
+        {!loaded && !error && <p role="status">{localize('백업 목록을 불러오는 중…')}</p>}
+        {state.lastFailure && (
+          <p className="form-error" role="alert">
+            {state.lastFailure.message} ({new Date(state.lastFailure.at).toLocaleString()})
+          </p>
+        )}
         <section>
-          <h3>보존 정책</h3>
+          <h3>{localize('앱 시작')}</h3>
+          <label className="check-field">
+            <input
+              type="checkbox"
+              checked={autostart ?? false}
+              disabled={!nativeDesktop || autostart === null || busy}
+              onChange={(event) => {
+                const enabled = event.target.checked;
+                void operation(async () => setAutostart(await configureAutostart(enabled)));
+              }}
+            />
+            {localize('로그인하면 시스템 트레이에서 Lodex 시작')}
+          </label>
+          <p>
+            {localize(
+              '자동 시작 후 Telegram과 백그라운드 연결을 유지합니다. 창은 트레이에서 열 수 있습니다.',
+            )}
+          </p>
+        </section>
+        <section>
+          <h3>{localize('보존 정책')}</h3>
           <label className="check-field">
             <input
               type="checkbox"
               checked={draft.automatic}
               onChange={(event) => setDraft({ ...draft, automatic: event.target.checked })}
             />
-            하루에 한 번 자동 백업
+            {localize('하루에 한 번 자동 백업')}
           </label>
           <div className="settings-grid">
             <label className="field">
-              최대 보관 개수
+              {localize('최대 보관 개수')}
               <input
                 type="number"
                 min={1}
@@ -103,7 +171,7 @@ export function DataManager({
               />
             </label>
             <label className="field">
-              보관 기간(일)
+              {localize('보관 기간(일)')}
               <input
                 type="number"
                 min={1}
@@ -124,18 +192,19 @@ export function DataManager({
                 const next = await configureBackups(backupSettingsSchema.parse(draft));
                 setState(next);
                 setDraft(next.settings);
-                setStatus('보존 정책을 저장했습니다.');
+                setStatus(localize('보존 정책을 저장했습니다.'));
               })
             }
           >
-            보존 정책 저장
+            {localize('보존 정책 저장')}
           </button>
         </section>
         <section>
-          <h3>백업</h3>
+          <h3>{localize('백업')}</h3>
           <p>
-            대화·프로젝트·계획·모델 프로필·Skills·MCP 등록을 저장합니다. API 키, OAuth 토큰,
-            Telegram 봇 토큰과 모델 파일은 포함하지 않습니다.
+            {localize(
+              '대화·프로젝트·계획·모델 프로필·Skills·MCP 등록을 저장합니다. API 키, OAuth 토큰, Telegram 봇 토큰과 모델 파일은 포함하지 않습니다.',
+            )}
           </p>
           <div className="edit-actions">
             <button
@@ -146,25 +215,59 @@ export function DataManager({
                 void operation(async () => {
                   const next = await createBackup();
                   setState(next);
-                  setStatus('앱 데이터 폴더에 백업했습니다.');
+                  setStatus(localize('앱 데이터 폴더에 백업했습니다.'));
                 })
               }
             >
-              지금 백업
+              {localize('지금 백업')}
             </button>
             <button
               type="button"
+              className="secondary-button"
               disabled={!loaded || busy}
               onClick={() =>
                 void operation(async () => {
                   const result = await exportBackup();
-                  if (result) setStatus(`내보냈습니다: ${result.path}`);
+                  if (result) setStatus(localize('내보냈습니다: {0}', result.path));
                 })
               }
             >
-              다른 위치로 내보내기
+              {localize('다른 위치로 내보내기')}
+            </button>
+            <button
+              type="button"
+              className="secondary-button"
+              disabled={!nativeDesktop || !loaded || busy}
+              onClick={() =>
+                void operation(async () => {
+                  setRestorePreview(null);
+                  setRestorePreview(await previewBackup());
+                })
+              }
+            >
+              {localize('백업 파일에서 복원')}
             </button>
           </div>
+          {restorePreview && (
+            <BackupRestorePreview
+              preview={restorePreview}
+              busy={busy}
+              onCancel={() => setRestorePreview(null)}
+              onRestore={() =>
+                void operation(async () => {
+                  const result = await restoreBackup(restorePreview.token);
+                  setRestorePreview(null);
+                  setState(await backupSnapshot());
+                  setStatus(
+                    localize(
+                      '{0}개 항목을 복원했습니다. 대화 목록과 각 설정 화면에서 확인하세요.',
+                      Object.values(result.imported).reduce((sum, count) => sum + count, 0),
+                    ),
+                  );
+                })
+              }
+            />
+          )}
           {state.backups.length ? (
             <ul className="skill-selection-list">
               {state.backups.map((backup) => (
@@ -182,13 +285,13 @@ export function DataManager({
                       void operation(async () => setState(await deleteBackup(backup.name)))
                     }
                   >
-                    삭제
+                    {localize('삭제')}
                   </button>
                 </li>
               ))}
             </ul>
           ) : (
-            loaded && <p>저장된 백업이 없습니다.</p>
+            loaded && <p>{localize('저장된 백업이 없습니다.')}</p>
           )}
         </section>
         {error && (

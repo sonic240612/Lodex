@@ -1,4 +1,23 @@
 import { z } from 'zod';
+import { modelConfigSchema } from './routing';
+import type { Session } from './index';
+
+export function taskCostTotals(session: Pick<Session, 'messages'>, taskId: string) {
+  const calls = session.messages
+    .flatMap((message) => message.costCalls ?? [])
+    .filter((call) => call.taskId === taskId);
+  return {
+    spent: calls.reduce(
+      (sum, call) => sum + (call.status === 'settled' ? (call.actualCostUsd ?? 0) : 0),
+      0,
+    ),
+    reserved: calls.reduce(
+      (sum, call) => sum + (call.status !== 'settled' ? call.reservedCostUsd : 0),
+      0,
+    ),
+    unconfirmed: calls.some((call) => call.status === 'unconfirmed'),
+  };
+}
 
 export const taskListSchema = z
   .strictObject({
@@ -12,6 +31,8 @@ export const taskListSchema = z
           details: z.string().trim().max(2000).default(''),
           status: z.enum(['pending', 'in_progress', 'completed', 'blocked']).default('pending'),
           summary: z.string().trim().max(4000).default(''),
+          model: modelConfigSchema.optional(),
+          costUsd: z.number().finite().min(0.001).max(1000).optional(),
         }),
       )
       .max(100),
@@ -51,7 +72,10 @@ export function taskListPrompt(list: TaskList) {
   const first = list.tasks.findIndex((task) => task.status !== 'completed');
   const start = Math.max(0, first < 0 ? list.tasks.length - 1 : first);
   const visible = list.tasks.slice(start, start + 5).map((task) => ({
-    ...task,
+    id: task.id,
+    status: task.status,
+    ...(task.model ? { model: task.model.model, provider: task.model.provider } : {}),
+    ...(task.costUsd !== undefined ? { costUsd: task.costUsd } : {}),
     title: task.title.slice(0, 200),
     summary: task.summary.slice(0, 300),
     details: task.id === list.tasks[start]?.id ? task.details : task.details.slice(0, 200),

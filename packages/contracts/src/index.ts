@@ -1,4 +1,6 @@
 import { z } from 'zod';
+export * from './browser';
+export * from './automations';
 import type { SecretSource } from './integrations';
 import { taskListSchema, type TaskList } from './task-list';
 export * from './task-list';
@@ -13,7 +15,10 @@ import {
 export { localUrlSchema, isPrivateServerAddress } from './network';
 export * from './runtime';
 export * from './integrations';
+export * from './lsp';
 export * from './routing';
+export * from './catalog';
+export * from './mcp-subscriptions';
 
 export const PROTOCOL_VERSION = 1 as const;
 export const idSchema = z.uuid();
@@ -112,9 +117,13 @@ export type FusedCommand = z.infer<typeof runCommandSchema>;
 export const jobCommandSchema = runCommandSchema.extend({
   interactive: z.boolean().default(false),
   background: z.boolean().default(false),
+  pty: z.boolean().default(false),
+  cols: z.number().int().min(20).max(500).default(100),
+  rows: z.number().int().min(5).max(200).default(30),
   timeoutMs: z.number().int().min(1000).max(86400000).default(60000),
 });
 export interface CommandJob {
+  terminal?: { cols: number; rows: number };
   id: string;
   sessionId: string;
   projectId?: string;
@@ -157,6 +166,7 @@ export function normalizeFusedCommand(input: {
   );
 }
 export interface CommandExecution {
+  terminal?: { cols: number; rows: number };
   jobId?: string;
   background?: boolean;
   projectId?: string;
@@ -687,6 +697,7 @@ export interface PermissionDecision {
   decidedAt?: string;
 }
 export interface Activity {
+  browserImage?: { mimeType: 'image/png'; base64: string; url: string };
   /** UTF-16 offset in Message.content at which this activity began. */
   contentOffset?: number;
   startedAt?: string;
@@ -749,6 +760,7 @@ export interface Run {
   context?: ContextManifest;
 }
 export interface ContextManifest {
+  skillInvocation?: { skillId: string; revision: string; argumentsText: string };
   handoff?: {
     sourceMessageId: string;
     sourceMode: AgentMode | 'unknown';
@@ -768,7 +780,7 @@ export interface ContextManifest {
   inputEstimateTokens: number;
   /** Exact template-aware count returned by the active model server when supported. */
   inputTokens?: number;
-  tokenCountSource?: 'llama_cpp_chat_template';
+  tokenCountSource?: 'llama_cpp_chat_template' | 'vllm_chat_template';
   outputReserveTokens: number;
   safetyReserveTokens: number;
   contextBudgetTokens: number;
@@ -912,6 +924,8 @@ export interface InferenceRequest {
   config: ModelConfig;
   messages: InferenceMessage[];
   tools?: ToolDefinition[];
+  toolChoice?: 'auto' | 'required' | 'none';
+  stopSequences?: string[];
 }
 export type InferenceEvent =
   | { type: 'started' }
@@ -952,6 +966,10 @@ export const modelCallRecordSchema = z.strictObject({
   runId: z.uuid(),
   messageId: z.uuid(),
   model: z.string().min(1).max(256),
+  purpose: z.enum(['manual_compaction', 'automatic_compaction', 'review']).optional(),
+  taskId: z.uuid().optional(),
+  inputTokens: z.number().int().nonnegative().optional(),
+  outputTokens: z.number().int().nonnegative().optional(),
   reservedCostUsd: z.number().finite().nonnegative(),
   generationId: z.string().min(1).max(500).optional(),
   status: z.enum(['reserved', 'unconfirmed', 'settled']),

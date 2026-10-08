@@ -1,4 +1,6 @@
+import { t as localize } from './i18n';
 import type { AgentMode, Session } from '@lodex/contracts';
+import type { RegisteredSkill } from '@lodex/skills';
 
 export const slashCommands = [
   {
@@ -58,6 +60,13 @@ export const slashCommands = [
     argument: '',
   },
   {
+    id: 'skill',
+    label: '스킬 실행',
+    description: '이 대화에 선택한 스킬을 인자와 함께 실행합니다.',
+    aliases: ['스킬'],
+    argument: '스킬 이름 인자',
+  },
+  {
     id: 'help',
     label: '명령 도움말',
     description: '슬래시 명령 목록을 표시합니다.',
@@ -65,14 +74,24 @@ export const slashCommands = [
     argument: '',
   },
 ] as const;
-export type SlashCommand = (typeof slashCommands)[number];
-export type SlashCommandId = SlashCommand['id'];
+export interface SlashCommand {
+  id: string;
+  label: string;
+  description: string;
+  aliases: readonly string[];
+  argument: string;
+  insertText?: string;
+}
+export type SlashCommandId = (typeof slashCommands)[number]['id'];
 export type ParsedComposerInput =
   | { command: SlashCommandId; argument: string }
   | { command: 'message'; argument: string }
   | { command: 'unknown'; argument: string };
 
-export function parseComposerInput(text: string): ParsedComposerInput {
+export function parseComposerInput(
+  text: string,
+  skills: readonly RegisteredSkill[] = [],
+): ParsedComposerInput {
   const input = text.trim();
   if (!input.startsWith('/')) return { command: 'message', argument: input };
   const body = input.slice(1);
@@ -86,8 +105,21 @@ export function parseComposerInput(text: string): ParsedComposerInput {
       body.toLowerCase() === name ||
       (body.toLowerCase().startsWith(name) && /\s/.test(body[name.length] ?? ''))
     )
-      return { command: id, argument: body.slice(name.length).trim() };
+      return {
+        command: id,
+        argument:
+          id === 'skill'
+            ? '/skill ' + body.slice(name.length).trim()
+            : body.slice(name.length).trim(),
+      };
   }
+  if (
+    skills.some(
+      (skill) =>
+        skill.invocation.user && skill.name.toLowerCase() === body.split(/\s/, 1)[0]?.toLowerCase(),
+    )
+  )
+    return { command: 'skill', argument: input };
   // An absolute file path is ordinary chat text, not an unknown command.
   return {
     command: body.split(/\s/, 1)[0]?.includes('/') ? 'message' : 'unknown',
@@ -105,22 +137,56 @@ export function composerRequestMode(text: string, runningMode?: AgentMode): Agen
 export function availableSlashCommands(
   session: Session | undefined,
   connected: boolean,
+  skills: readonly RegisteredSkill[] = [],
 ): readonly SlashCommand[] {
   const running = session?.run?.status === 'running';
-  return slashCommands.filter((command) => {
-    if (['new', 'settings', 'help'].includes(command.id)) return true;
-    if (!connected) return false;
-    if (command.id === 'stop') return !!running;
-    if (running) return false;
-    if (command.id === 'resume')
-      return (
-        !!session?.autopilot?.goalDriven &&
-        ['paused', 'interrupted'].includes(session.autopilot.status)
+  const builtins = slashCommands
+    .filter((command) => {
+      if (['new', 'settings', 'help'].includes(command.id)) return true;
+      if (!connected) return false;
+      if (command.id === 'stop') return !!running;
+      if (running) return false;
+      if (command.id === 'resume')
+        return (
+          !!session?.autopilot?.goalDriven &&
+          ['paused', 'interrupted'].includes(session.autopilot.status)
+        );
+      if (['compact', 'quick'].includes(command.id))
+        return !!session?.messages.some((message) => message.status === 'complete');
+      return true;
+    })
+    .map((command) => ({
+      ...command,
+      label: localize(command.label),
+      description: localize(command.description),
+      argument: localize(command.argument),
+    }));
+  if (!connected || running) return builtins;
+  const selected = skills.filter(
+    (skill) =>
+      skill.invocation.user &&
+      session?.skills?.some((entry) => entry.id === skill.id && entry.revision === skill.revision),
+  );
+  return [
+    ...builtins,
+    ...selected.map((skill): SlashCommand => {
+      const unique =
+        selected.filter((entry) => entry.name.toLowerCase() === skill.name.toLowerCase()).length ===
+        1;
+      const collides = slashCommands.some((entry) =>
+        [entry.id, ...entry.aliases].some((name) => name === skill.name.toLowerCase()),
       );
-    if (['compact', 'quick'].includes(command.id))
-      return !!session?.messages.some((message) => message.status === 'complete');
-    return true;
-  });
+      const short = unique && !collides && /^[a-z0-9][a-z0-9-]*$/.test(skill.name);
+      return {
+        id: 'skill-' + skill.id,
+        label: skill.name,
+        description: skill.description,
+        aliases: [skill.name, 'skill ' + skill.name],
+        argument: skill.argumentHint ?? localize('인자'),
+        insertText: short ? `/${skill.name} ` : `/skill ${skill.id} `,
+      };
+    }),
+  ];
 }
 
 export function suggestSlashCommands(
@@ -131,7 +197,9 @@ export function suggestSlashCommands(
   if (!input.startsWith('/') || input.includes('\n')) return [];
   const query = input.slice(1).toLowerCase();
   return commands.filter((command) =>
-    [command.id, ...command.aliases].some((name) => name.startsWith(query)),
+    [command.id, ...command.aliases, command.insertText?.trim().slice(1) ?? ''].some((name) =>
+      name.toLowerCase().startsWith(query),
+    ),
   );
 }
 

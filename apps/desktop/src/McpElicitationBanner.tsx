@@ -1,3 +1,4 @@
+import { t as localize } from './i18n';
 import { useState, type FormEvent } from 'react';
 import type { Activity, ElicitationValue } from '@lodex/contracts';
 
@@ -48,11 +49,14 @@ export function McpElicitationBanner({
     <form
       className="permission-banner elicitation-banner"
       role="dialog"
-      aria-label="MCP 사용자 입력 요청"
+      aria-label={localize('MCP 사용자 입력 요청')}
       onSubmit={submit}
     >
       <div className="elicitation-content">
-        <strong>MCP 사용자 입력 · {elicitation.source}</strong>
+        <strong>
+          {localize('MCP 사용자 입력 · ')}
+          {elicitation.source}
+        </strong>
         <p>{elicitation.message}</p>
         {elicitation.mode === 'url' ? (
           <div className="elicitation-url">
@@ -65,11 +69,13 @@ export function McpElicitationBanner({
                 void onOpen(elicitation.url!)
                   .then(() => setOpened(true))
                   .catch((error: unknown) =>
-                    setOpenError(error instanceof Error ? error.message : '링크를 열지 못했습니다.'),
+                    setOpenError(
+                      error instanceof Error ? error.message : localize('링크를 열지 못했습니다.'),
+                    ),
                   );
               }}
             >
-              링크 열기
+              {localize('링크 열기')}
             </button>
             {openError && <span role="alert">{openError}</span>}
           </div>
@@ -97,9 +103,9 @@ export function McpElicitationBanner({
                         }))
                       }
                     >
-                      <option value="">선택 안 함</option>
-                      <option value="true">예</option>
-                      <option value="false">아니요</option>
+                      <option value="">{localize('선택 안 함')}</option>
+                      <option value="true">{localize('예')}</option>
+                      <option value="false">{localize('아니요')}</option>
                     </select>
                   ) : field.type === 'select' ? (
                     <select
@@ -113,7 +119,7 @@ export function McpElicitationBanner({
                         }))
                       }
                     >
-                      <option value="">선택 안 함</option>
+                      <option value="">{localize('선택 안 함')}</option>
                       {field.options?.map((option) => (
                         <option key={option.value} value={option.value}>
                           {option.title}
@@ -193,17 +199,17 @@ export function McpElicitationBanner({
       </div>
       <div className="elicitation-actions">
         <button type="button" disabled={busy} onClick={() => void onDecide('cancel')}>
-          취소
+          {localize('취소')}
         </button>
         <button type="button" disabled={busy} onClick={() => void onDecide('decline')}>
-          거절
+          {localize('거절')}
         </button>
         <button
           className="permission-allow"
           type="submit"
           disabled={busy || (elicitation.mode === 'url' && !opened)}
         >
-          {elicitation.mode === 'url' ? '완료 후 계속' : '제출'}
+          {elicitation.mode === 'url' ? localize('완료 후 계속') : localize('제출')}
         </button>
       </div>
     </form>

@@ -38,7 +38,7 @@ export const localUrlSchema = z
         '0.0.0.0과 ::는 서버의 수신 주소입니다. 접속할 서버의 Tailscale IP·호스트 이름 또는 localhost를 입력하세요.';
     else if (!['http:', 'https:'].includes(url.protocol) || !allowedHostname(url.hostname))
       message =
-        'llama-server는 localhost·사설 IP·Tailscale IP/MagicDNS의 HTTP(S) 주소를 입력하세요.';
+        '로컬 모델 서버는 localhost·사설 IP·Tailscale IP/MagicDNS의 HTTP(S) 주소를 입력하세요.';
     else if (
       url.username ||
       url.password ||

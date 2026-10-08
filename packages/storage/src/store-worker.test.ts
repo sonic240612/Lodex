@@ -588,13 +588,13 @@ describe('durable worker storage', () => {
     expect(restored.messages.at(-1)?.activities?.[0]?.text).toBe(document.text);
     expect(await reopened.registeredSkills()).toEqual([]);
   });
-  it('rejects selecting registrations that prohibit model invocation', async () => {
+  it('rejects selecting registrations that prohibit both model and user invocation', async () => {
     const { store, path } = await db();
     const root = join(dirname(path), 'manual-skill');
     await mkdir(root);
     await writeFile(
       join(root, 'SKILL.md'),
-      '---\nname: manual\ndescription: Manual only.\ndisable-model-invocation: true\n---\nManual instructions.\n',
+      '---\nname: manual\ndescription: Not invocable.\ndisable-model-invocation: true\nuser-invocable: false\n---\nManual instructions.\n',
     );
     const skill = await store.saveRegisteredSkill(
       await inspectSkillDirectory(root, { dialect: 'claude' }),

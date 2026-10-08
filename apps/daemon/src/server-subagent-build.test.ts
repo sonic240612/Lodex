@@ -325,4 +325,77 @@ it('requires the source Build session for a manual reviewed merge, rejects stale
     actor: 'desktop',
     status: 'approved',
   });
+  await app.store.apply(
+    makeCommand({
+      type: 'set_mode',
+      sessionId: current.id,
+      expectedVersion: current.version,
+      mode: 'plan',
+    }),
+  );
+  expect(
+    (await app.request('/v1/worktrees/undo', { sessionId: current.id, worktreeId: record.id }))
+      .status,
+  ).toBe(403);
+  expect(
+    (await app.request('/v1/worktrees/archive', { sessionId: current.id, worktreeId: record.id }))
+      .status,
+  ).toBe(403);
+  current = await app.store.session(current.id);
+  await app.store.apply(
+    makeCommand({
+      type: 'set_mode',
+      sessionId: current.id,
+      expectedVersion: current.version,
+      mode: 'build',
+    }),
+  );
+  expect(
+    (await app.request('/v1/worktrees/undo', { sessionId: current.id, worktreeId: record.id }))
+      .status,
+  ).toBe(200);
+  expect(await readFile(join(app.repo, 'file.txt'), 'utf8')).toBe('before\n');
+  expect(
+    (await app.request('/v1/worktrees/archive', { sessionId: current.id, worktreeId: record.id }))
+      .status,
+  ).toBe(409);
+  const again = await app.request('/v1/worktrees/review', { worktreeId: record.id });
+  const againPreview = (await again.json()) as {
+    preview: import('@lodex/contracts').WorktreePreview;
+  };
+  expect(
+    (
+      await app.request('/v1/worktrees/merge', {
+        sessionId: current.id,
+        previewId: againPreview.preview.id,
+      })
+    ).status,
+  ).toBe(200);
+  current = await app.store.session(current.id);
+  const running = (
+    await app.store.apply(
+      makeCommand({
+        type: 'send_message',
+        sessionId: current.id,
+        expectedVersion: current.version,
+        content: 'pending fixture',
+      }),
+    )
+  ).session;
+  expect(
+    (await app.request('/v1/worktrees/archive', { sessionId: current.id, worktreeId: record.id }))
+      .status,
+  ).toBe(409);
+  await app.store.apply(
+    makeCommand({ type: 'cancel_run', sessionId: current.id, runId: running.run!.id }),
+  );
+  const archived = await app.request('/v1/worktrees/archive', {
+    sessionId: current.id,
+    worktreeId: record.id,
+  });
+  expect(archived.status).toBe(200);
+  expect((await archived.json()).record).toMatchObject({
+    status: 'archived',
+    archive: { ref: 'refs/lodex/archive/' + record.id },
+  });
 });

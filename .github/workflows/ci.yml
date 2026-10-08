@@ -33,6 +33,8 @@ jobs:
         run: npm ci
       - name: TypeScript and state/provider tests
         run: npm run check
+      - name: Release configuration tests
+        run: node --test scripts/release-config.test.mjs
       - name: Bundled runtime smoke test
         run: node scripts/smoke-runtime.mjs
       - name: Rust formatting
@@ -43,4 +45,4 @@ jobs:
         run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --locked -- -D warnings
       - name: Native desktop compilation
         run: npm run build:desktop -- --debug --no-bundle
-      # Native window E2E, installers, signing and release artifacts are gated in M7.
+      # Installer and signing builds are available in the manual Desktop packages workflow.

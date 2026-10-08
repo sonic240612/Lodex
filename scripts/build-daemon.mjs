@@ -1,10 +1,14 @@
 import { build } from 'esbuild';
+import { preparePty } from './prepare-pty.mjs';
+import { prepareBrowser } from './prepare-browser.mjs';
 await build({
   entryPoints: {
     main: 'apps/daemon/src/main.ts',
     worker: 'packages/storage/src/worker.ts',
     supervisor: 'packages/local-runtime/src/supervisor.ts',
     'mcp-supervisor': 'packages/mcp/src/supervisor.ts',
+    'pty-supervisor': 'packages/tools/src/pty-supervisor.ts',
+    'lsp-supervisor': 'apps/daemon/src/lsp-supervisor.ts',
   },
   bundle: true,
   platform: 'node',
@@ -16,6 +20,8 @@ await build({
   outdir: 'apps/daemon/dist',
   outExtension: { '.js': '.cjs' },
   sourcemap: true,
-  external: ['node:*'],
+  external: ['node:*', 'node-pty', 'playwright-core'],
   logLevel: 'info',
 });
+await preparePty();
+await prepareBrowser();

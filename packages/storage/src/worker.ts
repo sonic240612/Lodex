@@ -13,6 +13,8 @@ port.on('message', (request: { id: number; method: keyof StorageEngine; args: un
       typeof method !== 'function' ||
       ![
         'snapshot',
+        'backupImportCatalog',
+        'importBackup',
         'integration',
         'saveIntegration',
         'session',
@@ -32,6 +34,7 @@ port.on('message', (request: { id: number; method: keyof StorageEngine; args: un
         'recordWorkspaceChange',
         'invalidateWorkspace',
         'recordModelCall',
+        'beginManualCompaction',
         'decideApproval',
         'decideElicitation',
         'recordSkillRead',

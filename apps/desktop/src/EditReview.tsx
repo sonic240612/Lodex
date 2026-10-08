@@ -1,3 +1,4 @@
+import { t as localize } from './i18n';
 import { useState } from 'react';
 import type { EditProposal, ChangeSet, ChangeStatus } from '@lodex/contracts';
 import { editAction, nativeDesktop, snapshot } from './bridge';
@@ -55,14 +56,16 @@ export function EditReview({
   }
   return (
     <div className="edit-review">
-      {!nativeDesktop && <p>브라우저 표시 예제입니다. 실제 파일을 읽거나 수정하지 않습니다.</p>}
+      {!nativeDesktop && (
+        <p>{localize('브라우저 표시 예제입니다. 실제 파일을 읽거나 수정하지 않습니다.')}</p>
+      )}
       <div className="edit-heading">
-        <strong>{grouped ? `${files.length}개 파일 변경` : files[0]!.path}</strong>
-        <span>{editStatusText[edit.status]}</span>
+        <strong>{grouped ? localize('{0}개 파일 변경', files.length) : files[0]!.path}</strong>
+        <span>{localize(editStatusText[edit.status])}</span>
       </div>
       {edit.thenRun && (
         <div className="activity-section">
-          <span>적용 후 검증 · Docker</span>
+          <span>{localize('적용 후 검증 · Docker')}</span>
           <pre>{edit.thenRun.command}</pre>
         </div>
       )}
@@ -72,17 +75,20 @@ export function EditReview({
             <div className="edit-heading">
               <strong>{file.path}</strong>
               <span>
-                {'kind' in file ? '새 파일' : '수정'}
+                {'kind' in file ? localize('새 파일') : localize('수정')}
                 {edit.observations?.find((o) => o.path === file.path)
                   ? ' · ' +
-                    { before: '변경 전', after: '적용됨', conflict: '충돌', unknown: '확인 필요' }[
-                      edit.observations.find((o) => o.path === file.path)!.state
-                    ]
+                    {
+                      before: localize('변경 전'),
+                      after: localize('적용됨'),
+                      conflict: localize('충돌'),
+                      unknown: localize('확인 필요'),
+                    }[edit.observations.find((o) => o.path === file.path)!.state]
                   : ''}
               </span>
             </div>
           )}
-          <pre className="edit-diff" aria-label={file.path + ' 변경 비교'}>
+          <pre className="edit-diff" aria-label={file.path + localize(' 변경 비교')}>
             {file.diff.split('\n').map((line, i) => (
               <span
                 key={i}
@@ -104,28 +110,37 @@ export function EditReview({
       ))}
       {grouped && (
         <p>
-          모든 파일을 검토한 뒤 묶음을 적용하세요. 파일은 순서대로 변경되며, 중단되면 상태 확인 후
-          남은 변경 적용 또는 되돌리기를 선택할 수 있습니다. 새 파일의 되돌리기는 생성된 파일을
-          삭제합니다.
+          {localize(
+            '모든 파일을 검토한 뒤 묶음을 적용하세요. 파일은 순서대로 변경되며, 중단되면 상태 확인 후 남은 변경 적용 또는 되돌리기를 선택할 수 있습니다. 새 파일의 되돌리기는 생성된 파일을 삭제합니다.',
+          )}
         </p>
       )}
       {edit.status === 'partial' && (
         <p role="status">
-          일부 파일만 적용되었습니다. 위 파일별 상태를 확인하고 남은 변경 적용 또는 되돌리기를
-          선택하세요.
+          {localize(
+            '일부 파일만 적용되었습니다. 위 파일별 상태를 확인하고 남은 변경 적용 또는 되돌리기를 선택하세요.',
+          )}
         </p>
       )}
       {edit.status === 'proposed' && (
-        <p>이 변경을 검토한 뒤 적용하세요. 응답이 끝나면 선택한 프로젝트의 이 파일을 수정합니다.</p>
+        <p>
+          {localize(
+            '이 변경을 검토한 뒤 적용하세요. 응답이 끝나면 선택한 프로젝트의 이 파일을 수정합니다.',
+          )}
+        </p>
       )}
       {edit.status === 'applied' && (
         <p>
-          이 수정안의 내용이 파일에서 확인되었습니다. 테스트 실행 여부는 별도로 확인해야 합니다.
+          {localize(
+            '이 수정안의 내용이 파일에서 확인되었습니다. 테스트 실행 여부는 별도로 확인해야 합니다.',
+          )}
         </p>
       )}
-      {edit.status === 'reverted' && <p>변경 전 원본 내용이 파일에서 확인되었습니다.</p>}
+      {edit.status === 'reverted' && (
+        <p>{localize('변경 전 원본 내용이 파일에서 확인되었습니다.')}</p>
+      )}
       {edit.status === 'rejected' && (
-        <p>이 변경은 사용자가 거절했습니다. 파일은 수정하지 않았습니다.</p>
+        <p>{localize('이 변경은 사용자가 거절했습니다. 파일은 수정하지 않았습니다.')}</p>
       )}
       {(edit.error || error) && (
         <p className="danger-text" role="alert">
@@ -138,7 +153,7 @@ export function EditReview({
             disabled={!nativeDesktop || !workspace.connected || busy || running || readOnly}
             onClick={() => setConfirmUndo(true)}
           >
-            변경 되돌리기
+            {localize('변경 되돌리기')}
           </button>
         )}
         {['proposed', 'partial'].includes(edit.status) && !confirmUndo && (
@@ -146,7 +161,11 @@ export function EditReview({
             disabled={!nativeDesktop || !workspace.connected || busy || running || readOnly}
             onClick={() => void act('apply')}
           >
-            {busy ? '처리 중…' : edit.status === 'partial' ? '남은 변경 적용' : '검토한 변경 적용'}
+            {busy
+              ? localize('처리 중…')
+              : edit.status === 'partial'
+                ? localize('남은 변경 적용')
+                : localize('검토한 변경 적용')}
           </button>
         )}
         {edit.status === 'proposed' && !confirmUndo && (
@@ -154,7 +173,7 @@ export function EditReview({
             disabled={!nativeDesktop || !workspace.connected || busy || running}
             onClick={() => void act('reject')}
           >
-            거절
+            {localize('거절')}
           </button>
         )}
         {edit.status !== 'applying' && (
@@ -162,28 +181,32 @@ export function EditReview({
             disabled={!nativeDesktop || !workspace.connected || busy || running}
             onClick={() => void act('check')}
           >
-            파일 상태 확인
+            {localize('파일 상태 확인')}
           </button>
         )}
-        {running && <small>프로젝트 응답이 끝나면 적용할 수 있습니다.</small>}
-        {readOnly && <small>파일 변경은 Build 모드에서 사용할 수 있습니다.</small>}
+        {running && <small>{localize('프로젝트 응답이 끝나면 적용할 수 있습니다.')}</small>}
+        {readOnly && <small>{localize('파일 변경은 Build 모드에서 사용할 수 있습니다.')}</small>}
       </div>
       {confirmUndo && ['applied', 'partial'].includes(edit.status) && (
-        <div className="undo-confirm" role="group" aria-label="되돌리기 확인">
+        <div className="undo-confirm" role="group" aria-label={localize('되돌리기 확인')}>
           <p>
-            위 diff의 변경을 취소하고 {grouped ? `${files.length}개 파일의` : files[0]!.path + '의'}{' '}
-            원본 내용을 복원합니다. 새로 생성한 파일은 삭제합니다. 적용 이후 파일이 바뀌었으면
-            덮어쓰지 않습니다.
+            {localize('위 diff의 변경을 취소하고 ')}
+            {grouped
+              ? localize('{0}개 파일의', files.length)
+              : files[0]!.path + localize('의')}{' '}
+            {localize(
+              '원본 내용을 복원합니다. 새로 생성한 파일은 삭제합니다. 적용 이후 파일이 바뀌었으면 덮어쓰지 않습니다.',
+            )}
           </p>
           <div className="edit-actions">
             <button
               disabled={!workspace.connected || busy || running || readOnly}
               onClick={() => void act('undo')}
             >
-              되돌리기 확인
+              {localize('되돌리기 확인')}
             </button>
             <button disabled={busy} onClick={() => setConfirmUndo(false)}>
-              취소
+              {localize('취소')}
             </button>
           </div>
         </div>

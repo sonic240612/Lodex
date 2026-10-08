@@ -10,6 +10,27 @@ afterEach(async () => {
 });
 
 describe('data backups', () => {
+  it('reports automatic backup failures without exposing exception contents and clears after recovery', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lodex-backup-failure-'));
+    let fail = true;
+    const backups = await Backups.open(root, async () => {
+      if (fail) throw new Error('private-path-and-token');
+      return { sessions: [] };
+    });
+    cleanups.push(async () => {
+      await backups.close();
+      if (dirname(resolve(root)) !== resolve(tmpdir())) throw new Error('Unsafe fixture');
+      await rm(root, { recursive: true, force: true });
+    });
+    await expect
+      .poll(() => backups.snapshot().then((value) => value.lastFailure?.message))
+      .toContain('자동 백업에 실패');
+    expect(JSON.stringify(await backups.snapshot())).not.toContain('private-path-and-token');
+    fail = false;
+    const result = await backups.create();
+    expect(result.snapshot.lastFailure).toBeUndefined();
+    expect(result.snapshot.backups).toHaveLength(1);
+  });
   it('creates versioned secret-free envelopes and applies count retention', async () => {
     const root = await mkdtemp(join(tmpdir(), 'lodex-backups-'));
     let sequence = 0;

@@ -1,3 +1,4 @@
+import { t as localize } from './i18n';
 import { autopilotLimitsSchema, type CommandInput, type Session } from '@lodex/contracts';
 
 export type GoalExecutionMode = 'simple' | 'advanced';
@@ -12,7 +13,7 @@ export function goalExecutionCommand(
 ): CommandInput {
   const target = { sessionId: session.id, expectedVersion: session.version, limits };
   if (mode === 'simple') {
-    if (!goal.trim()) throw new Error('달성할 목표를 입력하세요.');
+    if (!goal.trim()) throw new Error(localize('달성할 목표를 입력하세요.'));
     return { ...target, type: 'start_goal', goal: goal.trim() };
   }
   return { ...target, type: 'start_autopilot', taskIds };

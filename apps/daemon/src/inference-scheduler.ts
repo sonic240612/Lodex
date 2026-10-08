@@ -1,6 +1,6 @@
 import type { InferenceProvider, Session } from '@lodex/contracts';
 import type { RuntimeManager, RuntimeLease } from '@lodex/local-runtime';
-import { ChatCompletionProvider, DemoProvider } from '@lodex/providers';
+import { createInferenceProvider } from '@lodex/providers';
 
 /** Slots cover generation, including model loading. Waiting never holds a VRAM lease. */
 class Slots {
@@ -59,9 +59,7 @@ export class InferenceScheduler {
     const scheduler = this;
     const make = (target: Session, key: string | null): InferenceProvider =>
       scheduler.factory?.(target, key) ??
-      (target.config.provider === 'demo'
-        ? new DemoProvider()
-        : new ChatCompletionProvider(target.config.provider, target.config.baseUrl, key));
+      createInferenceProvider(target.config.provider, target.config.baseUrl, key);
     const metadata = () =>
       make(session, session.config.provider === 'openrouter' ? this.key() : null);
     return {

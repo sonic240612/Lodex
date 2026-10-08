@@ -72,6 +72,7 @@ async function main() {
     worktreeRoot: join(config.dataDir, 'worktrees'),
     observationRoot: join(config.dataDir, 'observations'),
     modelRoot: join(config.dataDir, 'models'),
+    engineRoot: join(config.dataDir, 'engines'),
     backupRoot: join(config.dataDir, 'backups'),
     ...(config.telegramToken ? { telegramToken: config.telegramToken } : {}),
     ...secrets,

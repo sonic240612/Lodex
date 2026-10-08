@@ -1,3 +1,4 @@
+import { t as localize } from './i18n';
 import { useState } from 'react';
 import type { PlanProposal } from '@lodex/contracts';
 import { sendCommand, snapshot } from './bridge';
@@ -47,10 +48,10 @@ export function PlanReview({
       <strong>{proposal.plan.goal}</strong>
       <p>{proposal.plan.criteria}</p>
       {proposal.plan.verificationCommand && (
-        <pre aria-label="최종 검증 명령">{proposal.plan.verificationCommand}</pre>
+        <pre aria-label={localize('최종 검증 명령')}>{proposal.plan.verificationCommand}</pre>
       )}
       {!!proposal.plan.verificationArtifacts?.length && (
-        <pre aria-label="최종 검증 파일">
+        <pre aria-label={localize('최종 검증 파일')}>
           {JSON.stringify(proposal.plan.verificationArtifacts, null, 2)}
         </pre>
       )}
@@ -60,16 +61,16 @@ export function PlanReview({
             <strong>{task.title}</strong>
             <p>{task.criteria}</p>
             {task.verificationCommand && (
-              <pre aria-label={task.title + ' 검증 명령'}>{task.verificationCommand}</pre>
+              <pre aria-label={task.title + localize(' 검증 명령')}>{task.verificationCommand}</pre>
             )}
             {!!task.verificationArtifacts?.length && (
-              <pre aria-label={task.title + ' 검증 파일'}>
+              <pre aria-label={task.title + localize(' 검증 파일')}>
                 {JSON.stringify(task.verificationArtifacts, null, 2)}
               </pre>
             )}
             {!!task.dependsOn?.length && (
               <small>
-                선행 작업:{' '}
+                {localize('선행 작업:')}{' '}
                 {task.dependsOn
                   .map((id) => proposal.plan.tasks.find((t) => t.id === id)?.title)
                   .join(', ')}
@@ -86,17 +87,19 @@ export function PlanReview({
       {proposal.status === 'proposed' ? (
         <>
           <p>
-            검토한 계획으로 Goal과 할 일을 교체합니다. 반영 후 오른쪽에서 항목을 편집할 수 있습니다.
+            {localize(
+              '검토한 계획으로 Goal과 할 일을 교체합니다. 반영 후 오른쪽에서 항목을 편집할 수 있습니다.',
+            )}
           </p>
           <button
             disabled={busy || !workspace.connected || session?.run?.status === 'running'}
             onClick={() => void adopt()}
           >
-            {busy ? '반영 중…' : '계획에 반영'}
+            {busy ? localize('반영 중…') : localize('계획에 반영')}
           </button>
         </>
       ) : (
-        <p role="status">계획에 반영했습니다.</p>
+        <p role="status">{localize('계획에 반영했습니다.')}</p>
       )}
     </div>
   );

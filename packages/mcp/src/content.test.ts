@@ -189,6 +189,49 @@ function templateOptions(connection: McpConnection) {
   };
 }
 describe('MCP explicit content reads', () => {
+  it('pins subscription support and requires explicit reinspection to enable it for old registrations', async () => {
+    const server = await fixture();
+    const original = await server.connect();
+    server.state.capabilities.resources = { subscribe: true };
+    const restored = await server.connect({ expected: original.registration });
+    expect(restored.registration.supportsResourceSubscriptions).toBeUndefined();
+    expect(restored.registration.revision).toBe(original.registration.revision);
+    const inspected = await server.connect();
+    expect(inspected.registration.supportsResourceSubscriptions).toBe(true);
+    expect(inspected.registration.revision).not.toBe(original.registration.revision);
+    server.state.capabilities.resources = {};
+    await expect(server.connect({ expected: inspected.registration })).rejects.toMatchObject({
+      code: 'MCP_CATALOG_CHANGED',
+    });
+  });
+  it('blocks subscription URIs outside the reviewed resource or template before sending an RPC', async () => {
+    const server = await fixture();
+    server.state.capabilities.resources = { subscribe: true };
+    const connection = await server.connect(),
+      resource = connection.registration.resources![0]!,
+      template = connection.registration.resourceTemplates![0]!,
+      before = server.requests.length;
+    const options = {
+      serverRevision: connection.registration.revision,
+      entryKey: resource.uri,
+      revision: resource.revision,
+      kind: 'resource' as const,
+      uri: 'file:///unreviewed',
+      signal: AbortSignal.timeout(1000),
+    };
+    await expect(connection.subscribeResource(options)).rejects.toMatchObject({
+      code: 'MCP_SUBSCRIBE_RESOURCE',
+    });
+    await expect(
+      connection.subscribeResource({
+        ...options,
+        kind: 'resource_template',
+        entryKey: template.uriTemplate,
+        revision: template.revision,
+      }),
+    ).rejects.toMatchObject({ code: 'MCP_SUBSCRIBE_RESOURCE' });
+    expect(server.requests).toHaveLength(before);
+  });
   it('requests bounded completions only for reviewed prompt and template arguments', async () => {
     const server = await fixture();
     server.state.capabilities.completions = {};

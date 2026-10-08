@@ -26,6 +26,8 @@ import {
   type ModelCallRecord,
 } from '@lodex/contracts';
 import type { RunUpdate } from './engine';
+import type { BackupImportData, BackupImportCatalog } from './backup-import';
+export type { BackupImportData, BackupImportCatalog } from './backup-import';
 export type { RunUpdate } from './engine';
 export class Store {
   private sequence = 0;
@@ -86,13 +88,33 @@ export class Store {
   snapshot(): Promise<Omit<Snapshot, 'openrouterConfigured'>> {
     return this.call('snapshot');
   }
+  backupImportCatalog(): Promise<BackupImportCatalog> {
+    return this.call('backupImportCatalog');
+  }
+  importBackup(data: BackupImportData, expectedFingerprint: string): Promise<void> {
+    return this.call('importBackup', data, expectedFingerprint);
+  }
   integration(
-    name: 'telegram' | 'worktrees' | 'command_jobs',
+    name:
+      | 'telegram'
+      | 'worktrees'
+      | 'command_jobs'
+      | 'model_catalog'
+      | 'browser'
+      | 'automations'
+      | 'language_servers',
   ): Promise<{ version: number; document: unknown } | null> {
     return this.call('integration', name);
   }
   saveIntegration(
-    name: 'telegram' | 'worktrees' | 'command_jobs',
+    name:
+      | 'telegram'
+      | 'worktrees'
+      | 'command_jobs'
+      | 'model_catalog'
+      | 'browser'
+      | 'automations'
+      | 'language_servers',
     expectedVersion: number,
     document: unknown,
   ): Promise<number> {
@@ -153,6 +175,15 @@ export class Store {
   }
   recordModelCall(sessionId: string, call: ModelCallRecord): Promise<Session> {
     return this.call('recordModelCall', sessionId, call);
+  }
+  beginManualCompaction(
+    command: Extract<Command, { type: 'compact_context' }>,
+    reservedCostUsd = 0,
+  ): Promise<{
+    session: Session;
+    call?: ModelCallRecord;
+  }> {
+    return this.call('beginManualCompaction', command, reservedCostUsd);
   }
   project(id: string): Promise<Project> {
     return this.call('project', id);

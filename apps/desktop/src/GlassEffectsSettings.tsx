@@ -1,3 +1,4 @@
+import { t as localize } from './i18n';
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
 import { Icon } from './icons';
 import { GlassPopover } from './GlassMotion';
@@ -69,11 +70,14 @@ export function GlassEffectsSettings({
         type="button"
         className="glass-effects-toggle icon-button"
         ref={trigger}
-        aria-label={`유리 효과: ${allowMotion ? '전체 효과 켜짐' : '움직임 줄임'}`}
+        aria-label={localize(
+          '유리 효과: {0}',
+          allowMotion ? localize('전체 효과 켜짐') : localize('움직임 줄임'),
+        )}
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={open ? menuId : undefined}
-        title="유리 효과 설정"
+        title={localize('유리 효과 설정')}
         onClick={() => setOpen((value) => !value)}
         onKeyDown={(event) => {
           if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
@@ -83,7 +87,7 @@ export function GlassEffectsSettings({
         }}
       >
         <Icon name="settings" size={17} />
-        <span className="glass-effects-label">효과</span>
+        <span className="glass-effects-label">{localize('효과')}</span>
       </button>
       <GlassPopover
         open={open}
@@ -91,15 +95,17 @@ export function GlassEffectsSettings({
         origin="top right"
         onKeyDown={keyboard}
       >
-        <strong className="glass-effects-heading">유리 효과</strong>
+        <strong className="glass-effects-heading">{localize('유리 효과')}</strong>
         <p className="glass-effects-status" role="status">
           {preference === 'system' && systemReducedMotion
-            ? '시스템에서 움직임 줄이기가 켜져 있습니다. 전체 효과를 선택하면 이 앱에서만 움직임을 켭니다.'
+            ? localize(
+                '시스템에서 움직임 줄이기가 켜져 있습니다. 전체 효과를 선택하면 이 앱에서만 움직임을 켭니다.',
+              )
             : allowMotion
-              ? '부드러운 움직임이 켜져 있습니다.'
-              : '움직임을 줄여 표시하고 있습니다.'}
+              ? localize('부드러운 움직임이 켜져 있습니다.')
+              : localize('움직임을 줄여 표시하고 있습니다.')}
         </p>
-        <div id={menuId} role="menu" aria-label="유리 효과 설정">
+        <div id={menuId} role="menu" aria-label={localize('유리 효과 설정')}>
           {choices.map((choice, index) => (
             <button
               key={choice.value}
@@ -113,16 +119,16 @@ export function GlassEffectsSettings({
               onClick={() => onChange(choice.value)}
             >
               <span>
-                <strong>{choice.label}</strong>
+                <strong>{localize(choice.label)}</strong>
                 {preference === choice.value && <Icon name="check" size={16} />}
               </span>
-              <small>{choice.detail}</small>
+              <small>{localize(choice.detail)}</small>
             </button>
           ))}
         </div>
         <div className="glass-transparency-control">
           <label htmlFor={transparencyId}>
-            <span>유리 투명도</span>
+            <span>{localize('유리 투명도')}</span>
             <output htmlFor={transparencyId}>{transparency}%</output>
           </label>
           <input
@@ -137,21 +143,25 @@ export function GlassEffectsSettings({
             onChange={(event) => onTransparencyChange(Number(event.target.value))}
           />
           <div className="glass-transparency-scale" aria-hidden="true">
-            <span>불투명</span>
-            <span>투명</span>
+            <span>{localize('불투명')}</span>
+            <span>{localize('투명')}</span>
           </div>
           <small id={`${transparencyId}-hint`}>
-            설정·모델 연결 창은 항상 불투명하게 표시합니다.
+            {localize('설정·모델 연결 창은 항상 불투명하게 표시합니다.')}
           </small>
         </div>
         <div className="glass-optics-preview">
           <div className="glass-optics-preview-lines" aria-hidden="true" />
-          <button type="button" className="glass-optics-preview-lens" aria-label="유리 렌즈 체험">
-            눌러서 움직이기
+          <button
+            type="button"
+            className="glass-optics-preview-lens"
+            aria-label={localize('유리 렌즈 체험')}
+          >
+            {localize('눌러서 움직이기')}
           </button>
         </div>
         <small className="glass-optics-caption">
-          누르거나 드래그하면 유리의 두께와 모양이 변합니다.
+          {localize('누르거나 드래그하면 유리의 두께와 모양이 변합니다.')}
         </small>
       </GlassPopover>
     </div>

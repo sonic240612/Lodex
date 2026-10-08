@@ -28,14 +28,18 @@ import {
   runtimeActionSchema,
   modelDownloadInputSchema,
   modelDownloadActionSchema,
+  engineInstallSchema,
+  engineManagerActionSchema,
   modelInspectionInputSchema,
   type Command,
   type InferenceProvider,
   type Session,
   mcpContentInputSchema,
+  mcpSubscriptionInputSchema,
   mcpCompletionInputSchema,
   type McpContextAttachment,
   resolveModelConfig,
+  resolveAuxiliaryModel,
   type ModelConfig,
   type ModelPricing,
   type Activity,
@@ -43,13 +47,14 @@ import {
   backupSettingsSchema,
 } from '@lodex/contracts';
 import { Store } from '@lodex/storage';
-import { ChatCompletionProvider, DemoProvider } from '@lodex/providers';
 import {
-  compileContext,
-  finishSemanticCompaction,
-  prepareSemanticCompaction,
-  type CompiledContext,
-} from '@lodex/context';
+  ChatCompletionProvider,
+  createInferenceProvider,
+  openRouterAccount,
+} from '@lodex/providers';
+import { defaultProviderBaseUrl, isLocalProvider } from '@lodex/contracts';
+import { OpenRouterCatalog } from './model-catalog';
+import { compileContext, type CompiledContext } from '@lodex/context';
 import {
   inspectProject,
   projectTools,
@@ -78,6 +83,9 @@ import { startTaskList } from '@lodex/contracts';
 import { historySearchTool, toolResultRecallTool } from './history';
 import { goalCompletionTool, goalResumeEvidence, verificationTools } from './autopilot';
 import { reconcileCosts } from './costs';
+import { compactManually } from './manual-compaction';
+import { reviewWorkTool } from './review';
+import { validateCloudTransmission } from './cloud-consent';
 import { RuntimeManager } from '@lodex/local-runtime';
 import {
   discoverSkillDirectories,
@@ -85,7 +93,9 @@ import {
   skillCatalog,
   type RegisteredSkill,
 } from '@lodex/skills';
-import { skillTools } from './skills';
+import { skillTools, prepareDirectSkill, type DirectSkill } from './skills';
+import { filterSkillTools } from './skill-policy';
+import { UpdatePreparation } from './update-preparation';
 import {
   McpConnection,
   importMcpConfigurations,
@@ -98,19 +108,33 @@ import { RunMcp, selectedMcpTools } from './mcp';
 import { loadMcpSecret, loadTelegramSecret, telegramToken } from './secrets';
 import { Telegram } from './telegram';
 import { Worktrees } from './worktrees';
+import { LanguageServers, lspTools } from './lsp';
+import { languageServerConfigSchema, lspOperationSchema, lspQuerySchema } from '@lodex/contracts';
 import {
   WorktreeReviews,
   worktreeTools,
   worktreeReviewSchema,
   worktreeMergeSchema,
 } from './worktree-reviews';
-import { CommandJobs, commandJobTools, commandJobActionSchema } from './jobs';
+import {
+  CommandJobs,
+  commandJobTools,
+  commandJobActionSchema,
+  commandJobResizeActionSchema,
+} from './jobs';
 import { McpContentPreviews } from './mcp-content';
+import { McpResourceSubscriptions } from './mcp-subscriptions';
 import { OAuthEnvStore } from './oauth-store';
 import { InferenceScheduler } from './inference-scheduler';
+import { BrowserSession, browserTool } from '@lodex/tools';
+import { browserConfigSchema } from '@lodex/contracts';
+import { browserSettings } from './browser-settings';
+import { Automations } from './automations';
+import { automationInputSchema } from '@lodex/contracts';
 import { subagentTool } from './subagents';
 import { isObservationMarker, ObservationPack, observationRecallTool } from './observations';
 import { Backups } from './backups';
+import { BackupImporter } from './backup-import';
 import { z } from 'zod';
 declare const __dirname: string;
 const skillRegistrationInput = z
@@ -149,16 +173,18 @@ interface ServerOptions {
   mcpSupervisorPath?: string;
   modelRoot?: string;
   modelFetch?: typeof fetch;
+  engineRoot?: string;
+  engineFetch?: typeof fetch;
   backupRoot?: string;
 }
-async function readJson(request: IncomingMessage): Promise<unknown> {
+async function readJson(request: IncomingMessage, maxBytes = 262144): Promise<unknown> {
   if (!request.headers['content-type']?.startsWith('application/json'))
     throw new AppError('CONTENT_TYPE', 'JSON 요청이 필요합니다.', 415);
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of request) {
     size += Buffer.byteLength(chunk);
-    if (size > 262144) throw new AppError('BODY_LIMIT', '요청이 너무 큽니다.', 413);
+    if (size > maxBytes) throw new AppError('BODY_LIMIT', '요청이 너무 큽니다.', 413);
     chunks.push(Buffer.from(chunk));
   }
   try {
@@ -218,7 +244,12 @@ export async function startServer(options: ServerOptions) {
     return token;
   };
   const shutdown = new AbortController();
+  const updatePreparation = new UpdatePreparation();
+  const publicModelCatalog = new OpenRouterCatalog(store, () =>
+    new ChatCompletionProvider('openrouter', '', null).listModels(),
+  );
   const contentPreviews = new McpContentPreviews();
+  const resourceSubscriptions = new McpResourceSubscriptions();
   const runtime = new RuntimeManager(
     store,
     options.supervisorPath ??
@@ -228,20 +259,35 @@ export async function startServer(options: ServerOptions) {
     {
       ...(options.modelRoot ? { modelRoot: options.modelRoot } : {}),
       ...(options.modelFetch ? { fetch: options.modelFetch } : {}),
+      ...(options.engineRoot ? { engineRoot: options.engineRoot } : {}),
+      ...(options.engineFetch ? { engineFetch: options.engineFetch } : {}),
     },
   );
   const backups = options.backupRoot
     ? await Backups.open(options.backupRoot, async () => {
-        const [state, profiles, settings, skills, mcp, telegramState, worktreeState] =
-          await Promise.all([
-            store.snapshot(),
-            store.localProfiles(),
-            store.runtimeSettings(),
-            store.registeredSkills(),
-            store.registeredMcp(),
-            store.integration('telegram'),
-            store.integration('worktrees'),
-          ]);
+        const [
+          state,
+          profiles,
+          settings,
+          skills,
+          mcp,
+          telegramState,
+          worktreeState,
+          browserState,
+          automationState,
+          languageState,
+        ] = await Promise.all([
+          store.snapshot(),
+          store.localProfiles(),
+          store.runtimeSettings(),
+          store.registeredSkills(),
+          store.registeredMcp(),
+          store.integration('telegram'),
+          store.integration('worktrees'),
+          store.integration('browser'),
+          store.integration('automations'),
+          store.integration('language_servers'),
+        ]);
         const telegramDocument = telegramState?.document as
           { config?: unknown; bot?: unknown; owner?: unknown } | undefined;
         return {
@@ -259,12 +305,34 @@ export async function startServer(options: ServerOptions) {
                 }
               : null,
             worktrees: worktreeState?.document ?? null,
+            browser: browserState?.document ?? null,
+            automations: automationState?.document ?? null,
+            language_servers: languageState?.document ?? null,
           },
         };
       })
     : undefined;
   let openrouterKey = options.openrouterKey ?? null;
-  function validateInferenceConfig(config: ModelConfig) {
+  const backupImporter = new BackupImporter(store);
+  async function validateInferenceConfig(config: ModelConfig) {
+    if (config.managedModelId) {
+      const profile = (await store.localProfiles()).find((p) => p.id === config.managedModelId);
+      if (
+        config.provider !== 'llama-server' ||
+        !profile ||
+        profile.version !== config.managedModelVersion
+      )
+        throw new AppError(
+          'MODEL_PROFILE_CHANGED',
+          '관리 모델 설정이 바뀌었거나 삭제되었습니다. 모델 목록에서 이 대화에 사용할 모델을 다시 선택하세요.',
+          409,
+        );
+      if (config.contextBudgetTokens > profile.settings.contextSize)
+        throw new AppError(
+          'ENGINE_CONTEXT_LIMIT',
+          '앱 컨텍스트 예산은 관리 엔진의 컨텍스트 길이 이하여야 합니다.',
+        );
+    }
     if (config.provider !== 'demo' && !config.model)
       throw new AppError('MODEL_REQUIRED', '먼저 역할에 사용할 모델 ID를 설정하세요.');
     if (config.provider === 'openrouter') {
@@ -652,8 +720,10 @@ export async function startServer(options: ServerOptions) {
     context: CompiledContext,
     skills: RegisteredSkill[],
     mcpSelections: ReturnType<typeof selectedMcpTools>,
+    directSkill?: DirectSkill,
   ): Promise<void> {
     const childConfig = session.routing?.subagent ?? session.config;
+    const baseConfig = session.config;
     session = { ...session, config: resolveModelConfig(session) };
     const autopilot = session.autopilot;
     const loadSignal =
@@ -699,13 +769,30 @@ export async function startServer(options: ServerOptions) {
         store,
         session,
         provider,
+        baseConfig,
+        providerFor: (config) => inference.provider({ ...session, config }),
+        loadPricing: async (config) => {
+          const key = config.provider + '\0' + config.model;
+          if (!pricing.has(key))
+            await loadPricing(config, inference.provider({ ...session, config }));
+          return pricing.get(key);
+        },
         controller,
         onInterruptible: (interrupt) => {
           const run = active.get(session.run!.id);
           if (run) run.interrupt = interrupt;
         },
         context,
+        ...(context.request.tools?.some((tool) => tool.function.name === 'browser_action')
+          ? { browser: new BrowserSession((await browserSettings(store)).config) }
+          : {}),
         skills,
+        ...(directSkill ? { directSkill } : {}),
+        skillDependencies: mcpSelections.map(({ server }) => ({
+          id: server.id,
+          name: server.config.name,
+          transport: server.config.transport,
+        })),
         ...(session.routing?.subagentsEnabled
           ? {
               subagents: {
@@ -721,6 +808,7 @@ export async function startServer(options: ServerOptions) {
         hostCommandExecutor: (input) =>
           jobs.run(session, input, 'host', options.hostCommandExecutor ?? executeHostCommand),
         jobs,
+        languageServers,
         ...(worktrees && worktreeReviews ? { worktrees, worktreeReviews } : {}),
         waitForApproval: (activityId, signal) =>
           waitForApproval(session.run!.id, session.id, activityId, signal),
@@ -776,6 +864,7 @@ export async function startServer(options: ServerOptions) {
   }
   async function command(command: Command) {
     if (closing) throw new AppError('SHUTTING_DOWN', '앱을 종료하는 중입니다.', 503);
+    updatePreparation.assertAvailable();
     const receipt = await store.receipt(command);
     if (receipt) return receipt;
     let attachment: McpContextAttachment | undefined;
@@ -793,6 +882,7 @@ export async function startServer(options: ServerOptions) {
     }
     let context: CompiledContext | undefined;
     let selectedSkills: RegisteredSkill[] = [];
+    let directSkill: DirectSkill | undefined;
     let mcpSelections: ReturnType<typeof selectedMcpTools> = [];
     if (
       'sessionId' in command &&
@@ -813,6 +903,7 @@ export async function startServer(options: ServerOptions) {
       const stored = await store.session(command.sessionId);
       const modeSession = {
         ...stored,
+        ...(command.type === 'start_task_list' ? { taskList: startTaskList(stored.taskList) } : {}),
         ...(command.type === 'start_goal' ||
         command.type === 'start_autopilot' ||
         command.type === 'start_task_list'
@@ -825,39 +916,26 @@ export async function startServer(options: ServerOptions) {
       const configs = [session.config];
       const childConfig = session.routing?.subagent ?? stored.config;
       if (session.routing?.subagentsEnabled) configs.push(childConfig);
-      const usesCloud = configs.some((config) => config.provider === 'openrouter');
-      const hasProjectHistory = session.messages.some((message) =>
-        message.activities?.some(
-          (activity) =>
-            activity.subagents?.length ||
-            activity.execution ||
-            activity.edit ||
-            activity.changes ||
-            isProjectReadTool(activity.label),
-        ),
-      );
+      const auxiliary = [
+        session.routing?.summary,
+        session.routing?.review,
+        ...(session.taskList?.active
+          ? session.taskList.tasks
+              .filter((task) => task.status !== 'completed')
+              .map((task) => task.model)
+          : []),
+      ].filter((config): config is ModelConfig => !!config);
+      configs.push(...auxiliary);
       if (
         session.projectId &&
-        (session.routing?.subagentsEnabled || hasProjectHistory) &&
-        configs.some((config) => config.provider === 'openrouter' && !config.projectCloudConsent)
+        auxiliary.some((config) => config.provider === 'openrouter' && !config.projectCloudConsent)
       )
         throw new AppError(
           'PROJECT_CLOUD_CONSENT',
-          '프로젝트 작업 결과가 전달되는 모든 OpenRouter 역할에 프로젝트 전송 동의가 필요합니다.',
+          '요약·검토·작업별 OpenRouter 모델에 프로젝트 전송 동의가 필요합니다.',
           403,
         );
-      if (
-        usesCloud &&
-        !session.mcpCloudConsent &&
-        (session.hasMcpHistory ||
-          session.mcpAttachments?.length ||
-          (session.mode !== 'plan' && session.mcp?.length))
-      )
-        throw new AppError(
-          'MCP_CLOUD_CONSENT',
-          'MCP 도구 설명과 실행 결과를 OpenRouter로 보내려면 이 대화의 MCP 전송 동의가 필요합니다. 선택을 해제해도 이전 내용은 기록에 남습니다.',
-          403,
-        );
+      validateCloudTransmission(session, configs);
       if (session.mode !== 'plan')
         mcpSelections = selectedMcpTools(session, await store.registeredMcp());
       const registrations = await store.registeredSkills();
@@ -869,48 +947,12 @@ export async function startServer(options: ServerOptions) {
             '선택한 스킬이 변경되거나 삭제되었습니다. 스킬 선택을 다시 확인하세요.',
             409,
           );
-        if (!skill.invocation.model)
-          throw new AppError(
-            'SKILL_INVOCATION',
-            '자동 호출을 허용하지 않는 스킬은 현재 대화 도구로 사용할 수 없습니다.',
-            403,
-          );
+        if (!skill.invocation.model && !skill.invocation.user)
+          throw new AppError('SKILL_INVOCATION', '모델·사용자 호출이 모두 금지된 스킬입니다.', 403);
         return skill;
       });
-      if (
-        usesCloud &&
-        !session.skillCloudConsent &&
-        (selectedSkills.length ||
-          session.hasSkillHistory ||
-          session.messages.some((message) =>
-            message.activities?.some((activity) => activity.skillRead),
-          ))
-      )
-        throw new AppError(
-          'SKILL_CLOUD_CONSENT',
-          '스킬 메타데이터와 읽은 내용을 OpenRouter로 보내려면 이 대화의 스킬 전송 동의가 필요합니다. 이전에 읽은 내용도 대화 기록에 남아 있습니다.',
-          403,
-        );
       for (const config of configs) {
-        if (config.managedModelId) {
-          const profile = (await store.localProfiles()).find((p) => p.id === config.managedModelId);
-          if (
-            config.provider !== 'llama-server' ||
-            !profile ||
-            profile.version !== config.managedModelVersion
-          )
-            throw new AppError(
-              'MODEL_PROFILE_CHANGED',
-              '관리 모델 설정이 바뀌었거나 삭제되었습니다. 모델 목록에서 이 대화에 사용할 모델을 다시 선택하세요.',
-              409,
-            );
-          if (config.contextBudgetTokens > profile.settings.contextSize)
-            throw new AppError(
-              'ENGINE_CONTEXT_LIMIT',
-              '앱 컨텍스트 예산은 관리 엔진의 컨텍스트 길이 이하여야 합니다.',
-            );
-        }
-        validateInferenceConfig(config);
+        await validateInferenceConfig(config);
       }
       if (
         session.routing?.subagentsEnabled &&
@@ -948,11 +990,11 @@ export async function startServer(options: ServerOptions) {
           '초기 버전은 동시에 최대 4개의 응답을 처리합니다.',
           429,
         );
-      if (session.config.provider === 'llama-server') {
+      if (isLocalProvider(resolveModelConfig(session).provider)) {
         const state = await store.snapshot();
         if (
           state.sessions.some(
-            (s) => s.run?.status === 'running' && resolveModelConfig(s).provider === 'llama-server',
+            (s) => s.run?.status === 'running' && isLocalProvider(resolveModelConfig(s).provider),
           )
         )
           throw new AppError(
@@ -976,9 +1018,16 @@ export async function startServer(options: ServerOptions) {
       )
         tools.push(updateTaskTool);
       tools.push(historySearchTool);
+      if (
+        session.projectId &&
+        languageServers.available(session.projectId) &&
+        tools.some((tool) => tool.function.name === 'read_file')
+      )
+        tools.push(...lspTools);
       tools.push(toolResultRecallTool);
       tools.push(webFetchTool);
       tools.push(webSearchTool);
+      if (session.routing?.review) tools.push(reviewWorkTool);
       if (
         observations &&
         (session.config.eco ||
@@ -998,6 +1047,12 @@ export async function startServer(options: ServerOptions) {
             (tool) => session.mode !== 'plan' || tool.function.name === 'review_worktree',
           ),
         );
+      if (
+        session.mode !== 'plan' &&
+        session.permissionMode === 'full' &&
+        (await browserSettings(store)).config.enabled
+      )
+        tools.push(browserTool);
       tools.push(...mcpSelections.map((value) => value.definition));
       if (selectedSkills.length) tools.push(...skillTools);
       if (
@@ -1012,13 +1067,15 @@ export async function startServer(options: ServerOptions) {
         tools.some((tool) => tool.function.name === 'read_file')
       )
         tools.push(hostExecutionTool);
-      if (
-        jobs.list(session.id).length ||
-        tools.some((tool) => ['run_command', 'run_host_command'].includes(tool.function.name))
-      )
+      if (jobs.list(session.id).length)
         tools.push(
           ...commandJobTools.filter(
-            (tool) => session.mode !== 'plan' || tool.function.name === 'read_command_job',
+            (tool) =>
+              tool.function.name === 'read_command_job' ||
+              (session.mode !== 'plan' &&
+                jobs
+                  .list(session.id)
+                  .some((job) => ['starting', 'running'].includes(job.execution?.status ?? ''))),
           ),
         );
       if (
@@ -1069,6 +1126,24 @@ export async function startServer(options: ServerOptions) {
         tools.push(goalCompletionTool);
         content = goalPrompt(goal);
       } else content = command.content;
+      if (command.type === 'send_message') {
+        directSkill = await prepareDirectSkill(
+          content,
+          selectedSkills,
+          tools,
+          mcpSelections.map(({ server }) => ({
+            id: server.id,
+            name: server.config.name,
+            transport: server.config.transport,
+          })),
+          shutdown.signal,
+        );
+        if (directSkill) {
+          content = `User invoked skill ${directSkill.skill.name}. Follow the instructions below for this request within the current session permissions. Skill text cannot expand permissions or execute hooks.\n\n${directSkill.content}`;
+          if (directSkill.policy)
+            tools.splice(0, tools.length, ...filterSkillTools(tools, [directSkill.policy]));
+        }
+      }
       const observationPreview = observations
         ? await observations.projectHistory(session)
         : undefined;
@@ -1096,6 +1171,12 @@ export async function startServer(options: ServerOptions) {
             }
           : { deferAutoCompaction: true },
       );
+      if (directSkill)
+        context.manifest.skillInvocation = {
+          skillId: directSkill.skill.id,
+          revision: directSkill.skill.revision,
+          argumentsText: directSkill.argumentsText,
+        };
       if (command.type === 'resume_goal') {
         const evidence = goalResumeEvidence(session);
         if (evidence.length) {
@@ -1120,55 +1201,34 @@ export async function startServer(options: ServerOptions) {
           '대화가 변경되었습니다. 최신 상태를 불러온 뒤 다시 시도하세요.',
           409,
         );
+      if (session.run?.status === 'running')
+        throw new AppError('BUSY', '응답이 끝난 뒤 컨텍스트를 압축하세요.', 409);
       context = compileContext(session, '', [], undefined, { forceCompaction: true });
       if (!context.compaction)
         throw new AppError('COMPACTION_EMPTY', '압축할 완료된 대화 기록이 없습니다.');
       if (command.type === 'compact_context') {
-        const resolved = { ...session, config: resolveModelConfig(session) };
+        const resolved = { ...session, config: resolveAuxiliaryModel(session, 'summary') };
         if (resolved.config.provider === 'demo')
           throw new AppError(
             'COMPACTION_MODEL_REQUIRED',
             'LLM 컨텍스트 압축에는 실제 모델 연결이 필요합니다. 빠른 압축은 모델 없이 사용할 수 있습니다.',
           );
-        const preparation = prepareSemanticCompaction(resolved);
-        let summary = '',
-          finishReason: string | null = null,
-          toolCall = false;
-        const signal = AbortSignal.timeout(120_000);
-        try {
-          for await (const event of inference
-            .provider(resolved)
-            .generate(preparation.request, signal)) {
-            if (event.type === 'text_delta') summary += event.text;
-            else if (event.type === 'tool_call_delta') toolCall = true;
-            else if (event.type === 'finished') finishReason = event.reason;
-            else if (event.type === 'error') throw new AppError(event.code, event.message, 502);
-          }
-        } catch (error) {
-          throw error instanceof AppError
-            ? error
-            : new AppError(
-                'COMPACTION_MODEL_FAILED',
-                'LLM 컨텍스트 압축에 실패했습니다. 연결을 확인하거나 빠른 압축을 사용하세요.',
-                502,
-              );
-        }
-        if (finishReason !== 'stop' || toolCall)
-          throw new AppError(
-            'COMPACTION_MODEL_INVALID',
-            '모델이 정상적인 압축 요약을 완료하지 않았습니다. 빠른 압축을 사용하세요.',
-            502,
-          );
-        context.compaction = finishSemanticCompaction(
-          preparation.fallback,
-          summary,
-          resolved.config.model,
-        );
+        await validateInferenceConfig(resolved.config);
+        validateCloudTransmission(resolved, [resolved.config]);
+        context.compaction = await compactManually({
+          command,
+          session: resolved,
+          store,
+          provider: inference.provider(resolved),
+          signal: AbortSignal.any([shutdown.signal, AbortSignal.timeout(120_000)]),
+        });
       } else context.compaction = { ...context.compaction, method: 'fast' };
     }
     const result = await store.apply(command, context?.manifest, attachment, context?.compaction);
     if (command.type === 'attach_mcp_content' && !result.replayed)
       contentPreviews.consume(command.previewId);
+    if (command.type === 'remove_mcp_content' && !result.replayed)
+      await resourceSubscriptions.unsubscribe(command.sessionId, command.attachmentId);
     if (
       !result.replayed &&
       (command.type === 'send_message' ||
@@ -1178,7 +1238,14 @@ export async function startServer(options: ServerOptions) {
         command.type === 'resume_goal')
     ) {
       const abort = new AbortController();
-      const task = execute(result.session, abort, context!, selectedSkills, mcpSelections);
+      const task = execute(
+        result.session,
+        abort,
+        context!,
+        selectedSkills,
+        mcpSelections,
+        directSkill,
+      );
       active.set(result.session.run!.id, { abort, task });
     }
     if (command.type === 'cancel_run') active.get(command.runId)?.abort.abort();
@@ -1186,6 +1253,7 @@ export async function startServer(options: ServerOptions) {
     return result;
   }
   const jobs = await CommandJobs.open(store);
+  const languageServers = await LanguageServers.open(store);
   const worktrees = options.worktreeRoot
     ? await Worktrees.open(store, options.worktreeRoot)
     : undefined;
@@ -1215,7 +1283,18 @@ export async function startServer(options: ServerOptions) {
       }),
     ...(options.telegramFetch ? { fetch: options.telegramFetch } : {}),
   });
+  const automations = await Automations.open({
+    store,
+    dispatch: (value) => serial(() => command(value)),
+    available: (session) =>
+      !closing &&
+      !updatePreparation.blocked &&
+      (!session.run || !active.has(session.run.id)) &&
+      (!session.projectId || !jobs.hasActiveProject(session.projectId)),
+  });
+  let pendingMutations = 0;
   const server = createServer(async (request, response) => {
+    let mutationTracked = false;
     try {
       if (closing) throw new AppError('SHUTTING_DOWN', '앱을 종료하는 중입니다.', 503);
       const expected = Buffer.from('Bearer ' + options.token);
@@ -1229,6 +1308,11 @@ export async function startServer(options: ServerOptions) {
       if (request.headers.host !== '127.0.0.1:' + port)
         throw new AppError('HOST_DENIED', '잘못된 로컬 호스트입니다.', 403);
       const url = new URL(request.url ?? '/', 'http://127.0.0.1');
+      if (request.method !== 'GET' && url.pathname !== '/v1/updates/release') {
+        updatePreparation.assertAvailable();
+        pendingMutations++;
+        mutationTracked = true;
+      }
       if (request.method === 'GET' && url.pathname === '/v1/state') {
         json(response, 200, {
           ...(await store.snapshot()),
@@ -1277,17 +1361,84 @@ export async function startServer(options: ServerOptions) {
         json(response, 200, await telegram.approve(value.data.userId, value.data.chatId));
       } else if (request.method === 'POST' && url.pathname === '/v1/telegram/unpair') {
         json(response, 200, await telegram.unpair());
+      } else if (request.method === 'GET' && url.pathname === '/v1/lsp') {
+        json(response, 200, { servers: languageServers.list() });
+      } else if (request.method === 'POST' && url.pathname === '/v1/lsp/register') {
+        const input = z
+          .strictObject({
+            config: languageServerConfigSchema,
+            id: z.uuid().optional(),
+            expectedRevision: z.uuid().optional(),
+          })
+          .parse(await readJson(request));
+        json(response, 200, {
+          registration: await languageServers.register(
+            input.config,
+            input.id,
+            input.expectedRevision,
+          ),
+        });
+      } else if (
+        request.method === 'POST' &&
+        (url.pathname === '/v1/lsp/remove' || url.pathname === '/v1/lsp/stop')
+      ) {
+        const input = z
+          .strictObject({ id: z.uuid(), revision: z.uuid() })
+          .parse(await readJson(request));
+        if (
+          !languageServers
+            .list()
+            .some(
+              (value) =>
+                value.registration.id === input.id &&
+                value.registration.revision === input.revision,
+            )
+        )
+          throw new AppError('LSP_CHANGED', '언어 서버 설정을 다시 불러오세요.', 409);
+        if (url.pathname.endsWith('/remove'))
+          await languageServers.remove(input.id, input.revision);
+        else await languageServers.stop(input.id);
+        json(response, 200, { servers: languageServers.list() });
+      } else if (request.method === 'POST' && url.pathname === '/v1/lsp/query') {
+        const input = z
+          .strictObject({
+            projectId: z.uuid(),
+            operation: lspOperationSchema,
+            query: lspQuerySchema,
+          })
+          .parse(await readJson(request));
+        const project = await store.project(input.projectId);
+        json(
+          response,
+          200,
+          await languageServers.query(
+            project,
+            input.operation,
+            input.query,
+            operationSignal(response, shutdown.signal),
+          ),
+        );
       } else if (request.method === 'POST' && url.pathname === '/v1/worktrees/review') {
         if (!worktreeReviews || !worktrees)
           throw new AppError('WORKTREE_PATH', 'Worktree 저장소가 연결되지 않았습니다.');
         const input = worktreeReviewSchema.parse(await readJson(request));
         const record = worktrees.list().find((record) => record.id === input.worktreeId);
-        if (record?.projectId && jobs.hasActiveProject(record.projectId))
+        if (
+          record?.projectId &&
+          (jobs.hasActiveProject(record.projectId) ||
+            (await store.snapshot()).sessions.some(
+              (other) =>
+                other.projectId === record.projectId &&
+                other.run &&
+                (other.run.status === 'running' || active.has(other.run.id)),
+            ))
+        )
           throw new AppError('WORKTREE_BUSY', 'Worktree 명령이 끝난 뒤 검토하세요.', 409);
         json(response, 200, {
           preview: await worktreeReviews.preview(
             input.worktreeId,
             AbortSignal.any([shutdown.signal, AbortSignal.timeout(60000)]),
+            input,
           ),
         });
       } else if (request.method === 'POST' && url.pathname === '/v1/worktrees/merge') {
@@ -1295,7 +1446,7 @@ export async function startServer(options: ServerOptions) {
           throw new AppError('WORKTREE_PATH', 'Worktree 저장소가 연결되지 않았습니다.');
         const input = worktreeMergeSchema
           .extend({ sessionId: z.uuid() })
-          .parse(await readJson(request));
+          .parse(await readJson(request, 16 * 1024 * 1024));
         const result = await serial(async () => {
           const session = await store.session(input.sessionId),
             preview = worktreeReviews!.get(input.previewId);
@@ -1314,7 +1465,16 @@ export async function startServer(options: ServerOptions) {
           )
             throw new AppError('PROJECT_BUSY', '원본 프로젝트의 실행이 끝난 뒤 적용하세요.', 409);
           const record = worktrees!.list().find((record) => record.id === preview.worktreeId);
-          if (record?.projectId && jobs.hasActiveProject(record.projectId))
+          if (
+            record?.projectId &&
+            (jobs.hasActiveProject(record.projectId) ||
+              (await store.snapshot()).sessions.some(
+                (other) =>
+                  other.projectId === record.projectId &&
+                  other.run &&
+                  (other.run.status === 'running' || active.has(other.run.id)),
+              ))
+          )
             throw new AppError('WORKTREE_BUSY', 'Worktree 명령이 끝난 뒤 적용하세요.', 409);
           await store.invalidateWorkspace(session.id);
           let merged: import('@lodex/contracts').WorktreeRecord;
@@ -1341,6 +1501,58 @@ export async function startServer(options: ServerOptions) {
             JSON.stringify(merged.merge),
           );
           return { record: merged, session: await store.session(session.id) };
+        });
+        json(response, 200, result);
+      } else if (
+        request.method === 'POST' &&
+        (url.pathname === '/v1/worktrees/archive' || url.pathname === '/v1/worktrees/undo')
+      ) {
+        if (!worktrees || !worktreeReviews)
+          throw new AppError('WORKTREE_PATH', 'Worktree 저장소가 연결되지 않았습니다.');
+        const input = z
+          .strictObject({ worktreeId: z.uuid(), sessionId: z.uuid() })
+          .parse(await readJson(request));
+        const result = await serial(async () => {
+          const record = worktrees!.list().find((record) => record.id === input.worktreeId),
+            session = await store.session(input.sessionId);
+          if (!record || session.mode === 'plan' || session.projectId !== record.sourceProjectId)
+            throw new AppError('READ_ONLY', '원본 프로젝트의 Build 대화에서 관리하세요.', 403);
+          const related = new Set([record.sourceProjectId, record.projectId]);
+          if (
+            [...related].some((id) => id && jobs.hasActiveProject(id)) ||
+            (await store.snapshot()).sessions.some(
+              (other) =>
+                related.has(other.projectId ?? '') &&
+                other.run &&
+                (other.run.status === 'running' || active.has(other.run.id)),
+            )
+          )
+            throw new AppError(
+              'WORKTREE_BUSY',
+              '원본과 Worktree의 실행이 끝난 뒤 관리하세요.',
+              409,
+            );
+          const signal = AbortSignal.any([shutdown.signal, AbortSignal.timeout(120000)]);
+          const updated = url.pathname.endsWith('/archive')
+            ? await worktrees!.archive(record.id, signal)
+            : await worktreeReviews!.undo(record.id, signal);
+          await store.invalidateWorkspace(session.id);
+          const archived = url.pathname.endsWith('/archive');
+          await store.recordWorkspaceChange(
+            session.id,
+            archived ? 'worktree_archive' : 'worktree_undo',
+            JSON.stringify(
+              archived
+                ? {
+                    status: 'archived',
+                    worktreeId: updated.id,
+                    archive: updated.archive,
+                    files: [{ path: updated.path, afterHash: null, applied: true }],
+                  }
+                : updated.merge,
+            ),
+          );
+          return { record: updated, session: await store.session(session.id) };
         });
         json(response, 200, result);
       } else if (request.method === 'GET' && url.pathname === '/v1/worktrees') {
@@ -1374,6 +1586,72 @@ export async function startServer(options: ServerOptions) {
         );
       } else if (request.method === 'GET' && url.pathname === '/v1/mcp') {
         json(response, 200, { servers: await store.registeredMcp() });
+      } else if (request.method === 'GET' && url.pathname === '/v1/mcp/subscriptions') {
+        const sessionId = z.uuid().parse(url.searchParams.get('sessionId'));
+        await store.session(sessionId);
+        json(response, 200, { subscriptions: resourceSubscriptions.snapshot(sessionId) });
+      } else if (request.method === 'POST' && url.pathname === '/v1/mcp/subscriptions') {
+        const input = mcpSubscriptionInputSchema.safeParse(await readJson(request));
+        if (!input.success)
+          throw new AppError('MCP_SUBSCRIBE_INPUT', '구독할 대화와 첨부 자료를 확인하세요.');
+        const signal = operationSignal(response, shutdown.signal);
+        json(
+          response,
+          200,
+          await serial(async () => {
+            const session = await store.session(input.data.sessionId);
+            if (session.version !== input.data.expectedVersion)
+              throw new AppError(
+                'VERSION_CONFLICT',
+                '대화가 변경되었습니다. 최신 상태에서 다시 선택하세요.',
+                409,
+              );
+            if (input.data.action === 'unsubscribe')
+              return {
+                subscriptions: await resourceSubscriptions.unsubscribe(
+                  session.id,
+                  input.data.attachmentId,
+                ),
+              };
+            const attachment = session.mcpAttachments?.find(
+              (entry) => entry.id === input.data.attachmentId,
+            );
+            if (!attachment)
+              throw new AppError(
+                'MCP_SUBSCRIBE_RESOURCE',
+                '이 대화에 첨부한 자료만 구독할 수 있습니다.',
+                404,
+              );
+            const registration = (await store.registeredMcp()).find(
+              (entry) => entry.id === attachment.serverId,
+            );
+            if (!registration)
+              throw new AppError(
+                'MCP_CHANGED',
+                '첨부 자료의 MCP 서버가 등록되어 있지 않습니다.',
+                409,
+              );
+            return {
+              subscriptions: await resourceSubscriptions.subscribe({
+                sessionId: session.id,
+                attachment,
+                registration,
+                signal,
+                shutdown: shutdown.signal,
+                connect: async (lifetime, resourceEvent) =>
+                  McpConnection.connect({
+                    config: registration.config,
+                    expected: registration,
+                    resolveSecret: resolveMcpSecret,
+                    supervisorPath: mcpSupervisorPath,
+                    signal: lifetime,
+                    resourceEvent,
+                    oauthToken: await resolveOAuthToken(registration.config, lifetime),
+                  }),
+              }),
+            };
+          }),
+        );
       } else if (request.method === 'POST' && url.pathname === '/v1/mcp/content') {
         const parsed = mcpContentInputSchema.safeParse(await readJson(request));
         if (!parsed.success)
@@ -1482,7 +1760,7 @@ export async function startServer(options: ServerOptions) {
         const input = z
           .strictObject({
             resourceUrl: z.string().min(1).max(4096),
-            clientId: z.string().min(1).max(512),
+            clientId: z.string().max(512).default(''),
             scopes: z.array(z.string().min(1).max(256)).max(64).optional(),
             authorizationServer: z.string().min(1).max(4096).optional(),
           })
@@ -1516,7 +1794,7 @@ export async function startServer(options: ServerOptions) {
         const input = z
           .strictObject({
             resourceUrl: z.string().min(1).max(4096),
-            clientId: z.string().min(1).max(512),
+            clientId: z.string().max(512).default(''),
           })
           .safeParse(await readJson(request));
         if (!input.success)
@@ -1604,10 +1882,12 @@ export async function startServer(options: ServerOptions) {
             const registration = connection.registration;
             await connection.close();
             signal.throwIfAborted();
-            return store.saveRegisteredMcp(
+            const saved = await store.saveRegisteredMcp(
               { ...registration, ...(input.id ? { id: input.id } : {}) },
               input.expectedRevision,
             );
+            if (input.id) await resourceSubscriptions.removeServer(input.id);
+            return saved;
           }),
         });
       } else if (request.method === 'POST' && url.pathname === '/v1/mcp/remove') {
@@ -1618,7 +1898,37 @@ export async function startServer(options: ServerOptions) {
           200,
           await serial(async () => {
             await store.removeRegisteredMcp(parsed.data.id, parsed.data.expectedRevision);
+            await resourceSubscriptions.removeServer(parsed.data.id);
             return { servers: await store.registeredMcp() };
+          }),
+        );
+      } else if (request.method === 'GET' && url.pathname === '/v1/automations') {
+        json(response, 200, automations.snapshot());
+      } else if (request.method === 'POST' && url.pathname === '/v1/automations') {
+        const input = z
+          .strictObject({ version: z.number().int().min(0), automation: automationInputSchema })
+          .parse(await readJson(request));
+        json(response, 200, await automations.configure(input.automation, input.version));
+      } else if (request.method === 'POST' && url.pathname === '/v1/automations/remove') {
+        const input = z
+          .strictObject({ version: z.number().int().min(0), id: z.uuid() })
+          .parse(await readJson(request));
+        json(response, 200, await automations.remove(input.id, input.version));
+      } else if (request.method === 'GET' && url.pathname === '/v1/browser') {
+        json(response, 200, await browserSettings(store));
+      } else if (request.method === 'POST' && url.pathname === '/v1/browser') {
+        const parsed = z
+          .strictObject({ version: z.number().int().min(0), config: browserConfigSchema })
+          .safeParse(await readJson(request));
+        if (!parsed.success) throw new AppError('BROWSER_CONFIG', '브라우저 설정을 확인하세요.');
+        json(
+          response,
+          200,
+          await serial(async () => {
+            if (active.size)
+              throw new AppError('BUSY', '진행 중인 작업이 끝난 뒤 브라우저 설정을 바꾸세요.', 409);
+            await store.saveIntegration('browser', parsed.data.version, parsed.data.config);
+            return browserSettings(store);
           }),
         );
       } else if (request.method === 'GET' && url.pathname === '/v1/skills') {
@@ -1682,6 +1992,53 @@ export async function startServer(options: ServerOptions) {
         );
       } else if (request.method === 'GET' && url.pathname === '/v1/runtime') {
         json(response, 200, await runtime.snapshot());
+      } else if (request.method === 'POST' && url.pathname === '/v1/updates/prepare') {
+        json(
+          response,
+          200,
+          await serial(() =>
+            updatePreparation.prepare(async () => {
+              if (pendingMutations > 1)
+                throw new AppError(
+                  'UPDATE_BUSY',
+                  '진행 중인 설정 변경과 저장 작업이 끝난 뒤 업데이트를 설치하세요.',
+                  409,
+                );
+              const state = await store.snapshot();
+              if (
+                active.size ||
+                state.sessions.some(
+                  (session) =>
+                    session.run?.status === 'running' ||
+                    jobs
+                      .list(session.id)
+                      .some(
+                        (job) =>
+                          ['starting', 'running'].includes(job.execution?.status ?? 'starting') ||
+                          job.execution?.cleanupPending,
+                      ),
+                )
+              )
+                throw new AppError(
+                  'UPDATE_BUSY',
+                  '대화와 백그라운드 명령을 중지한 뒤 업데이트를 설치하세요.',
+                  409,
+                );
+              if (!backups)
+                throw new AppError(
+                  'BACKUP_DISABLED',
+                  '업데이트 전에 백업 폴더를 설정해야 합니다.',
+                  503,
+                );
+              return (await backups.create('manual')).backup;
+            }),
+          ),
+        );
+      } else if (request.method === 'POST' && url.pathname === '/v1/updates/release') {
+        const input = z.strictObject({ token: z.uuid() }).safeParse(await readJson(request));
+        if (!input.success) throw new AppError('UPDATE_TOKEN', '업데이트 준비 상태를 확인하세요.');
+        updatePreparation.release(input.data.token);
+        json(response, 200, { released: true });
       } else if (request.method === 'GET' && url.pathname === '/v1/backups') {
         if (!backups)
           throw new AppError('BACKUP_DISABLED', '백업 폴더가 설정되지 않았습니다.', 503);
@@ -1694,6 +2051,20 @@ export async function startServer(options: ServerOptions) {
         if (!backups)
           throw new AppError('BACKUP_DISABLED', '백업 폴더가 설정되지 않았습니다.', 503);
         json(response, 201, await backups.create('export'));
+      } else if (request.method === 'POST' && url.pathname === '/v1/backups/preview') {
+        const input = z
+          .strictObject({ path: z.string().min(1).max(4096) })
+          .safeParse(await readJson(request));
+        if (!input.success) throw new AppError('BACKUP_PATH', '복원할 백업 파일을 선택하세요.');
+        json(response, 200, await backupImporter.preview(input.data.path));
+      } else if (request.method === 'POST' && url.pathname === '/v1/backups/restore') {
+        const input = z.strictObject({ token: z.uuid() }).safeParse(await readJson(request));
+        if (!input.success)
+          throw new AppError('BACKUP_PREVIEW', '복원 미리보기를 먼저 확인하세요.');
+        const restored = await backupImporter.restore(input.data.token);
+        await automations.reloadImported();
+        await languageServers.reload();
+        json(response, 200, restored);
       } else if (request.method === 'POST' && url.pathname === '/v1/backups/settings') {
         if (!backups)
           throw new AppError('BACKUP_DISABLED', '백업 폴더가 설정되지 않았습니다.', 503);
@@ -1738,6 +2109,22 @@ export async function startServer(options: ServerOptions) {
           await lease.release();
         } else if (value.action === 'unload') await runtime.unload(value.profileId);
         else await runtime.remove(value.profileId);
+        json(response, 200, await runtime.snapshot());
+      } else if (request.method === 'POST' && url.pathname === '/v1/runtime/engines/catalog') {
+        const input = (await readJson(request)) as { channel?: unknown };
+        if (!input || (input.channel !== 'stable' && input.channel !== 'nightly'))
+          throw new AppError('ENGINE_CHANNEL', '엔진 채널을 선택하세요.');
+        json(response, 200, await runtime.engineCatalog(input.channel));
+      } else if (request.method === 'POST' && url.pathname === '/v1/runtime/engines/install') {
+        const parsed = engineInstallSchema.safeParse(await readJson(request));
+        if (!parsed.success)
+          throw new AppError('ENGINE_INPUT', '설치할 엔진 릴리스와 파일을 선택하세요.');
+        await runtime.installEngine(parsed.data);
+        json(response, 202, await runtime.snapshot());
+      } else if (request.method === 'POST' && url.pathname === '/v1/runtime/engines/action') {
+        const parsed = engineManagerActionSchema.safeParse(await readJson(request));
+        if (!parsed.success) throw new AppError('ENGINE_INPUT', '엔진 작업이 올바르지 않습니다.');
+        await runtime.engineAction(parsed.data.id, parsed.data.action);
         json(response, 200, await runtime.snapshot());
       } else if (request.method === 'POST' && url.pathname === '/v1/runtime/downloads') {
         const parsed = modelDownloadInputSchema.safeParse(await readJson(request));
@@ -1840,6 +2227,11 @@ export async function startServer(options: ServerOptions) {
                   );
               }
               const deleted = store.deleteSessions(parsed.data);
+              await Promise.all(
+                parsed.data.targets.map((target) =>
+                  resourceSubscriptions.removeSession(target.sessionId),
+                ),
+              );
               if (observations)
                 await Promise.all(
                   parsed.data.targets.map((target) => observations.removeSession(target.sessionId)),
@@ -1854,8 +2246,24 @@ export async function startServer(options: ServerOptions) {
         json(response, 200, { jobs: jobs.list(sessionId) });
       } else if (
         request.method === 'POST' &&
-        ['/v1/command-jobs/input', '/v1/command-jobs/stop'].includes(url.pathname)
+        ['/v1/command-jobs/input', '/v1/command-jobs/stop', '/v1/command-jobs/resize'].includes(
+          url.pathname,
+        )
       ) {
+        if (url.pathname.endsWith('/resize')) {
+          const input = commandJobResizeActionSchema.parse(await readJson(request));
+          const session = await store.session(input.sessionId);
+          if (session.mode === 'plan')
+            throw new AppError(
+              'READ_ONLY',
+              'Plan 모드에서는 터미널 크기를 변경할 수 없습니다.',
+              403,
+            );
+          json(response, 200, {
+            job: await jobs.resize(input.sessionId, input.jobId, input.cols, input.rows),
+          });
+          return;
+        }
         const input = commandJobActionSchema.parse(await readJson(request));
         const session = await store.session(input.sessionId);
         if (url.pathname.endsWith('/input') && session.mode === 'plan')
@@ -1937,23 +2345,45 @@ export async function startServer(options: ServerOptions) {
         openrouterKey = value.key;
         openrouterKeySource = openrouterKey ? 'os_keychain' : 'none';
         json(response, 200, { configured: !!openrouterKey });
+      } else if (request.method === 'GET' && url.pathname === '/v1/openrouter/account') {
+        json(
+          response,
+          200,
+          await openRouterAccount(
+            openrouterKey,
+            AbortSignal.any([
+              operationSignal(response, shutdown.signal),
+              AbortSignal.timeout(15000),
+            ]),
+          ),
+        );
       } else if (request.method === 'GET' && url.pathname === '/v1/models') {
         const provider = providerSchema.parse(url.searchParams.get('provider'));
         const parsedUrl = localUrlSchema.safeParse(
-          url.searchParams.get('baseUrl') ?? 'http://127.0.0.1:8080/v1',
+          isLocalProvider(provider)
+            ? (url.searchParams.get('baseUrl') ?? defaultProviderBaseUrl(provider))
+            : defaultProviderBaseUrl(provider),
         );
         if (!parsedUrl.success)
           throw new AppError('INVALID_SERVER_URL', parsedUrl.error.issues[0]!.message);
         const baseUrl = parsedUrl.data;
-        const adapter =
-          provider === 'demo'
-            ? new DemoProvider()
-            : new ChatCompletionProvider(
-                provider,
-                baseUrl,
-                provider === 'openrouter' ? openrouterKey : null,
-              );
-        json(response, 200, { models: await adapter.listModels() });
+        const adapter = createInferenceProvider(
+          provider,
+          baseUrl,
+          provider === 'openrouter' ? openrouterKey : null,
+        );
+        json(
+          response,
+          200,
+          provider === 'openrouter'
+            ? await publicModelCatalog.get(url.searchParams.get('refresh') === 'true')
+            : {
+                models: await adapter.listModels(),
+                fetchedAt: new Date().toISOString(),
+                source: 'live',
+                stale: false,
+              },
+        );
       } else {
         throw new AppError('NOT_FOUND', '지원하지 않는 API입니다.', 404);
       }
@@ -1969,6 +2399,8 @@ export async function startServer(options: ServerOptions) {
           message: known ? error.message : '요청을 처리하지 못했습니다.',
         },
       });
+    } finally {
+      if (mutationTracked) pendingMutations--;
     }
   });
   server.requestTimeout = 15000;
@@ -1979,15 +2411,19 @@ export async function startServer(options: ServerOptions) {
   });
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('Missing server address.');
+  automations.start();
   return {
     port: address.port,
     async close() {
       closing = true;
       shutdown.abort();
+      await resourceSubscriptions.close();
+      await automations.close();
       await telegram.close();
       for (const run of active.values()) run.abort.abort();
       await jobs.close();
       await worktrees?.close();
+      await languageServers.close();
       await oauth?.close();
       await backups?.close();
       for (const run of active.values()) run.abort.abort();

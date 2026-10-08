@@ -56,6 +56,42 @@ async function project() {
   return inspectProject(dir);
 }
 describe('owned Docker command execution', () => {
+  it('uses an isolated Docker TTY with terminal dimensions and sanitized host CLI environment', async () => {
+    const selected = await project(),
+      base = fixture();
+    let tty = false;
+    const cli: DockerCli = async (args, signal, input, progress, inputControl, terminal) => {
+      if (args.includes('create')) {
+        expect(args).toContain('--tty');
+        expect(args).toContain('TERM=xterm-256color');
+        expect(args).toContain('COLUMNS=115');
+        expect(args).toContain('--read-only');
+        expect(args).toContain('none');
+      }
+      if (args.includes('start')) {
+        tty = true;
+        expect(terminal).toMatchObject({ cols: 115, rows: 32 });
+        expect(inputControl).toBeTypeOf('function');
+      } else expect(terminal).toBeUndefined();
+      return base.cli(args, signal, input, progress, inputControl, terminal);
+    };
+    const result = await executeCommand({
+      project: selected,
+      config: { ...defaultExecutionConfig(), backend: 'docker', projectAccess: true },
+      argumentsJson: JSON.stringify({ command: 'fixture', pty: true, cols: 115, rows: 32 }),
+      signal: AbortSignal.timeout(5000),
+      record: async () => {},
+      inputControl: () => () => {},
+      cli,
+    });
+    expect(tty).toBe(true);
+    expect(result).toMatchObject({
+      status: 'completed',
+      environment: 'docker',
+      terminal: { cols: 115, rows: 32 },
+      cleanupPending: false,
+    });
+  });
   it('records a host execution with an absolute cwd and bounded adapter result', async () => {
     const selected = await project();
     const outside = await mkdtemp(join(tmpdir(), 'lodex-host-cwd-'));
@@ -76,6 +112,38 @@ describe('owned Docker command execution', () => {
     });
     expect(result).toMatchObject({ environment: 'host', status: 'completed', output: 'ok' });
     expect(records.at(-1)).toMatchObject({ environment: 'host', status: 'completed' });
+  });
+  it('publishes the last output chunk while an interactive command is waiting for input', async () => {
+    const selected = await project();
+    let ready!: () => void;
+    const published = new Promise<void>((resolve) => {
+      ready = resolve;
+    });
+    const result = await executeHostCommand({
+      project: selected,
+      argumentsJson: JSON.stringify({ command: 'fixture', timeoutMs: 2000 }),
+      signal: AbortSignal.timeout(2000),
+      record: async (execution) => {
+        if (execution.status === 'running' && execution.output.includes('TERMINAL_READY')) ready();
+      },
+      runner: async (_command, _cwd, _signal, _input, progress) => {
+        progress!('\x1b[?9001h', '\x1b[?9001h');
+        progress!('\x1b[?9001hTERMINAL_READY', 'TERMINAL_READY');
+        let timer: NodeJS.Timeout | undefined;
+        try {
+          await Promise.race([
+            published,
+            new Promise((_, reject) => {
+              timer = setTimeout(() => reject(new Error('Final prompt was never published')), 1000);
+            }),
+          ]);
+        } finally {
+          clearTimeout(timer);
+        }
+        return { code: 0, output: 'TERMINAL_READY', truncated: false };
+      },
+    });
+    expect(result.status).toBe('completed');
   });
   it('uses a sanitized process environment and literal argv with bounded UTF-8 output', async () => {
     expect(

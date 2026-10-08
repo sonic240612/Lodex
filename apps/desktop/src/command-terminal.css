@@ -1,0 +1,25 @@
+.command-terminal {
+  height: 320px;
+  min-height: 160px;
+  overflow: hidden;
+  resize: vertical;
+  border-radius: 10px;
+  background: #101010;
+  padding: 10px;
+  margin: 10px 0;
+}
+.command-terminal .xterm {
+  height: 100%;
+}
+.command-terminal .xterm-viewport {
+  border-radius: 6px;
+}
+.command-terminal .xterm textarea {
+  min-height: 0;
+  padding: 0;
+  border: none;
+  box-shadow: none;
+}
+.command-terminal .xterm-helper-textarea:focus {
+  outline: none;
+}

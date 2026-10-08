@@ -226,7 +226,7 @@ mcp_servers:
     for (const source of [
       { url: 'https://example.com/mcp', headers: { Authorization: 'private-key-fixture' } },
       { url: 'https://example.com/mcp', disabled: true },
-      { url: 'https://example.com/mcp', oauth: {} },
+      { url: 'https://example.com/mcp', oauth: { clientSecret: 'private-key-fixture' } },
       { command: 'npx', args: ['unreviewed-package'] },
     ]) {
       const values = importMcpConfigurations(JSON.stringify({ mcpServers: { fixture: source } }));
@@ -235,5 +235,16 @@ mcp_servers:
       expect(values[0]!.warnings).toEqual([]);
       expect(JSON.stringify(values)).not.toContain('private-key-fixture');
     }
+  });
+  it('imports an explicit dynamic OAuth configuration without starting registration', () => {
+    const [value] = importMcpConfigurations(
+      JSON.stringify({
+        mcpServers: {
+          fixture: { url: 'https://example.com/mcp', oauth: {} },
+        },
+      }),
+    );
+    expect(value?.config).toMatchObject({ transport: 'http', oauth: { clientId: '' } });
+    expect(value?.issues).toEqual([]);
   });
 });

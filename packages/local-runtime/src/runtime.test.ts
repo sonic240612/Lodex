@@ -9,6 +9,7 @@ import {
   type LocalProfile,
   type LocalProfileInput,
   type RuntimeSettings,
+  type RuntimeResources,
 } from '@lodex/contracts';
 import {
   RuntimeManager,
@@ -55,7 +56,26 @@ function profileInput(profile: LocalProfile): LocalProfileInput {
   const { id, version, name, enginePath, modelPath, settings, vramReservationMb } = profile;
   return { id, expectedVersion: version, name, enginePath, modelPath, settings, vramReservationMb };
 }
-async function fixture() {
+function measuredMemory(freeVramMb = 128, freeRamMb = 8192): RuntimeResources {
+  return {
+    measuredAt: new Date().toISOString(),
+    systemRamTotalMb: 16384,
+    systemRamUsedMb: 16384 - freeRamMb,
+    systemRamFreeMb: freeRamMb,
+    gpuSource: 'nvidia-smi',
+    gpus: [
+      {
+        index: 0,
+        name: 'Test GPU',
+        totalVramMb: 128,
+        usedVramMb: 128 - freeVramMb,
+        freeVramMb,
+        utilizationPercent: 0,
+      },
+    ],
+  };
+}
+async function fixture(resourceProbe?: () => Promise<RuntimeResources>) {
   const dir = await mkdtemp(join(tmpdir(), 'lodex-engine 한글-'));
   dirs.push(dir);
   const script = join(dir, 'fixture.cjs');
@@ -67,6 +87,7 @@ const server=http.createServer((req,res)=>{ if(req.headers.authorization!=='Bear
 if(req.url==='/secret-prefix') process.stdout.write('stream='+key.slice(0,32));
 if(req.url==='/secret-suffix') process.stdout.write(key.slice(32)+'\\n');
 if(req.url==='/long-secret') process.stdout.write('x'.repeat(17000)+key+'y'.repeat(15990)+'\\n');
+if(req.url==='/oom') process.stderr.write('CUDA error: out of memory\\n');
 res.writeHead(200,{'Content-Type':'application/json'}); res.end(JSON.stringify({status:'ok'})); });
 server.listen(Number(arg('--port')),arg('--host'));`,
   );
@@ -116,11 +137,87 @@ server.listen(Number(arg('--port')),arg('--host'));`,
       settings = { ...value, version: settings.version + 1 };
     },
   };
-  const manager = new RuntimeManager(repo, resolve('apps/daemon/dist/supervisor.cjs'));
+  const manager = new RuntimeManager(
+    repo,
+    resolve('apps/daemon/dist/supervisor.cjs'),
+    resourceProbe ? { resourceProbe } : {},
+  );
   managers.push(manager);
   return { profile, repo, manager, dir, script };
 }
 describe('managed local engines', () => {
+  it('rejects loads before spawning when actual VRAM or RAM is occupied by other applications', async () => {
+    let resources = measuredMemory(20);
+    const { manager, profile, repo } = await fixture(async () => ({
+      ...resources,
+      measuredAt: new Date().toISOString(),
+    }));
+    await expect(manager.acquire(profile.id, AbortSignal.timeout(5000))).rejects.toMatchObject({
+      code: 'VRAM_AVAILABLE',
+    });
+    expect((await manager.snapshot()).instances).toEqual([]);
+    resources = measuredMemory(128, 2050);
+    await expect(manager.acquire(profile.id, AbortSignal.timeout(5000))).rejects.toMatchObject({
+      code: 'RAM_AVAILABLE',
+    });
+    const cpu = {
+      ...profile,
+      vramReservationMb: 0,
+      settings: { ...profile.settings, gpuLayers: 0 as const },
+    };
+    await repo.saveLocalProfile(cpu);
+    await expect(manager.acquire(cpu.id, AbortSignal.timeout(5000))).rejects.toMatchObject({
+      code: 'RAM_AVAILABLE',
+    });
+    expect((await manager.snapshot()).instances).toEqual([]);
+  });
+  it('remeasures physical free memory after unloading only an idle managed model', async () => {
+    let calls = 0;
+    const { manager, profile, repo } = await fixture(async () =>
+      measuredMemory(++calls === 2 ? 20 : 128),
+    );
+    const first = await manager.acquire(profile.id, AbortSignal.timeout(5000));
+    await first.release();
+    const second = { ...profile, id: crypto.randomUUID(), name: 'Second model' };
+    await repo.saveLocalProfile(second);
+    const lease = await manager.acquire(second.id, AbortSignal.timeout(5000));
+    const state = await manager.snapshot();
+    expect(state.instances.find((instance) => instance.profileId === profile.id)).toMatchObject({
+      status: 'stopped',
+      reservedRamMb: 0,
+    });
+    expect(state.instances.find((instance) => instance.profileId === second.id)).toMatchObject({
+      status: 'ready',
+      gpuIndex: 0,
+      reservedRamMb: 257,
+    });
+    expect(calls).toBeGreaterThanOrEqual(3);
+    await lease.release();
+  });
+  it('stops its own engine after OOM and refuses automatic restart until explicitly unloaded', async () => {
+    const { manager, profile } = await fixture(async () => measuredMemory());
+    const lease = await manager.acquire(profile.id, AbortSignal.timeout(5000));
+    await fetch(lease.baseUrl.replace('/v1', '/oom'), {
+      headers: { Authorization: `Bearer ${lease.key}` },
+      signal: AbortSignal.timeout(5000),
+    }).catch(() => undefined);
+    await expect
+      .poll(async () => (await manager.snapshot()).instances[0])
+      .toMatchObject({
+        status: 'failed',
+        errorCode: 'OUT_OF_MEMORY',
+        reservedVramMb: 0,
+        reservedRamMb: 0,
+      });
+    await lease.release();
+    await expect(manager.acquire(profile.id, AbortSignal.timeout(5000))).rejects.toMatchObject({
+      code: 'MODEL_OOM',
+    });
+    await manager.unload(profile.id);
+    const retry = await manager.acquire(profile.id, AbortSignal.timeout(5000));
+    expect((await manager.snapshot()).instances[0]?.status).toBe('ready');
+    await retry.release();
+  });
   it('reads bounded model identity, tokenizer, context and chat-template GGUF metadata', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'lodex-gguf-'));
     dirs.push(dir);

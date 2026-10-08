@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -12,7 +12,12 @@ import {
   type Command,
 } from '@lodex/contracts';
 import { Store } from '@lodex/storage';
+import { inspectSkillDirectory } from '@lodex/skills';
 import { Telegram } from './telegram';
+import { telegramChunks } from './telegram-output';
+
+// Real per-chat delivery pacing is retained in tests, without contacting Telegram.
+vi.setConfig({ expect: { poll: { timeout: 5000 } } });
 
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -46,6 +51,7 @@ class Bot {
     if (method !== 'getUpdates') throw new Error('Unexpected bot method');
     this.offsets.push(body.offset);
     if (this.pending.length) return ok(this.pending.shift());
+    if (body.timeout === 0) return ok([]);
     return new Promise<Response>((resolve, reject) => {
       const finish = (updates: unknown[]) => {
         this.waiting = undefined;
@@ -137,6 +143,7 @@ async function fixture(
     bot.sent = [];
   };
   return {
+    dir,
     bot,
     session,
     dispatch,
@@ -159,6 +166,134 @@ async function fixture(
 }
 
 describe('durable Telegram channel', () => {
+  it('forwards paired direct skill requests and preserves selections after restart', async () => {
+    const app = await fixture();
+    const root = join(app.dir, 'review');
+    await mkdir(root);
+    await writeFile(
+      join(root, 'SKILL.md'),
+      '---\nname: review\ndescription: Review selected files.\ndisable-model-invocation: true\n---\nReview $ARGUMENTS.\n',
+    );
+    const skill = await inspectSkillDirectory(root);
+    await app.store.saveRegisteredSkill(skill);
+    let current = await app.store.session(app.session.id);
+    await app.store.apply(
+      makeCommand({
+        type: 'configure_skills',
+        sessionId: current.id,
+        expectedVersion: current.version,
+        skills: [{ id: skill.id, revision: skill.revision }],
+        skillCloudConsent: false,
+      }),
+    );
+    await app.pair();
+    await app.manager.configure({
+      enabled: true,
+      sessionId: current.id,
+      allowBuild: true,
+      transmissionConsent: true,
+    });
+    await app.reopen();
+    app.bot.push([update(2, '/review source.ts')]);
+    await expect.poll(() => app.dispatch.mock.calls.length).toBe(1);
+    expect(app.dispatch.mock.calls[0]![0]).toMatchObject({
+      type: 'send_message',
+      content: '/review source.ts',
+      mode: 'build',
+      actor: 'telegram',
+    });
+    current = await app.store.session(current.id);
+    await app.store.updateRun({
+      sessionId: current.id,
+      runId: current.run!.id,
+      text: 'done',
+      status: 'completed',
+    });
+    app.manager.wake();
+    app.bot.push([update(3, '/plan /skill review inspect')]);
+    await expect.poll(() => app.dispatch.mock.calls.length).toBe(2);
+    expect(app.dispatch.mock.calls[1]![0]).toMatchObject({
+      type: 'send_message',
+      content: '/skill review inspect',
+      mode: 'plan',
+      actor: 'telegram',
+    });
+    app.bot.push([update(4, '/review while-running')]);
+    await expect
+      .poll(() => app.bot.sent.some((message) => message.text.includes('실행이 끝난 뒤')))
+      .toBe(true);
+    expect(app.dispatch).toHaveBeenCalledTimes(2);
+  });
+
+  it('delivers the complete final response in order without repeating the model request after restart', async () => {
+    const app = await fixture();
+    await app.pair();
+    app.bot.push([update(2, '/plan investigate')]);
+    await expect.poll(() => app.dispatch.mock.calls.length).toBe(1);
+    const current = await app.store.session(app.session.id);
+    const progress = '중간 조사 내용\n'.repeat(2000);
+    const final = '완료한 최종 답변 🦔\n'.repeat(500) + token + '\n최종 결론';
+    await app.store.updateRun({
+      sessionId: current.id,
+      runId: current.run!.id,
+      text: progress + final,
+      finalResponseOffset: progress.length,
+      status: 'completed',
+    });
+    app.manager.wake();
+    const expected = telegramChunks('[complete]\n' + final, token);
+    await expect
+      .poll(() => app.bot.sent.filter((message) => message.text.startsWith('[1/')).length)
+      .toBe(1);
+    await app.reopen();
+    await expect
+      .poll(() => app.bot.sent.filter((message) => /^\[\d+\/\d+\]/.test(message.text)).length, {
+        timeout: 10000,
+      })
+      .toBe(expected.length);
+    expect(
+      app.bot.sent
+        .filter((message) => /^\[\d+\/\d+\]/.test(message.text))
+        .map((message) => message.text),
+    ).toEqual(expected);
+    expect(
+      app.bot.sent.some(
+        (message) => message.text.includes('중간 조사 내용') || message.text.includes(token),
+      ),
+    ).toBe(false);
+    expect(app.dispatch).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify((await app.store.integration('telegram'))?.document)).not.toContain(
+      token,
+    );
+  });
+
+  it('keeps multipart delivery ordered through rate limits and skips uncertain parts after restart', async () => {
+    const app = await fixture();
+    await app.pair();
+    await app.manager.close();
+    const saved = (await app.store.integration('telegram'))!;
+    const state = saved.document as any;
+    const groupId = crypto.randomUUID();
+    state.nextSendAt = 0;
+    state.outbox = ['sending', 'queued', 'queued'].map((status, index) => ({
+      id: crypto.randomUUID(),
+      groupId,
+      epoch: state.epoch,
+      chatId: 100,
+      sessionId: app.session.id,
+      text: `part ${index + 1}`,
+      status,
+      retryAt: 0,
+    }));
+    await app.store.saveIntegration('telegram', saved.version, state);
+    app.bot.failures = ['limited'];
+    await app.reopen();
+    await expect.poll(() => app.bot.sent.length).toBe(3);
+    expect(app.bot.sent.map((message) => message.text)).toEqual(['part 2', 'part 2', 'part 3']);
+    expect(app.manager.status().unknownDeliveries).toBe(1);
+    expect(app.dispatch).not.toHaveBeenCalled();
+  });
+
   it('queues paired remote instructions in the active run instead of starting another request', async () => {
     const app = await fixture();
     await app.pair();

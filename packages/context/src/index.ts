@@ -3,6 +3,7 @@ import {
   AppError,
   modelConfigSchema,
   resolveModelConfig,
+  resolveAuxiliaryModel,
   sameModelIdentity,
   planSchema,
   type ContextManifest,
@@ -254,7 +255,7 @@ export function prepareSemanticCompaction(session: Session): SemanticCompactionP
           `[${message.role === 'user' ? 'User' : 'Assistant'} message ${index + 1}]\n${compactLine(message.content, 12_000)}`,
       ),
   ];
-  const config = modelConfigSchema.parse(resolveModelConfig(session));
+  const config = modelConfigSchema.parse(resolveAuxiliaryModel(session, 'summary'));
   const maxTokens = Math.max(
     1,
     Math.min(

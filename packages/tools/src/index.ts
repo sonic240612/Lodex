@@ -28,6 +28,7 @@ export {
 export { hostFileTools, runHostFileTool, hostWriteInput } from './host-files';
 export { webFetchTool, fetchWebPage } from './web';
 export { webSearchTool, searchWeb } from './web-search';
+export { BrowserSession, browserTool, browserActionSchema } from './browser';
 export { readProjectInstructions, type ProjectInstructions } from './instructions';
 export {
   withFusedFileQueue,

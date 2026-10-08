@@ -23,6 +23,7 @@ import type {
   SkillResource,
 } from './types';
 export type * from './types';
+export { expandSkillBody, skillArguments, resolveSkillInvocation } from './invocation';
 export { SKILL_LIMITS } from './files';
 export { discoverSkillDirectories } from './discovery';
 
@@ -247,6 +248,7 @@ export async function readSkill(
   if (result.bytes > limit)
     throw new AppError('SKILL_SIZE', '스킬 지침이 읽기 예산을 초과했습니다.');
   return {
+    toolPolicy: normalizeSkill(result.text, skill.source.rootName, skill.dialect, []).toolPolicy,
     text: result.text,
     body: splitSkill(result.text, skill.dialect).body,
     provenance: provenance(skill, 'SKILL.md', result),
@@ -273,12 +275,17 @@ export async function readSkillResource(
   const normalized = cleanRelative(path);
   const file = skill.files.find((item) => item.path === normalized);
   if (!file) throw new AppError('SKILL_RESOURCE', '등록된 스킬 리소스가 아닙니다.');
-  await currentEntry(skill, signal);
+  const instructions = await currentEntry(skill, signal);
   const result = await readRegisteredFile(
     skill.source,
     file,
     readLimit(options.maxBytes, SKILL_LIMITS.resourceBytes),
     signal,
   );
-  return { text: result.text, provenance: provenance(skill, normalized, result) };
+  return {
+    toolPolicy: normalizeSkill(instructions.text, skill.source.rootName, skill.dialect, [])
+      .toolPolicy,
+    text: result.text,
+    provenance: provenance(skill, normalized, result),
+  };
 }

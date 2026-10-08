@@ -20,6 +20,8 @@ import {
   type SecretSource,
 } from '@lodex/contracts';
 import type { Store } from '@lodex/storage';
+import { telegramAnswer, telegramChunks } from './telegram-output';
+import { resolveSkillInvocation } from '@lodex/skills';
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const peerSchema = z.object({
@@ -50,6 +52,7 @@ type Inbox = {
 };
 type Outbox = {
   id: string;
+  groupId?: string;
   epoch: number;
   chatId: number;
   text: string;
@@ -69,6 +72,7 @@ interface Journal {
   inbox: Inbox[];
   outbox: Outbox[];
   unknownDeliveries: number;
+  nextSendAt?: number;
   notifiedApprovalId?: string;
   notifiedElicitationId?: string;
 }
@@ -300,25 +304,26 @@ export class Telegram {
   }
   private enqueue(text: string) {
     if (!this.state.owner) return;
-    if (this.state.outbox.filter((item) => item.status === 'queued').length >= 64)
+    const pendingGroups = new Set(
+      this.state.outbox
+        .filter((item) => item.status === 'queued' || item.status === 'sending')
+        .map((item) => item.groupId ?? item.id),
+    );
+    if (pendingGroups.size >= 64)
       throw new AppError('TELEGRAM_QUEUE', 'Telegram 발신 대기 한도에 도달했습니다.');
     // Plain text only: model text cannot create Telegram markup or trigger URL previews.
-    const full = this.token ? text.replaceAll(this.token, '[redacted]') : text;
-    let clean = full;
-    if (full.length > 3500) {
-      clean =
-        full.slice(0, 3400).replace(/[\uD800-\uDBFF]$/, '') +
-        '\n[일부 생략 · 전체 내용은 Lodex에서 확인]';
-    }
-    this.state.outbox.push({
-      id: crypto.randomUUID(),
-      epoch: this.state.epoch,
-      chatId: this.state.owner.chatId,
-      sessionId: this.state.config.sessionId,
-      text: clean,
-      status: 'queued',
-      retryAt: 0,
-    });
+    const groupId = crypto.randomUUID();
+    for (const part of telegramChunks(text, this.token))
+      this.state.outbox.push({
+        id: crypto.randomUUID(),
+        groupId,
+        epoch: this.state.epoch,
+        chatId: this.state.owner.chatId,
+        sessionId: this.state.config.sessionId,
+        text: part,
+        status: 'queued',
+        retryAt: 0,
+      });
   }
   private async api(
     method: 'getMe' | 'getUpdates' | 'sendMessage',
@@ -441,10 +446,20 @@ export class Telegram {
       let updates: unknown;
       const pollAbort = new AbortController();
       this.pollAbort = pollAbort;
+      const next = this.state.outbox.find((item) => item.status === 'queued');
+      const timeout = next
+        ? Math.min(
+            10,
+            Math.max(
+              0,
+              Math.floor((Math.max(next.retryAt, this.state.nextSendAt ?? 0) - Date.now()) / 1000),
+            ),
+          )
+        : 10;
       try {
         updates = await this.api(
           'getUpdates',
-          { offset: this.state.offset, limit: 50, timeout: 10, allowed_updates: ['message'] },
+          { offset: this.state.offset, limit: 50, timeout, allowed_updates: ['message'] },
           AbortSignal.any([signal, pollAbort.signal]),
         );
         failures = 0;
@@ -555,15 +570,7 @@ export class Telegram {
         }
         const message = session.messages.find((message) => message.id === item.run!.messageId);
         if (message?.status === 'streaming') continue;
-        this.enqueue(
-          message
-            ? '[' +
-                message.status +
-                ']\n' +
-                (message.content || '') +
-                (message.error ? '\n' + message.error : '')
-            : '대화가 변경되어 결과를 찾지 못했습니다.',
-        );
+        this.enqueue(message ? telegramAnswer(message) : '대화가 변경되어 결과를 찾지 못했습니다.');
         item.status = 'done';
         await this.save();
         continue;
@@ -661,7 +668,10 @@ export class Telegram {
                 (approval ? '\n승인 대기: ' + this.approvalSummary(approval) : '') +
                 (elicitation ? '\nMCP 입력 대기: ' + elicitation.elicitation!.message : '') +
                 '\n' +
-                (session.messages.filter((m) => m.role === 'assistant').at(-1)?.content ?? ''),
+                (() => {
+                  const message = session.messages.filter((m) => m.role === 'assistant').at(-1);
+                  return message ? telegramAnswer(message) : '';
+                })(),
             );
             item.status = 'done';
             await this.save();
@@ -693,7 +703,8 @@ export class Telegram {
           }
           if (text === '/help' || text === '/start') {
             this.enqueue(
-              '/ask 메시지 — Build 요청\n/plan 내용 — 이번 요청만 조사·계획\n/goal 목표 — 독립 목표 실행\n/resume — 중단된 /goal 계속\n/costs — OpenRouter 미확정 비용 조회·정산\n/run — 저장 계획 자동 실행\n/todo — 목표와 할 일 조회\n/todo goal 목표 | 완료 기준\n/todo add 할 일 | 완료 기준\n/todo done 번호 · /todo undo 번호 · /todo remove 번호\n/autopilot ask|auto|full — 승인 단계 변경\n/approve · /deny — 대기 작업 결정\n/answer JSON · /decline · /cancel-input — MCP 입력 결정\n/stop — 현재 실행 중지\n일반 텍스트도 Build 요청으로 전달됩니다. 원격 Build와 권한 변경은 Telegram 설정에서 허용해야 합니다.',
+              '/skill 스킬이름 인자 · /스킬이름 인자 — 이 대화에 선택한 스킬 실행\n/plan /skill 스킬이름 인자 — 읽기 전용 스킬 요청\n' +
+                '/ask 메시지 — Build 요청\n/plan 내용 — 이번 요청만 조사·계획\n/goal 목표 — 독립 목표 실행\n/resume — 중단된 /goal 계속\n/costs — OpenRouter 미확정 비용 조회·정산\n/run — 저장 계획 자동 실행\n/todo — 목표와 할 일 조회\n/todo goal 목표 | 완료 기준\n/todo add 할 일 | 완료 기준\n/todo done 번호 · /todo undo 번호 · /todo remove 번호\n/autopilot ask|auto|full — 승인 단계 변경\n/approve · /deny — 대기 작업 결정\n/answer JSON · /decline · /cancel-input — MCP 입력 결정\n/stop — 현재 실행 중지\n일반 텍스트도 Build 요청으로 전달됩니다. 원격 Build와 권한 변경은 Telegram 설정에서 허용해야 합니다.',
             );
             item.status = 'done';
             await this.save();
@@ -810,13 +821,23 @@ export class Telegram {
             });
           } else {
             const planRequest = /^\/plan\s/.test(text);
-            if (text.startsWith('/') && !/^\/ask\s/.test(text) && !planRequest)
+            const selectedSkills =
+              text.startsWith('/') && !planRequest && !/^\/ask\s/.test(text)
+                ? (await this.options.store.registeredSkills()).filter((skill) =>
+                    session.skills?.some(
+                      (selection) =>
+                        selection.id === skill.id && selection.revision === skill.revision,
+                    ),
+                  )
+                : [];
+            const skillRequest = !!resolveSkillInvocation(text, selectedSkills);
+            if (text.startsWith('/') && !/^\/ask\s/.test(text) && !planRequest && !skillRequest)
               throw new AppError(
                 'TELEGRAM_COMMAND',
                 '지원하지 않는 명령입니다. /help 를 확인하세요.',
               );
-            if (planRequest && session.run?.status === 'running')
-              throw new AppError('TELEGRAM_BUSY', '현재 실행이 끝난 뒤 /plan 요청을 보내세요.');
+            if ((planRequest || skillRequest) && session.run?.status === 'running')
+              throw new AppError('TELEGRAM_BUSY', '현재 실행이 끝난 뒤 계획·스킬 요청을 보내세요.');
             const requestMode =
               session.run?.status === 'running'
                 ? (session.mode ?? 'build')
@@ -980,13 +1001,16 @@ export class Telegram {
   private async deliver(signal: AbortSignal) {
     for (const item of this.state.outbox) {
       signal.throwIfAborted();
-      if (item.status !== 'queued' || item.retryAt > Date.now()) continue;
+      if (item.status !== 'queued') continue;
+      // Preserve order across multipart replies, including Telegram's retry_after window.
+      if (Math.max(item.retryAt, this.state.nextSendAt ?? 0) > Date.now()) break;
       if (item.epoch !== this.state.epoch || item.chatId !== this.state.owner?.chatId) {
         item.status = 'failed';
         await this.save();
         continue;
       }
       item.status = 'sending';
+      this.state.nextSendAt = Date.now() + 1000;
       await this.save();
       try {
         const response = await this.api(
@@ -1019,7 +1043,7 @@ export class Telegram {
           'Telegram 전달 결과를 확인하세요. 결과 미확인 메시지는 자동 재전송하지 않습니다.';
       }
       await this.save();
-      // One outgoing message per loop prevents a burst of generated replies.
+      // Long polling is shortened while queued output remains; incoming commands keep working.
       break;
     }
   }

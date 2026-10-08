@@ -23,6 +23,58 @@ it('exposes live input and EOF with Plan disabled, and preserves uncertain job s
   expect(html).toContain('백그라운드');
   const plan = renderToStaticMarkup(<CommandJobRow job={job} readOnly onUpdate={() => {}} />);
   expect(plan).toMatch(/textarea[^>]*disabled/);
+  const terminal = renderToStaticMarkup(
+    <CommandJobRow
+      job={{ ...job, terminal: { cols: 100, rows: 30 } }}
+      readOnly
+      onUpdate={() => {}}
+    />,
+  );
+  expect(terminal).toContain('터미널 보기');
+  expect(terminal).toContain('command-terminal');
+  expect(terminal).toContain('EOF 전달');
+});
+it('shows bounded worktree pages and requires an explicit binary choice', () => {
+  const preview: WorktreePreview = {
+    id: crypto.randomUUID(),
+    worktreeId: crypto.randomUUID(),
+    sourceProjectId: crypto.randomUUID(),
+    createdAt: '',
+    totalPaths: 75,
+    offset: 20,
+    nextOffset: 40,
+    files: [
+      {
+        path: 'image.png',
+        before: null,
+        theirs: null,
+        merged: null,
+        beforeHash: 'aaa',
+        theirsHash: 'bbb',
+        conflict: true,
+        binary: true,
+        beforeBytes: 44,
+        theirsBytes: 48,
+        diff: 'binary',
+      },
+    ],
+  };
+  const html = renderToStaticMarkup(
+    <WorktreeReviewPanel
+      preview={preview}
+      canApply
+      busy={false}
+      onApply={() => {}}
+      onPage={() => {}}
+      onPaths={() => {}}
+    />,
+  );
+  expect(html).toContain('전체 75개 경로');
+  expect(html).toContain('다음 페이지');
+  expect(html).toContain('선택한 파일 검토');
+  expect(html).toContain('SHA-256');
+  expect(html).not.toContain('충돌 해결 image.png');
+  expect(html).toMatch(/button[^>]*disabled[^>]*>검토한 변경 적용/);
 });
 it('requires explicit conflict resolution before merge and disables apply outside the source Build session', () => {
   const preview: WorktreePreview = {

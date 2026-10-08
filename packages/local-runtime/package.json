@@ -6,6 +6,8 @@
   "exports": "./src/index.ts",
   "dependencies": {
     "@lodex/contracts": "0.1.0",
-    "@lodex/providers": "0.1.0"
+    "@lodex/providers": "0.1.0",
+    "tar-stream": "3.2.2",
+    "yauzl": "3.4.0"
   }
 }

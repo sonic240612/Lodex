@@ -5,7 +5,7 @@
  * action-fusion/file-queue.ts and then-run.ts. See THIRD_PARTY_NOTICES.md.
  */
 import { createHash } from 'node:crypto';
-import { lstat, readFile, realpath } from 'node:fs/promises';
+import { lstat, open, realpath } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
 import { AppError } from '@lodex/contracts';
 
@@ -80,15 +80,44 @@ async function snapshot(target: FusedTarget) {
   const path = await realpath(target.path);
   if (target.expectedPath && path !== target.expectedPath)
     throw new Error('target path changed after the fused mutation');
-  const info = await lstat(path);
-  if (!info.isFile() || info.size > 1_048_576)
+  // NTFS file IDs exceed JavaScript's safe integer range. Number Stats can
+  // round two distinct files to the same inode and miss same-byte replacement.
+  const info = await lstat(path, { bigint: true });
+  if (!info.isFile() || info.nlink !== 1n || info.size > 1_048_576n)
     throw new Error('target is not a bounded regular file');
-  const hash = createHash('sha256')
-    .update(await readFile(path))
-    .digest('hex');
-  if (hash !== target.expectedHash)
-    throw new Error('target content changed after the fused mutation');
-  return `${path}\0${info.dev}:${info.ino}\0${hash}`;
+  const handle = await open(path, 'r');
+  try {
+    const opened = await handle.stat({ bigint: true });
+    if (opened.dev !== info.dev || opened.ino !== info.ino || opened.nlink !== 1n)
+      throw new Error('target changed while opening the fused mutation');
+    const bytes = Buffer.alloc(1_048_577);
+    let size = 0;
+    while (size < bytes.length) {
+      const result = await handle.read(bytes, size, bytes.length - size, size);
+      if (!result.bytesRead) break;
+      size += result.bytesRead;
+    }
+    const after = await handle.stat({ bigint: true });
+    const resolvedAfter = await realpath(target.path);
+    const final = await lstat(resolvedAfter, { bigint: true });
+    if (
+      size > 1_048_576 ||
+      resolvedAfter !== path ||
+      final.dev !== info.dev ||
+      final.ino !== info.ino ||
+      final.nlink !== 1n ||
+      after.size !== info.size ||
+      after.mtimeNs !== info.mtimeNs ||
+      after.ctimeNs !== info.ctimeNs
+    )
+      throw new Error('target changed while checking the fused mutation');
+    const hash = createHash('sha256').update(bytes.subarray(0, size)).digest('hex');
+    if (hash !== target.expectedHash)
+      throw new Error('target content changed after the fused mutation');
+    return `${path}\0${info.dev}:${info.ino}:${info.birthtimeNs}:${info.ctimeNs}:${info.mtimeNs}\0${hash}`;
+  } finally {
+    await handle.close();
+  }
 }
 
 /** Original two-pass interference check plus the mutation's expected hash and identity. */

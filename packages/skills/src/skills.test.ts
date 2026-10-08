@@ -132,7 +132,7 @@ describe('passive skill registration', () => {
         'UNSUPPORTED_METADATA',
         'TOOL_POLICY_UNSUPPORTED',
         'DYNAMIC_PREPROCESSING_UNSUPPORTED',
-        'SUBSTITUTION_UNSUPPORTED',
+        'HOOKS_UNSUPPORTED',
         'SCRIPTS_NOT_EXECUTED',
       ]),
     );
@@ -162,7 +162,7 @@ describe('passive skill registration', () => {
     expect(skill.diagnostics.map((d) => d.code)).toEqual(
       expect.arrayContaining([
         'DIRECTORY_NAME_MISMATCH',
-        'TOOL_POLICY_UNSUPPORTED',
+        'TOOL_POLICY_RESTRICTED',
         'UNSUPPORTED_METADATA',
       ]),
     );
@@ -183,7 +183,7 @@ describe('passive skill registration', () => {
       const skill = await inspectSkillDirectory(root, { dialect });
       expect(skill.dialect).toBe(dialect);
       expect(skill.invocation).toEqual({ model: true, user: true });
-      expect(skill.diagnostics.map((entry) => entry.code)).toContain(
+      expect(skill.diagnostics.map((entry) => entry.code)).not.toContain(
         'BASEDIR_SUBSTITUTION_UNSUPPORTED',
       );
       if (dialect === 'openclaw') {

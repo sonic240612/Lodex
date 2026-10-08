@@ -1,19 +1,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import {
-  lstat,
-  open,
-  realpath,
-  mkdir,
-  readFile,
-  rename,
-  unlink,
-  writeFile,
-  type FileHandle,
-} from 'node:fs/promises';
-import { isAbsolute, dirname, join, resolve, sep } from 'node:path';
+import { lstat, open, realpath, type FileHandle } from 'node:fs/promises';
+import { isAbsolute, dirname, join } from 'node:path';
 import { createServer } from 'node:net';
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { availableParallelism, freemem, platform, totalmem } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
 import { StringDecoder } from 'node:string_decoder';
@@ -22,8 +12,6 @@ import {
   engineSettingsSchema,
   localProfileInputSchema,
   runtimeSettingsSchema,
-  modelDownloadInputSchema,
-  modelDownloadSchema,
   type EngineSettings,
   type LocalProfile,
   type LocalProfileInput,
@@ -32,11 +20,15 @@ import {
   type RuntimeSnapshot,
   type GpuResourceSnapshot,
   type RuntimeResources,
-  type ModelDownload,
   type ModelDownloadInput,
   type ModelInspection,
+  type EngineInstallInput,
 } from '@lodex/contracts';
 import { privateServerFetch } from '@lodex/providers';
+import { ModelDownloads } from './downloads';
+import { splitModelFiles } from './model-files';
+import { availableMemory, isMemoryFailure } from './memory';
+import { EngineManager } from './engines';
 
 export interface RuntimeRepository {
   localProfiles(): Promise<LocalProfile[]>;
@@ -188,6 +180,10 @@ class GgufReader {
     this.position += length;
   }
   async scalar(type: number): Promise<string | number | boolean | undefined> {
+    if (type === 0) return (await this.take(1)).readUInt8();
+    if (type === 1) return (await this.take(1)).readInt8();
+    if (type === 2) return (await this.take(2)).readUInt16LE();
+    if (type === 3) return (await this.take(2)).readInt16LE();
     if (type === 8) return this.string(1_048_576);
     if (type === 7) return (await this.take(1))[0] !== 0;
     if (type === 4) return (await this.take(4)).readUInt32LE(0);
@@ -250,8 +246,6 @@ export async function inspectGguf(handle: FileHandle, size: number): Promise<Ggu
     throw new AppError('GGUF_VERSION', 'GGUF v2/v3 모델을 지원합니다.');
   const tensorCountValue = header.readBigUInt64LE(8);
   const metadataCountValue = header.readBigUInt64LE(16);
-  if (tensorCountValue === 0n)
-    throw new AppError('GGUF_FORMAT', '모델 tensor 정보가 비어 있습니다.');
   if (tensorCountValue > BigInt(Number.MAX_SAFE_INTEGER) || metadataCountValue > 100_000n)
     throw new AppError('GGUF_FORMAT', 'GGUF 항목 수가 허용 범위를 초과합니다.');
   const reader = new GgufReader(handle, size);
@@ -270,6 +264,9 @@ export async function inspectGguf(handle: FileHandle, size: number): Promise<Ggu
       '.attention.value_length',
     ];
     const wanted =
+      key === 'split.no' ||
+      key === 'split.count' ||
+      key === 'split.tensors.count' ||
       key === 'general.name' ||
       key === 'general.architecture' ||
       key === 'tokenizer.ggml.model' ||
@@ -284,7 +281,71 @@ export async function inspectGguf(handle: FileHandle, size: number): Promise<Ggu
     const value = await reader.scalar(type);
     if (value !== undefined) values[key] = value;
   }
+  if (tensorCountValue === 0n && !(values['split.no'] === 0 && Number(values['split.count']) > 1))
+    throw new AppError('GGUF_FORMAT', '모델 tensor 정보가 비어 있습니다.');
   return { version, tensorCount: Number(tensorCountValue), values };
+}
+
+export async function inspectModelGroup(path: string) {
+  const first = await inspectFile(path);
+  const paths = splitModelFiles(first.path);
+  const files: { path: string; bytes: number; identity: string }[] = [];
+  const metadata: GgufMetadata[] = [];
+  for (const [index, path] of paths.entries()) {
+    let file: Awaited<ReturnType<typeof inspectFile>>;
+    try {
+      file = await inspectFile(path);
+    } catch (error) {
+      if (paths.length === 1) throw error;
+      throw new AppError(
+        'GGUF_SPLIT_MISSING',
+        `분할 모델 파일 ${index + 1}/${paths.length}이 없습니다. 모든 파일을 같은 폴더에 저장하세요.`,
+      );
+    }
+    const handle = await open(file.path, 'r');
+    let part: GgufMetadata;
+    try {
+      part = await inspectGguf(handle, file.size);
+    } finally {
+      await handle.close();
+    }
+    if (paths.length > 1) {
+      if (part.values['split.no'] !== index || part.values['split.count'] !== paths.length)
+        throw new AppError(
+          'GGUF_SPLIT_MISMATCH',
+          '분할 GGUF의 파일 번호와 메타데이터가 일치하지 않습니다.',
+        );
+      const leading = metadata[0];
+      if (
+        leading &&
+        (part.version !== leading.version ||
+          part.values['split.tensors.count'] !== leading.values['split.tensors.count'] ||
+          (part.values['general.architecture'] !== undefined &&
+            part.values['general.architecture'] !== leading.values['general.architecture']))
+      )
+        throw new AppError('GGUF_SPLIT_MISMATCH', '서로 다른 모델의 분할 파일이 섞여 있습니다.');
+    } else if (Number(part.values['split.count'] ?? 1) > 1) {
+      throw new AppError(
+        'GGUF_SPLIT_NAME',
+        '분할 GGUF는 원래의 -00001-of-00002.gguf 형식 이름을 유지해야 합니다.',
+      );
+    }
+    files.push({ path: file.path, bytes: file.size, identity: file.identity });
+    metadata.push(part);
+  }
+  if (
+    paths.length > 1 &&
+    metadata.reduce((sum, part) => sum + part.tensorCount, 0) !==
+      metadata[0]!.values['split.tensors.count']
+  )
+    throw new AppError('GGUF_SPLIT_TENSORS', '분할 GGUF의 전체 tensor 수가 일치하지 않습니다.');
+  return {
+    path: files[0]!.path,
+    size: files.reduce((sum, file) => sum + file.bytes, 0),
+    identity: files[0]!.identity,
+    files,
+    metadata: metadata[0]!,
+  };
 }
 
 function positiveInteger(value: unknown) {
@@ -339,14 +400,8 @@ export async function inspectLocalModel(
   vramBudgetMb: number,
   gpuAvailable: boolean,
 ): Promise<ModelInspection> {
-  const model = await inspectFile(path);
-  const handle = await open(model.path, 'r');
-  let metadata: GgufMetadata;
-  try {
-    metadata = await inspectGguf(handle, model.size);
-  } finally {
-    await handle.close();
-  }
+  const model = await inspectModelGroup(path);
+  const metadata = model.metadata;
   const normalized = normalizedMetadata(metadata);
   const nativeContext = Math.min(normalized.nativeContextSize ?? 32768, 2_097_152);
   const recommendationCeiling = estimateKvBytes(normalized, nativeContext)
@@ -404,6 +459,7 @@ export async function inspectLocalModel(
   return {
     modelPath: model.path,
     modelBytes: model.size,
+    modelFiles: model.files,
     ggufVersion: metadata.version,
     ...(normalized.modelName ? { modelName: normalized.modelName } : {}),
     ...(normalized.architecture ? { modelArchitecture: normalized.architecture } : {}),
@@ -428,14 +484,8 @@ export async function inspectLocalModel(
 export async function inspectProfile(input: LocalProfileInput): Promise<LocalProfile> {
   const parsed = localProfileInputSchema.parse(input);
   const engine = await inspectFile(parsed.enginePath),
-    model = await inspectFile(parsed.modelPath);
-  const handle = await open(model.path, 'r');
-  let metadata: GgufMetadata;
-  try {
-    metadata = await inspectGguf(handle, model.size);
-  } finally {
-    await handle.close();
-  }
+    model = await inspectModelGroup(parsed.modelPath);
+  const metadata = model.metadata;
   // --help/--version execute only the engine explicitly selected by the user.
   const help = await probe(engine.path, '--help');
   const engineVersion = (await probe(engine.path, '--version')).trim().slice(0, 2000);
@@ -449,8 +499,16 @@ export async function inspectProfile(input: LocalProfileInput): Promise<LocalPro
     modelPath: model.path,
     settings: parsed.settings,
     vramReservationMb: parsed.settings.gpuLayers === 0 ? 0 : parsed.vramReservationMb,
+    ramReservationMb:
+      parsed.ramReservationMb ??
+      Math.ceil(model.size / mib) +
+        256 +
+        (parsed.settings.gpuLayers === 0 || !parsed.settings.kvOffload
+          ? Math.ceil((estimateKvBytes(normalized, parsed.settings.contextSize) ?? 512 * mib) / mib)
+          : 0),
     modelBytes: model.size,
     modelIdentity: model.identity,
+    modelFiles: model.files,
     engineIdentity: engine.identity,
     engineVersion,
     supportedFlags,
@@ -599,7 +657,7 @@ export function parseNvidiaSmi(output: string): GpuResourceSnapshot[] {
     .filter((line) => line.trim())
     .flatMap((line) => {
       const fields = line.split(',').map((value) => value.trim());
-      if (fields.length !== 6) return [];
+      if (fields.length !== 6 && fields.length !== 7) return [];
       const index = numberField(fields[0]!);
       const totalVramMb = numberField(fields[2]!);
       const usedVramMb = numberField(fields[3]!);
@@ -617,6 +675,7 @@ export function parseNvidiaSmi(output: string): GpuResourceSnapshot[] {
       return [
         {
           index,
+          ...(fields[6] && /^GPU-[a-fA-F0-9-]{16,64}$/.test(fields[6]) ? { uuid: fields[6] } : {}),
           name: fields[1].slice(0, 200),
           totalVramMb,
           usedVramMb,
@@ -647,7 +706,7 @@ async function gpuResources(): Promise<GpuResourceSnapshot[]> {
     const child = spawn(
       executable,
       [
-        '--query-gpu=index,name,memory.total,memory.used,memory.free,utilization.gpu',
+        '--query-gpu=index,name,memory.total,memory.used,memory.free,utilization.gpu,uuid',
         '--format=csv,noheader,nounits',
       ],
       { env: environment(), windowsHide: true, shell: false },
@@ -689,296 +748,6 @@ async function measureResources(): Promise<RuntimeResources> {
   };
 }
 
-type DownloadJob = { controller: AbortController; promise: Promise<void>; temporaryPath: string };
-
-class ModelDownloads {
-  private records = new Map<string, ModelDownload>();
-  private jobs = new Map<string, DownloadJob>();
-  private ready: Promise<void>;
-  private manifestQueue: Promise<unknown> = Promise.resolve();
-  constructor(
-    private root: string | undefined,
-    private fetcher: typeof fetch,
-  ) {
-    this.ready = this.restore();
-  }
-  async snapshot() {
-    await this.ready;
-    return [...this.records.values()]
-      .map((record) => structuredClone(record))
-      .sort((left, right) => right.startedAt.localeCompare(left.startedAt));
-  }
-  private manifestPath() {
-    return this.root ? join(this.root, '.downloads.json') : undefined;
-  }
-  private persist() {
-    const path = this.manifestPath();
-    if (!path) return Promise.resolve();
-    const document = JSON.stringify({ version: 1, downloads: [...this.records.values()] });
-    const task = this.manifestQueue.then(async () => {
-      const temporary = path + '.tmp';
-      await writeFile(temporary, document, { encoding: 'utf8', mode: 0o600 });
-      await rename(temporary, path);
-    });
-    this.manifestQueue = task.catch(() => undefined);
-    return task;
-  }
-  private async restore() {
-    const path = this.manifestPath();
-    if (!path || !this.root) return;
-    await mkdir(this.root, { recursive: true, mode: 0o700 });
-    let source: unknown;
-    try {
-      const text = await readFile(path, 'utf8');
-      if (Buffer.byteLength(text) > 4_194_304) return;
-      source = JSON.parse(text);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return;
-      return;
-    }
-    if (!source || typeof source !== 'object' || (source as { version?: unknown }).version !== 1)
-      return;
-    const downloads = (source as { downloads?: unknown }).downloads;
-    if (!Array.isArray(downloads) || downloads.length > 10_000) return;
-    let changed = false;
-    for (const value of downloads) {
-      const parsed = modelDownloadSchema.safeParse(value);
-      if (!parsed.success || this.records.has(parsed.data.id)) {
-        changed = true;
-        continue;
-      }
-      let destination: string;
-      try {
-        destination = this.destination(parsed.data);
-      } catch {
-        changed = true;
-        continue;
-      }
-      const record = { ...parsed.data, modelPath: destination };
-      if (record.status === 'downloading') {
-        record.status = 'failed';
-        record.finishedAt = new Date().toISOString();
-        record.error = '앱이 종료되어 다운로드가 중단되었습니다. 다시 다운로드하세요.';
-        await unlink(destination + '.' + record.id + '.part').catch(() => undefined);
-        changed = true;
-      }
-      if (record.status === 'completed') {
-        try {
-          const info = await lstat(destination);
-          if (!info.isFile()) throw new Error('not a file');
-          if (record.downloadedBytes !== info.size) {
-            record.downloadedBytes = info.size;
-            record.totalBytes = info.size;
-            changed = true;
-          }
-        } catch {
-          record.status = 'failed';
-          record.finishedAt = new Date().toISOString();
-          record.error = '다운로드한 모델 파일을 찾을 수 없습니다.';
-          changed = true;
-        }
-      }
-      this.records.set(record.id, record);
-    }
-    if (changed) await this.persist();
-  }
-  private destination(input: ModelDownloadInput) {
-    if (!this.root)
-      throw new AppError(
-        'MODEL_DOWNLOAD_DISABLED',
-        '이 실행 환경에는 모델 다운로드 폴더가 설정되지 않았습니다.',
-        503,
-      );
-    const base = resolve(this.root);
-    const destination = resolve(
-      base,
-      input.repository.replace('/', '--'),
-      ...input.file.split(/[\\/]/),
-    );
-    if (!destination.startsWith(base + sep))
-      throw new AppError('MODEL_DOWNLOAD_PATH', '모델 저장 경로가 올바르지 않습니다.');
-    return destination;
-  }
-  async start(value: ModelDownloadInput) {
-    await this.ready;
-    const input = modelDownloadInputSchema.parse(value);
-    const destination = this.destination(input);
-    if ([...this.records.values()].some((record) => record.modelPath === destination))
-      throw new AppError(
-        'MODEL_DOWNLOAD_EXISTS',
-        '같은 모델 파일이 이미 다운로드 목록에 있습니다.',
-        409,
-      );
-    try {
-      await lstat(destination);
-      throw new AppError('MODEL_DOWNLOAD_EXISTS', '같은 모델 파일이 이미 저장되어 있습니다.', 409);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    }
-    await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
-    const id = randomUUID();
-    const record: ModelDownload = {
-      id,
-      repository: input.repository,
-      file: input.file,
-      revision: input.revision,
-      status: 'downloading',
-      downloadedBytes: 0,
-      totalBytes: null,
-      startedAt: new Date().toISOString(),
-      modelPath: destination,
-    };
-    this.records.set(id, record);
-    await this.persist();
-    const controller = new AbortController();
-    const temporaryPath = destination + '.' + id + '.part';
-    const promise = this.download(input, record, destination, temporaryPath, controller.signal)
-      .catch((error) => {
-        record.status = controller.signal.aborted ? 'cancelled' : 'failed';
-        record.error = controller.signal.aborted
-          ? '다운로드를 중지했습니다.'
-          : error instanceof AppError
-            ? error.message
-            : '모델 다운로드에 실패했습니다.';
-        record.finishedAt = new Date().toISOString();
-      })
-      .finally(async () => {
-        await unlink(temporaryPath).catch(() => undefined);
-        this.jobs.delete(id);
-        await this.persist();
-      });
-    this.jobs.set(id, { controller, promise, temporaryPath });
-    return structuredClone(record);
-  }
-  private async download(
-    input: ModelDownloadInput,
-    record: ModelDownload,
-    destination: string,
-    temporaryPath: string,
-    signal: AbortSignal,
-  ) {
-    const source =
-      'https://huggingface.co/' +
-      input.repository.split('/').map(encodeURIComponent).join('/') +
-      '/resolve/' +
-      input.revision.split('/').map(encodeURIComponent).join('/') +
-      '/' +
-      input.file.split(/[\\/]/).map(encodeURIComponent).join('/') +
-      '?download=true';
-    let response: Response;
-    try {
-      response = await this.fetcher(source, {
-        headers: { Accept: 'application/octet-stream', 'User-Agent': 'Lodex/0.1' },
-        redirect: 'follow',
-        signal,
-      });
-    } catch (error) {
-      signal.throwIfAborted();
-      throw new AppError('MODEL_DOWNLOAD_NETWORK', 'Hugging Face에 연결하지 못했습니다.', 502);
-    }
-    const finalUrl = new URL(response.url || source);
-    if (finalUrl.protocol !== 'https:' || finalUrl.username || finalUrl.password)
-      throw new AppError(
-        'MODEL_DOWNLOAD_REDIRECT',
-        '안전하지 않은 다운로드 주소로 이동했습니다.',
-        502,
-      );
-    if (!response.ok) {
-      await response.body?.cancel().catch(() => undefined);
-      throw new AppError(
-        'MODEL_DOWNLOAD_HTTP',
-        `모델 다운로드 실패 (HTTP ${response.status}). 저장소·revision·파일 이름을 확인하세요.`,
-        502,
-      );
-    }
-    if (!response.body)
-      throw new AppError('MODEL_DOWNLOAD_BODY', '모델 다운로드 응답에 파일 내용이 없습니다.', 502);
-    const length = Number(response.headers.get('content-length'));
-    if (Number.isSafeInteger(length) && length >= 0) record.totalBytes = length;
-    if (record.totalBytes !== null && record.totalBytes > 1_099_511_627_776)
-      throw new AppError('MODEL_DOWNLOAD_SIZE', '1 TiB를 넘는 모델 파일은 다운로드할 수 없습니다.');
-    const output = await open(temporaryPath, 'wx', 0o600);
-    const hash = createHash('sha256');
-    let position = 0;
-    const reader = response.body.getReader();
-    try {
-      while (true) {
-        signal.throwIfAborted();
-        const part = await reader.read();
-        if (part.done) break;
-        position += part.value.length;
-        if (position > 1_099_511_627_776)
-          throw new AppError(
-            'MODEL_DOWNLOAD_SIZE',
-            '1 TiB를 넘는 모델 파일은 다운로드할 수 없습니다.',
-          );
-        hash.update(part.value);
-        await output.write(part.value);
-        record.downloadedBytes = position;
-      }
-      await output.sync();
-    } finally {
-      await reader.cancel().catch(() => undefined);
-      await output.close();
-    }
-    if (record.totalBytes !== null && position !== record.totalBytes)
-      throw new AppError(
-        'MODEL_DOWNLOAD_TRUNCATED',
-        '다운로드한 파일 크기가 서버 응답과 다릅니다.',
-        502,
-      );
-    const sha256 = hash.digest('hex');
-    if (input.expectedSha256 && sha256 !== input.expectedSha256)
-      throw new AppError(
-        'MODEL_DOWNLOAD_HASH',
-        '다운로드한 모델의 SHA-256이 입력한 값과 다릅니다.',
-      );
-    const handle = await open(temporaryPath, 'r');
-    try {
-      await inspectGguf(handle, position);
-    } finally {
-      await handle.close();
-    }
-    signal.throwIfAborted();
-    await rename(temporaryPath, destination);
-    record.status = 'completed';
-    record.sha256 = sha256;
-    record.finishedAt = new Date().toISOString();
-  }
-  async action(id: string, action: 'cancel' | 'remove', protectedPaths: string[] = []) {
-    await this.ready;
-    const record = this.records.get(id);
-    if (!record)
-      throw new AppError('MODEL_DOWNLOAD_NOT_FOUND', '다운로드 작업을 찾을 수 없습니다.', 404);
-    const job = this.jobs.get(id);
-    if (action === 'cancel') {
-      if (!job) throw new AppError('MODEL_DOWNLOAD_FINISHED', '이미 끝난 다운로드입니다.', 409);
-      job.controller.abort(new AppError('MODEL_DOWNLOAD_CANCELLED', '다운로드를 중지했습니다.'));
-      await job.promise;
-      return;
-    }
-    if (job) throw new AppError('MODEL_DOWNLOAD_ACTIVE', '다운로드를 먼저 중지하세요.', 409);
-    if (record.modelPath && protectedPaths.includes(record.modelPath))
-      throw new AppError(
-        'MODEL_DOWNLOAD_REGISTERED',
-        '등록된 모델 프로필에서 사용하는 파일입니다. 프로필을 먼저 제거하세요.',
-        409,
-      );
-    if (record.modelPath)
-      await unlink(record.modelPath).catch((error) => {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      });
-    this.records.delete(id);
-    await this.persist();
-  }
-  async close() {
-    await this.ready;
-    for (const job of this.jobs.values()) job.controller.abort();
-    await Promise.allSettled([...this.jobs.values()].map((job) => job.promise));
-    await this.manifestQueue;
-  }
-}
-
 /** Manages only its own child handles; external llama-server processes are never stopped. */
 export class RuntimeManager {
   private instances = new Map<string, Instance>();
@@ -988,12 +757,24 @@ export class RuntimeManager {
   private resourceCache?: { measuredAt: number; value: Promise<RuntimeResources> };
   private idleTimer: NodeJS.Timeout;
   private downloads: ModelDownloads;
+  private engines: EngineManager;
+  private resourceProbe: () => Promise<RuntimeResources>;
   constructor(
     private repository: RuntimeRepository,
     private supervisorPath: string,
-    options: { modelRoot?: string; fetch?: typeof fetch } = {},
+    options: {
+      modelRoot?: string;
+      fetch?: typeof fetch;
+      resourceProbe?: () => Promise<RuntimeResources>;
+      engineRoot?: string;
+      engineFetch?: typeof fetch;
+    } = {},
   ) {
-    this.downloads = new ModelDownloads(options.modelRoot, options.fetch ?? fetch);
+    this.downloads = new ModelDownloads(options.modelRoot, options.fetch ?? fetch, async (path) => {
+      await inspectModelGroup(path);
+    });
+    this.resourceProbe = options.resourceProbe ?? measureResources;
+    this.engines = new EngineManager(options.engineRoot, options.engineFetch ?? fetch);
     this.idleTimer = setInterval(() => void this.sweepIdle().catch(() => undefined), 30000);
     this.idleTimer.unref();
   }
@@ -1005,7 +786,7 @@ export class RuntimeManager {
   async snapshot(): Promise<RuntimeSnapshot> {
     const now = Date.now();
     if (!this.resourceCache || now - this.resourceCache.measuredAt >= 2000)
-      this.resourceCache = { measuredAt: now, value: measureResources() };
+      this.resourceCache = { measuredAt: now, value: this.resourceProbe() };
     const [profiles, settings, resources, downloads] = await Promise.all([
       this.repository.localProfiles(),
       this.repository.runtimeSettings(),
@@ -1030,24 +811,55 @@ export class RuntimeManager {
       ),
       resources,
       downloads,
+      engines: await this.engines.snapshot(this.engineReferences(profiles)),
     };
+  }
+  private engineReferences(profiles: LocalProfile[]) {
+    return profiles.map((profile) => ({
+      path: profile.enginePath,
+      name: profile.name,
+      running:
+        !!this.instances.get(profile.id) &&
+        !this.instances.get(profile.id)!.engineStopped &&
+        this.instances.get(profile.id)!.status !== 'stopped',
+    }));
+  }
+  engineCatalog(channel: 'stable' | 'nightly') {
+    return this.engines.catalog(channel);
+  }
+  installEngine(input: EngineInstallInput) {
+    return this.engines.install(input);
+  }
+  engineAction(id: string, action: 'cancel' | 'remove') {
+    return action === 'cancel'
+      ? this.engines.action(id, action)
+      : this.serial(async () =>
+          this.engines.action(
+            id,
+            action,
+            this.engineReferences(await this.repository.localProfiles()),
+          ),
+        );
   }
   startDownload(input: ModelDownloadInput) {
     return this.downloads.start(input);
   }
-  async downloadAction(id: string, action: 'cancel' | 'remove') {
+  async downloadAction(id: string, action: 'cancel' | 'remove' | 'resume') {
     const protectedPaths =
       action === 'remove'
-        ? (await this.repository.localProfiles()).map((profile) => profile.modelPath)
+        ? (await this.repository.localProfiles()).flatMap(
+            (profile) => profile.modelFiles?.map((file) => file.path) ?? [profile.modelPath],
+          )
         : [];
     return this.downloads.action(id, action, protectedPaths);
   }
   async inspectModel(path: string) {
     const [settings, resources] = await Promise.all([
       this.repository.runtimeSettings(),
-      measureResources(),
+      this.resourceProbe(),
     ]);
-    const budget = Math.max(0, settings.vramBudgetMb - settings.headroomMb);
+    const measured = availableMemory(settings, resources);
+    const budget = Math.min(measured.vramBudget, measured.vramFree);
     return inspectLocalModel(path, budget, resources.gpus.length > 0 && budget > 0);
   }
   register(input: LocalProfileInput) {
@@ -1090,6 +902,11 @@ export class RuntimeManager {
           'VRAM 설정이 변경되었습니다. 최신 값을 불러오세요.',
           409,
         );
+      if (
+        parsed.gpuIndex !== (await this.repository.runtimeSettings()).gpuIndex &&
+        [...this.instances.values()].some((instance) => instance.reservedVramMb > 0)
+      )
+        throw new AppError('GPU_IN_USE', 'GPU 번호를 바꾸기 전에 로드한 모델을 언로드하세요.', 409);
       await this.makeRoom(0, parsed);
       await this.repository.saveRuntimeSettings(parsed);
     });
@@ -1106,6 +923,8 @@ export class RuntimeManager {
     await stopChild(instance);
     instance.status = 'stopped';
     instance.reservedVramMb = 0;
+    instance.reservedRamMb = 0;
+    delete instance.errorCode;
   }
   unload(id: string) {
     return this.serial(() => this.stop(id));
@@ -1127,29 +946,63 @@ export class RuntimeManager {
       for (const instance of expired) await this.stop(instance.profileId);
     });
   }
-  private async makeRoom(required: number, settings: RuntimeSettings) {
-    const available = settings.vramBudgetMb - settings.headroomMb;
-    if (required > available)
+  private async makeRoom(required: number, settings: RuntimeSettings, requiredRam = 0) {
+    let measured = availableMemory(settings, await this.resourceProbe(), Date.now(), required > 0);
+    if (required > measured.vramBudget)
       throw new AppError(
         'VRAM_BUDGET',
         '모델의 VRAM 예약량이 사용 가능한 예산보다 큽니다. 모델 설정이나 VRAM 예산을 조정하세요.',
       );
+    if (requiredRam > measured.ramBudget)
+      throw new AppError(
+        'RAM_BUDGET',
+        '모델 RAM 예약량이 사용 가능한 RAM 예산보다 큽니다. 모델 설정이나 메모리 예산을 조정하세요.',
+      );
     const reserved = () =>
       [...this.instances.values()].reduce((sum, i) => sum + i.reservedVramMb, 0);
-    if (reserved() + required <= available) return;
+    const reservedRam = () =>
+      [...this.instances.values()].reduce((sum, i) => sum + (i.reservedRamMb ?? 0), 0);
+    const fits = () =>
+      reserved() + required <= measured.vramBudget &&
+      required <= measured.vramFree &&
+      reservedRam() + requiredRam <= measured.ramBudget &&
+      requiredRam <= measured.ramFree;
+    if (fits()) return measured;
     if (settings.autoUnloadIdle) {
       const idle = [...this.instances.values()]
         .filter((i) => i.leases === 0 && i.status === 'ready')
         .sort((a, b) => a.lastUsedAt.localeCompare(b.lastUsedAt));
       const reclaimable = idle.reduce((sum, i) => sum + i.reservedVramMb, 0);
       // Reject an impossible reservation before unloading any idle engines.
-      if (reserved() - reclaimable + required <= available) {
+      const reclaimableRam = idle.reduce((sum, instance) => sum + (instance.reservedRamMb ?? 0), 0);
+      if (
+        reserved() - reclaimable + required <= measured.vramBudget &&
+        reservedRam() - reclaimableRam + requiredRam <= measured.ramBudget
+      ) {
         for (const instance of idle) {
           await this.stop(instance.profileId);
-          if (reserved() + required <= available) return;
+          measured = availableMemory(
+            settings,
+            await this.resourceProbe(),
+            Date.now(),
+            required > 0,
+          );
+          if (fits()) return measured;
         }
       }
     }
+    if (required > measured.vramFree)
+      throw new AppError(
+        'VRAM_AVAILABLE',
+        '다른 프로그램이 사용하는 공간을 제외하면 실제 여유 VRAM이 부족합니다. 해당 프로그램을 닫거나 모델 예약량을 조정하세요.',
+        409,
+      );
+    if (requiredRam > measured.ramFree || reservedRam() + requiredRam > measured.ramBudget)
+      throw new AppError(
+        'RAM_AVAILABLE',
+        '실제 여유 RAM 또는 RAM 예약 예산이 부족합니다. 메모리를 확보하거나 모델 예약량을 조정하세요.',
+        409,
+      );
     throw new AppError(
       'VRAM_BUSY',
       'VRAM 예약 공간이 부족합니다. 사용 중인 응답을 기다리거나 모델을 언로드하세요.',
@@ -1171,6 +1024,13 @@ export class RuntimeManager {
       signal.throwIfAborted();
       let instance = this.instances.get(id);
       if (!instance || instance.status !== 'ready') {
+        if (instance?.status === 'failed' && instance.errorCode === 'OUT_OF_MEMORY')
+          throw new AppError(
+            'MODEL_OOM',
+            instance.error ??
+              '메모리 부족으로 모델이 중지되었습니다. 설정을 조정한 뒤 언로드하고 다시 로드하세요.',
+            409,
+          );
         if (instance && instance.status !== 'stopped') await this.stop(id);
         const engine = await inspectFile(profile.enginePath),
           model = await inspectFile(profile.modelPath);
@@ -1180,14 +1040,48 @@ export class RuntimeManager {
             '엔진 또는 모델 파일이 등록 이후 변경되었습니다. 정보를 다시 확인해 등록하세요.',
             409,
           );
-        await this.makeRoom(profile.vramReservationMb, await this.repository.runtimeSettings());
+        if (profile.modelFiles) {
+          for (const saved of profile.modelFiles) {
+            const current = await inspectFile(saved.path);
+            if (current.identity !== saved.identity)
+              throw new AppError(
+                'MODEL_CHANGED',
+                '등록한 분할 모델 파일이 변경되었습니다. 다시 분석해 등록하세요.',
+                409,
+              );
+          }
+        } else if (splitModelFiles(profile.modelPath).length > 1) {
+          throw new AppError(
+            'MODEL_CHANGED',
+            '분할 모델 전체를 검증해야 합니다. 모델을 다시 분석해 등록하세요.',
+            409,
+          );
+        }
+        const ramReservation =
+          profile.ramReservationMb ??
+          Math.ceil(profile.modelBytes / mib) +
+            256 +
+            (profile.settings.gpuLayers === 0 || !profile.settings.kvOffload ? 512 : 0);
+        const memory = await this.makeRoom(
+          profile.vramReservationMb,
+          await this.repository.runtimeSettings(),
+          ramReservation,
+        );
         signal.throwIfAborted();
         const port = await freePort(),
           key = randomBytes(32).toString('hex');
         signal.throwIfAborted();
         const args = engineArguments(profile, port, key);
         const child = spawn(process.execPath, [this.supervisorPath], {
-          env: environment(),
+          env: {
+            ...environment(),
+            ...(profile.vramReservationMb > 0 && memory.gpu
+              ? {
+                  CUDA_VISIBLE_DEVICES: memory.gpu.uuid ?? String(memory.gpu.index),
+                  CUDA_DEVICE_ORDER: 'PCI_BUS_ID',
+                }
+              : {}),
+          },
           windowsHide: true,
           shell: false,
           stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
@@ -1197,6 +1091,11 @@ export class RuntimeManager {
           status: 'loading',
           leases: 0,
           reservedVramMb: profile.vramReservationMb,
+          reservedRamMb: ramReservation,
+          ...(memory.gpu && profile.vramReservationMb > 0 ? { gpuIndex: memory.gpu.index } : {}),
+          ...(memory.warning && profile.vramReservationMb > 0
+            ? { memoryWarning: memory.warning }
+            : {}),
           startedAt: new Date().toISOString(),
           lastUsedAt: new Date().toISOString(),
           log: '',
@@ -1221,6 +1120,17 @@ export class RuntimeManager {
             const visible = safe.slice(0, safe.length - keep);
             // Hold a possible key prefix across chunks; snapshots must never expose it.
             current.log = (current.log + visible + (end && keep ? '[redacted]' : '')).slice(-16000);
+            if (
+              isMemoryFailure(current.log) &&
+              current.status !== 'stopped' &&
+              current.errorCode !== 'OUT_OF_MEMORY'
+            ) {
+              current.status = 'failed';
+              current.errorCode = 'OUT_OF_MEMORY';
+              current.error =
+                '메모리 부족으로 모델을 중지했습니다. 컨텍스트·GPU layer·KV cache 설정을 줄인 뒤 언로드하고 다시 로드하세요. 자동 재시작은 하지 않습니다.';
+              child.stdin.end();
+            }
             if (end) pending = '';
           };
           stream.on('data', (chunk: Buffer) => log(decoder.write(chunk)));
@@ -1244,6 +1154,7 @@ export class RuntimeManager {
           ) {
             current.engineStopped = true;
             current.reservedVramMb = 0;
+            current.reservedRamMb = 0;
           }
         });
         child.on('close', () => {
@@ -1293,6 +1204,7 @@ export class RuntimeManager {
           current.status = 'failed';
           await stopChild(current);
           current.reservedVramMb = 0;
+          current.reservedRamMb = 0;
           throw new AppError('MODEL_LOAD', current.error);
         }
       }
@@ -1323,12 +1235,14 @@ export class RuntimeManager {
       clearInterval(this.idleTimer);
       this.closePromise = this.serial(async () => {
         await this.downloads.close();
+        await this.engines.close();
         const results = await Promise.allSettled(
           [...this.instances.values()].map(async (instance) => {
             instance.leases = 0;
             await stopChild(instance);
             instance.status = 'stopped';
             instance.reservedVramMb = 0;
+            instance.reservedRamMb = 0;
           }),
         );
         const failure = results.find((result) => result.status === 'rejected');

@@ -1,3 +1,4 @@
+import { t as localize, setLocale, useLocale } from './i18n';
 import { useEffect, useId, useRef, useState, type ReactNode, type KeyboardEvent } from 'react';
 import { Icon } from './icons';
 import { SettingsBusyContext } from './SettingsSurface';
@@ -9,6 +10,9 @@ export const settingsSections = [
   { id: 'routing', label: '역할별 모델', icon: 'bolt' },
   { id: 'skills', label: '스킬', icon: 'bolt' },
   { id: 'mcp', label: 'MCP', icon: 'bolt' },
+  { id: 'lsp', label: '언어 서버', icon: 'bolt' },
+  { id: 'browser', label: '브라우저', icon: 'cloud' },
+  { id: 'automations', label: '예약 실행', icon: 'bolt' },
   { id: 'telegram', label: 'Telegram', icon: 'chat' },
   { id: 'worktree', label: 'Worktree', icon: 'folder' },
   { id: 'data', label: '데이터와 백업', icon: 'settings' },
@@ -26,6 +30,7 @@ export function SettingsScreen({
   onClose: () => void;
   children: ReactNode;
 }) {
+  const locale = useLocale();
   const dialog = useRef<HTMLDialogElement>(null);
   const tabs = useRef<(HTMLButtonElement | null)[]>([]);
   const prefix = useId();
@@ -63,11 +68,20 @@ export function SettingsScreen({
       }}
     >
       <header className="settings-screen-header">
-        <h2 id={`${prefix}-title`}>설정</h2>
+        <h2 id={`${prefix}-title`}>{localize('설정')}</h2>
+        <select
+          className="language-select"
+          aria-label={localize('표시 언어')}
+          value={locale}
+          onChange={(event) => setLocale(event.target.value === 'en' ? 'en' : 'ko')}
+        >
+          <option value="ko">한국어</option>
+          <option value="en">English</option>
+        </select>
         <button
           type="button"
           className="icon-button"
-          aria-label="설정 화면 닫기"
+          aria-label={localize('설정 화면 닫기')}
           disabled={busy}
           onClick={onClose}
         >
@@ -78,7 +92,7 @@ export function SettingsScreen({
         <nav
           className="settings-screen-nav"
           role="tablist"
-          aria-label="설정 카테고리"
+          aria-label={localize('설정 카테고리')}
           aria-orientation="vertical"
         >
           {settingsSections.map((section, index) => (
@@ -99,7 +113,7 @@ export function SettingsScreen({
               onClick={() => onSelect(section.id)}
             >
               <Icon name={section.icon} size={18} />
-              {section.label}
+              {localize(section.label)}
             </button>
           ))}
         </nav>

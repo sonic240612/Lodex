@@ -1,3 +1,4 @@
+import { t as localize } from './i18n';
 import { SettingsSurface } from './SettingsSurface';
 import { useEffect, useId, useRef, useState } from 'react';
 import type { McpSelection, Session } from '@lodex/contracts';
@@ -15,6 +16,7 @@ import {
 } from './bridge';
 import { Icon } from './icons';
 import { McpOAuthPanel } from './McpOAuthPanel';
+import { McpResourceUpdates } from './McpResourceUpdates';
 
 export interface McpSelectionSave {
   mcp: McpSelection[];
@@ -106,7 +108,7 @@ function McpContentEntry({
               <label className="field">
                 <span>
                   {parameter.name}
-                  {parameter.required ? ' · 필수' : ''}
+                  {parameter.required ? localize(' · 필수') : ''}
                 </span>
                 {parameter.description && <small>{parameter.description}</small>}
                 <input
@@ -143,7 +145,7 @@ function McpContentEntry({
                     void onComplete(parameter.name, argumentValue(parameter.name), arguments_)
                       .then((values) => {
                         setSuggestions((current) => ({ ...current, [parameter.name]: values }));
-                        if (!values.length) setCompletionError('추천할 값이 없습니다.');
+                        if (!values.length) setCompletionError(localize('추천할 값이 없습니다.'));
                       })
                       .catch((failure: unknown) =>
                         setCompletionError(
@@ -153,12 +155,17 @@ function McpContentEntry({
                       .finally(() => setCompletionBusy(undefined));
                   }}
                 >
-                  {completionBusy === parameter.name ? '불러오는 중…' : '값 추천'}
+                  {completionBusy === parameter.name
+                    ? localize('불러오는 중…')
+                    : localize('값 추천')}
                 </button>
               )}
               {!!values.length && (
-                <div className="mcp-completion-values" aria-label={`${parameter.name} 추천값`}>
-                  <span>추천</span>
+                <div
+                  className="mcp-completion-values"
+                  aria-label={localize('{0} 추천값', parameter.name)}
+                >
+                  <span>{localize('추천')}</span>
                   {values.map((value) => (
                     <button
                       type="button"
@@ -189,27 +196,32 @@ function McpContentEntry({
             )
           }
         >
-          {preview ? '다시 읽기' : '내용 미리보기'}
+          {preview ? localize('다시 읽기') : localize('내용 미리보기')}
         </button>
       </fieldset>
       {issue && <p className="form-error">{issue}</p>}
       {preview && (
-        <div className="mcp-content-preview" aria-label={`${name} 미리보기`}>
+        <div className="mcp-content-preview" aria-label={localize('{0} 미리보기', name)}>
           <p className="skill-source">
             {preview.kind === 'resource'
-              ? '리소스'
+              ? localize('리소스')
               : preview.kind === 'resource_template'
-                ? '리소스 템플릿'
-                : '프롬프트'}{' '}
+                ? localize('리소스 템플릿')
+                : localize('프롬프트')}{' '}
             · {preview.resolvedUri ?? preview.entryKey} · {preview.bytes.toLocaleString()} bytes
             <br />
-            읽은 시간 {new Date(preview.readAt).toLocaleString()}
+            {localize('읽은 시간 ')}
+            {new Date(preview.readAt).toLocaleString()}
           </p>
           <pre tabIndex={0}>{preview.text}</pre>
-          <p>위 내용을 확인한 뒤 첨부하면 다음 요청부터 대화의 참고 자료로 전달됩니다.</p>
+          <p>
+            {localize('위 내용을 확인한 뒤 첨부하면 다음 요청부터 대화의 참고 자료로 전달됩니다.')}
+          </p>
           {attachDisabledReason && <p role="status">{attachDisabledReason}</p>}
           {expired && (
-            <p className="form-error">미리보기가 만료되었습니다. 다시 읽은 뒤 첨부하세요.</p>
+            <p className="form-error">
+              {localize('미리보기가 만료되었습니다. 다시 읽은 뒤 첨부하세요.')}
+            </p>
           )}
           <button
             className="primary-button"
@@ -217,7 +229,7 @@ function McpContentEntry({
             disabled={disabled || !!attachDisabledReason || expired}
             onClick={() => onAttach(preview)}
           >
-            확인한 내용 첨부
+            {localize('확인한 내용 첨부')}
           </button>
         </div>
       )}
@@ -273,9 +285,9 @@ export function McpManager({
   const attachments = session?.mcpAttachments ?? [];
   const attachDisabledReason =
     attachments.length >= 8
-      ? '첨부는 최대 8개입니다. 기존 첨부를 제거한 뒤 추가하세요.'
+      ? localize('첨부는 최대 8개입니다. 기존 첨부를 제거한 뒤 추가하세요.')
       : provider === 'openrouter' && !consent
-        ? '위에서 OpenRouter 전송에 동의한 뒤 첨부할 수 있습니다.'
+        ? localize('위에서 OpenRouter 전송에 동의한 뒤 첨부할 수 있습니다.')
         : undefined;
   const stale = selected.some((selection) => {
     const server = servers.find((server) => server.id === selection.serverId);
@@ -391,7 +403,7 @@ export function McpManager({
       await onAttach(value, provider === 'openrouter' && consent, baseVersion);
       if (mounted.current) {
         setPreview(undefined);
-        setStatus('확인한 내용을 대화에 첨부했습니다.');
+        setStatus(localize('확인한 내용을 대화에 첨부했습니다.'));
       }
     });
   }
@@ -406,27 +418,34 @@ export function McpManager({
     >
       <div className="dialog-header">
         <h2 id="mcp-title">MCP</h2>
-        <button className="icon-button" aria-label="MCP 관리 닫기" onClick={onClose}>
+        <button className="icon-button" aria-label={localize('MCP 관리 닫기')} onClick={onClose}>
           <Icon name="close" />
         </button>
       </div>
       <div className="settings-body">
         {!nativeDesktop && (
-          <p className="demo-notice">MCP 서버 연결은 데스크톱 앱에서 사용할 수 있습니다.</p>
+          <p className="demo-notice">
+            {localize('MCP 서버 연결은 데스크톱 앱에서 사용할 수 있습니다.')}
+          </p>
         )}
         <section>
           <h3>
-            {session ? '이 대화의 도구' : '새 대화의 도구'} · {selected.length}/16
+            {session ? localize('이 대화의 도구') : localize('새 대화의 도구')} · {selected.length}
+            /16
           </h3>
           <p>
-            선택한 도구는 Build 모드에서 모델이 호출할 수 있습니다. Plan 모드와 Autopilot에서는 MCP
-            도구를 호출하지 않습니다.
+            {localize(
+              '선택한 도구는 Build 모드에서 설정한 승인 단계에 따라 실행됩니다. Plan 모드에서는 읽기 전용으로 명시된 도구만 사용할 수 있습니다.',
+            )}
           </p>
           <p>
-            서버는 파일이나 외부 서비스에 접근할 수 있습니다. 도구 설명과 권한을 확인하고 필요한
-            도구만 선택하세요.
+            {localize(
+              '서버는 파일이나 외부 서비스에 접근할 수 있습니다. 도구 설명과 권한을 확인하고 필요한 도구만 선택하세요.',
+            )}
           </p>
-          {conflict && <p role="status">대화가 변경되었습니다. 저장된 선택을 다시 불러오세요.</p>}
+          {conflict && (
+            <p role="status">{localize('대화가 변경되었습니다. 저장된 선택을 다시 불러오세요.')}</p>
+          )}
           <fieldset disabled={busy || unavailable || running}>
             <button
               type="button"
@@ -437,7 +456,7 @@ export function McpManager({
                 setPreview(undefined);
               }}
             >
-              저장된 선택 불러오기
+              {localize('저장된 선택 불러오기')}
             </button>
             {selected.length > 0 && (
               <ul className="skill-selection-list">
@@ -445,7 +464,7 @@ export function McpManager({
                   <li key={selection.serverId + selection.toolName}>
                     <span>
                       {servers.find((server) => server.id === selection.serverId)?.config.name ??
-                        '제거된 서버'}{' '}
+                        localize('제거된 서버')}{' '}
                       · {selection.toolName}
                     </span>
                     <button
@@ -454,7 +473,7 @@ export function McpManager({
                         setSelected((current) => current.filter((value) => value !== selection))
                       }
                     >
-                      선택 해제
+                      {localize('선택 해제')}
                     </button>
                   </li>
                 ))}
@@ -468,14 +487,15 @@ export function McpManager({
                   onChange={(event) => setConsent(event.target.checked)}
                 />
                 <span>
-                  MCP 도구 설명·결과와 첨부한 내용을 OpenRouter 및 모델 제공자에게 전송하는 데
-                  동의합니다. 이전 대화에 남은 내용도 포함합니다.
+                  {localize(
+                    'MCP 도구 설명·결과와 첨부한 내용을 OpenRouter 및 모델 제공자에게 전송하는 데 동의합니다. 이전 대화에 남은 내용도 포함합니다.',
+                  )}
                 </span>
               </label>
             )}
             {stale && (
               <p className="form-error">
-                변경되거나 제거된 도구를 선택 해제하고 최신 목록에서 다시 선택하세요.
+                {localize('변경되거나 제거된 도구를 선택 해제하고 최신 목록에서 다시 선택하세요.')}
               </p>
             )}
             <button
@@ -493,36 +513,43 @@ export function McpManager({
                 )
               }
             >
-              {session ? '대화에 적용' : '선택한 도구로 새 대화'}
+              {session ? localize('대화에 적용') : localize('선택한 도구로 새 대화')}
             </button>
           </fieldset>
         </section>
-        <section aria-label="대화에 첨부한 MCP 자료">
-          <h3>첨부한 자료 · {attachments.length}/8</h3>
+        <section aria-label={localize('대화에 첨부한 MCP 자료')}>
+          <h3>
+            {localize('첨부한 자료 · ')}
+            {attachments.length}/8
+          </h3>
+          {session && (
+            <McpResourceUpdates session={session} servers={servers} disabled={unavailable} />
+          )}
           <p>
-            리소스와 프롬프트는 아래에서 직접 미리 보고 첨부할 수 있습니다. Plan과 Build 모두 첨부
-            시점의 내용을 사용하며 서버의 변경 사항을 자동으로 가져오지 않습니다.
+            {localize(
+              '리소스와 프롬프트는 아래에서 직접 미리 보고 첨부할 수 있습니다. Plan과 Build 모두 첨부 시점의 내용을 사용하며 서버의 변경 사항을 자동으로 가져오지 않습니다.',
+            )}
           </p>
-          {!attachments.length && <p>첨부한 자료가 없습니다.</p>}
+          {!attachments.length && <p>{localize('첨부한 자료가 없습니다.')}</p>}
           {attachments.map((attachment) => (
             <article className="skill-card mcp-attachment" key={attachment.id}>
               <strong>
                 {servers.find((server) => server.id === attachment.serverId)?.config.name ??
-                  '저장된 서버 자료'}
+                  localize('저장된 서버 자료')}
               </strong>
               <p className="skill-source">
                 {attachment.kind === 'resource'
-                  ? '리소스'
+                  ? localize('리소스')
                   : attachment.kind === 'resource_template'
-                    ? '리소스 템플릿'
-                    : '프롬프트'}{' '}
+                    ? localize('리소스 템플릿')
+                    : localize('프롬프트')}{' '}
                 · {attachment.resolvedUri ?? attachment.entryKey}
                 <br />
                 {attachment.bytes.toLocaleString()} bytes ·{' '}
                 {new Date(attachment.readAt).toLocaleString()}
               </p>
               <details>
-                <summary>첨부한 내용 보기</summary>
+                <summary>{localize('첨부한 내용 보기')}</summary>
                 <pre tabIndex={0}>{attachment.text}</pre>
               </details>
               <button
@@ -533,30 +560,34 @@ export function McpManager({
                     await onRemoveAttachment(attachment.id, baseVersion);
                     if (mounted.current)
                       setStatus(
-                        '첨부 자료를 제거했습니다. 이전 대화에 전송된 내용은 남아 있습니다.',
+                        localize(
+                          '첨부 자료를 제거했습니다. 이전 대화에 전송된 내용은 남아 있습니다.',
+                        ),
                       );
                   })
                 }
               >
-                첨부 제거
+                {localize('첨부 제거')}
               </button>
             </article>
           ))}
           {attachments.length >= 8 && (
-            <p role="status">새 자료를 첨부하려면 기존 첨부를 제거하세요.</p>
+            <p role="status">{localize('새 자료를 첨부하려면 기존 첨부를 제거하세요.')}</p>
           )}
         </section>
-        <section className="skill-catalog" aria-label="등록한 MCP 서버">
+        <section className="skill-catalog" aria-label={localize('등록한 MCP 서버')}>
           <div className="edit-actions">
-            <h3>등록한 서버</h3>
+            <h3>{localize('등록한 서버')}</h3>
             <button
               disabled={busy || !nativeDesktop || !connected}
               onClick={() => void operation(async () => {}, true)}
             >
-              목록 새로고침
+              {localize('목록 새로고침')}
             </button>
           </div>
-          {loaded && !servers.length && <p>아래에서 서버 설정을 가져와 연결하세요.</p>}
+          {loaded && !servers.length && (
+            <p>{localize('아래에서 서버 설정을 가져와 연결하세요.')}</p>
+          )}
           {servers.map((server) => (
             <article className="skill-card" key={server.id}>
               <strong>{server.config.name}</strong>
@@ -564,9 +595,13 @@ export function McpManager({
                 {server.config.transport === 'stdio' ? server.config.executable : server.config.url}
               </p>
               <small>
-                {server.config.transport} · {server.protocol ?? '버전 미확인'} · 도구{' '}
-                {server.tools.length}개 · 리소스 {server.resources?.length ?? 0}개 · 프롬프트{' '}
-                {server.prompts?.length ?? 0}개{server.supportsCompletions ? ' · 인자 추천' : ''}
+                {server.config.transport} · {server.protocol ?? localize('버전 미확인')}
+                {localize(' · 도구')} {server.tools.length}
+                {localize('개 · 리소스 ')}
+                {server.resources?.length ?? 0}
+                {localize('개 · 프롬프트')} {server.prompts?.length ?? 0}
+                {localize('개')}
+                {server.supportsCompletions ? localize(' · 인자 추천') : ''}
               </small>
               {server.tools.map((tool) => {
                 const selection = selected.find(
@@ -612,7 +647,7 @@ export function McpManager({
                       <span>{tool.name}</span>
                     </label>
                     <details>
-                      <summary>도구 설명과 입력 형식</summary>
+                      <summary>{localize('도구 설명과 입력 형식')}</summary>
                       <p>{tool.definition.description}</p>
                       <pre>{JSON.stringify(tool.definition.inputSchema, null, 2)}</pre>
                     </details>
@@ -621,17 +656,18 @@ export function McpManager({
                 );
               })}
               <details className="mcp-content-catalog">
-                <summary>리소스·프롬프트 찾아보기</summary>
+                <summary>{localize('리소스·프롬프트 찾아보기')}</summary>
                 <p>
-                  미리보기를 누르면 등록한 서버에 연결해 내용을 읽습니다. stdio 프로그램이
-                  실행되거나 HTTP 서버에 요청이 전달될 수 있습니다.
+                  {localize(
+                    '미리보기를 누르면 등록한 서버에 연결해 내용을 읽습니다. stdio 프로그램이 실행되거나 HTTP 서버에 요청이 전달될 수 있습니다.',
+                  )}
                 </p>
                 {server.resources === undefined && server.prompts === undefined ? (
-                  <p>이 서버를 다시 검사하면 리소스와 프롬프트 목록을 가져옵니다.</p>
+                  <p>{localize('이 서버를 다시 검사하면 리소스와 프롬프트 목록을 가져옵니다.')}</p>
                 ) : (
                   <>
-                    <h4>리소스</h4>
-                    {!server.resources?.length && <p>등록된 리소스가 없습니다.</p>}
+                    <h4>{localize('리소스')}</h4>
+                    {!server.resources?.length && <p>{localize('등록된 리소스가 없습니다.')}</p>}
                     {server.resources?.map((resource) => {
                       const current =
                         preview?.serverId === server.id &&
@@ -672,8 +708,8 @@ export function McpManager({
                         />
                       );
                     })}
-                    <h4>프롬프트</h4>
-                    {!server.prompts?.length && <p>등록된 프롬프트가 없습니다.</p>}
+                    <h4>{localize('프롬프트')}</h4>
+                    {!server.prompts?.length && <p>{localize('등록된 프롬프트가 없습니다.')}</p>}
                     {server.prompts?.map((prompt) => {
                       const current =
                         preview?.serverId === server.id &&
@@ -685,7 +721,7 @@ export function McpManager({
                         <McpContentEntry
                           key={server.revision + prompt.name}
                           name={prompt.name}
-                          source="서버 프롬프트"
+                          source={localize('서버 프롬프트')}
                           description={prompt.definition.description}
                           parameters={prompt.definition.arguments ?? []}
                           supported={prompt.supported}
@@ -719,7 +755,7 @@ export function McpManager({
                     })}
                     {!!server.resourceTemplates?.length && (
                       <>
-                        <h4>리소스 템플릿</h4>
+                        <h4>{localize('리소스 템플릿')}</h4>
                         {server.resourceTemplates.map((template) => {
                           const current =
                             preview?.serverId === server.id &&
@@ -784,7 +820,7 @@ export function McpManager({
               </details>
               <div className="edit-actions">
                 <button disabled={busy || unavailable || running} onClick={() => edit(server)}>
-                  설정 편집·다시 검사
+                  {localize('설정 편집·다시 검사')}
                 </button>
                 <button
                   className="danger-button"
@@ -797,30 +833,35 @@ export function McpManager({
                     }, true)
                   }
                 >
-                  목록에서 제거
+                  {localize('목록에서 제거')}
                 </button>
               </div>
             </article>
           ))}
         </section>
         <section>
-          <h3>{previous ? `${previous.config.name} 설정 편집` : '서버 설정 가져오기'}</h3>
+          <h3>
+            {previous
+              ? localize('{0} 설정 편집', previous.config.name)
+              : localize('서버 설정 가져오기')}
+          </h3>
           <p>
-            Codex TOML, Claude·pi 계열 mcpServers JSON, OpenCode JSONC, Hermes YAML 또는 서버 하나의
-            설정을 붙여 넣으세요. stdio는 설치된 node·python 등의 절대 경로가 필요하며, 기존 SSE
-            서버는 transport를 sse로 지정할 수 있습니다.
+            {localize(
+              'Codex TOML, Claude·pi 계열 mcpServers JSON, OpenCode JSONC, Hermes YAML 또는 서버 하나의 설정을 붙여 넣으세요. stdio는 설치된 node·python 등의 절대 경로가 필요하며, 기존 SSE 서버는 transport를 sse로 지정할 수 있습니다.',
+            )}
           </p>
           <p>
-            키는 앱 .env의 LODEX_MCP_ 변수로 관리합니다. env·headers에는 secretRef를 사용하세요.
-            가져오기는 서버를 실행하거나 패키지를 설치하지 않습니다.
+            {localize(
+              '키는 앱 .env의 LODEX_MCP_ 변수로 관리합니다. env·headers에는 secretRef를 사용하세요. 가져오기는 서버를 실행하거나 패키지를 설치하지 않습니다.',
+            )}
           </p>
           <details>
-            <summary>HTTP 설정 예시</summary>
+            <summary>{localize('HTTP 설정 예시')}</summary>
             <pre>{example}</pre>
           </details>
           <fieldset disabled={busy || unavailable}>
             <label className="field">
-              MCP 설정
+              {localize('MCP 설정')}
               <textarea
                 rows={10}
                 spellCheck={false}
@@ -834,7 +875,12 @@ export function McpManager({
                 }}
               />
             </label>
-            {sourceFile && <p className="skill-source">불러온 파일: {sourceFile.path}</p>}
+            {sourceFile && (
+              <p className="skill-source">
+                {localize('불러온 파일: ')}
+                {sourceFile.path}
+              </p>
+            )}
             <div className="edit-actions">
               <button
                 type="button"
@@ -852,7 +898,7 @@ export function McpManager({
                   }, false)
                 }
               >
-                설정 파일 선택
+                {localize('설정 파일 선택')}
               </button>
               <button
                 disabled={!source.trim()}
@@ -864,9 +910,9 @@ export function McpManager({
                   })
                 }
               >
-                설정 검사
+                {localize('설정 검사')}
               </button>
-              {previous && <button onClick={() => edit()}>새 서버 입력</button>}
+              {previous && <button onClick={() => edit()}>{localize('새 서버 입력')}</button>}
             </div>
             {candidates.map((candidate, index) => (
               <article className="skill-card" key={index}>
@@ -893,8 +939,9 @@ export function McpManager({
                     onChange={(event) => setApproved(event.target.checked)}
                   />
                   <span>
-                    위 서버를 신뢰하며 연결 검사를 허용합니다. stdio 프로그램은 내 사용자 권한으로
-                    실행되고 HTTP·SSE 서버에는 지정한 인증값이 전달됩니다.
+                    {localize(
+                      '위 서버를 신뢰하며 연결 검사를 허용합니다. stdio 프로그램은 내 사용자 권한으로 실행되고 HTTP·SSE 서버에는 지정한 인증값이 전달됩니다.',
+                    )}
                   </span>
                 </label>
                 {candidates
@@ -909,20 +956,24 @@ export function McpManager({
                           await registerMcp(candidate.config!, previous);
                           edit();
                           setStatus(
-                            '연결 검사 후 등록했습니다. 위 목록에서 도구를 선택하거나 자료를 미리 보세요.',
+                            localize(
+                              '연결 검사 후 등록했습니다. 위 목록에서 도구를 선택하거나 자료를 미리 보세요.',
+                            ),
                           );
                         }, true)
                       }
                     >
-                      {candidate.name} 연결·등록
+                      {candidate.name}
+                      {localize(' 연결·등록')}
                     </button>
                   ))}
               </>
             )}
           </fieldset>
           <p>
-            첨부는 정적·매개변수형 텍스트 리소스와 프롬프트를 지원합니다. 이미지·파일 데이터와
-            참조·정규식·format이 필요한 도구 입력 형식은 지원하지 않습니다.
+            {localize(
+              '정적·매개변수형 텍스트 리소스와 프롬프트를 첨부할 수 있습니다. 도구 입력의 로컬 $ref·정규식·format을 검증하며 지원하지 않는 스키마는 진단합니다. 이미지·바이너리 첨부는 아직 지원하지 않습니다.',
+            )}
           </p>
         </section>
         <McpOAuthPanel connected={connected} />

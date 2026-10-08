@@ -1,0 +1,121 @@
+name: Desktop packages
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version already committed in package.json, Cargo.toml and tauri.conf.json
+        required: true
+        type: string
+      sign_updates:
+        description: Sign updater artifacts (requires updater public variable and private secret)
+        type: boolean
+        default: false
+      draft_release:
+        description: Attach packages to a draft release (requires signed updates; never publishes)
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: desktop-packages-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  package:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, macos-15, macos-15-intel, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - run: npm install --global npm@11.19.1
+      - name: Linux native dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev patchelf xdg-utils
+      - run: rustup show
+      - run: npm ci
+      - name: Verify application and packaged runtime
+        run: npm run check
+      - run: node scripts/smoke-runtime.mjs
+      - run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
+      - name: Import Windows signing certificate when configured
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if ($env:CERTIFICATE) {
+            $certificatePath = Join-Path $env:RUNNER_TEMP 'lodex-signing.pfx'
+            [IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($env:CERTIFICATE))
+            try {
+              $certificate = Import-PfxCertificate -FilePath $certificatePath -CertStoreLocation Cert:\CurrentUser\My -Password (ConvertTo-SecureString $env:CERTIFICATE_PASSWORD -AsPlainText -Force)
+              "LODEX_CERTIFICATE_THUMBPRINT=$($certificate.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            } finally { Remove-Item -LiteralPath $certificatePath -Force }
+          }
+      - name: Prepare release configuration
+        env:
+          LODEX_RELEASE_VERSION: ${{ inputs.version }}
+          LODEX_SIGN_UPDATES: ${{ inputs.sign_updates }}
+          LODEX_DRAFT_RELEASE: ${{ inputs.draft_release }}
+          LODEX_UPDATER_PUBLIC_KEY: ${{ vars.LODEX_UPDATER_PUBLIC_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: node scripts/release-config.mjs
+      - name: Component and license inventory
+        run: node scripts/release-inventory.mjs
+      - name: Build installers and optional draft
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.sign_updates && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          projectPath: apps/desktop
+          tauriScript: npx tauri
+          args: --config ../../.local/release/tauri.release.json
+          tagName: ${{ inputs.draft_release && 'v__VERSION__' || '' }}
+          releaseName: ${{ inputs.draft_release && 'Lodex v__VERSION__' || '' }}
+          releaseDraft: true
+          releaseBody: Download the package for your operating system. Review installation and signing checks before publishing.
+      - name: Collect checksums
+        run: node scripts/release-inventory.mjs --checksums
+      - uses: actions/upload-artifact@v7
+        with:
+          name: lodex-${{ inputs.version }}-${{ matrix.os }}
+          path: |
+            apps/desktop/src-tauri/target/release/bundle/**/*.exe
+            apps/desktop/src-tauri/target/release/bundle/**/*.dmg
+            apps/desktop/src-tauri/target/release/bundle/**/*.deb
+            apps/desktop/src-tauri/target/release/bundle/**/*.AppImage
+            apps/desktop/src-tauri/target/release/bundle/**/*.tar.gz
+            apps/desktop/src-tauri/target/release/bundle/**/*.sig
+            .local/release/components.json
+            .local/release/SHA256SUMS
+            .runtime/DEPENDENCY_LICENSES.txt
+            .runtime/NODE_LICENSE.txt
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30
+      - name: Remove imported Windows certificate
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if ($env:LODEX_CERTIFICATE_THUMBPRINT -match '^[A-Fa-f0-9]{40}$') {
+            $certificatePath = "Cert:\CurrentUser\My\$env:LODEX_CERTIFICATE_THUMBPRINT"
+            Remove-Item -LiteralPath $certificatePath -Force -ErrorAction SilentlyContinue
+          }

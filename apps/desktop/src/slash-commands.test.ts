@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { defaultModelConfig, defaultPlan, type Session } from '@lodex/contracts';
+import type { RegisteredSkill } from '@lodex/skills';
 import {
   availableSlashCommands,
   composerRequestMode,
@@ -22,6 +23,56 @@ const session: Session = {
 };
 
 describe('composer slash commands', () => {
+  it('suggests selected manual skills and uses IDs for duplicate or reserved names', () => {
+    const skill = (id: string, name: string, user = true) =>
+      ({
+        id,
+        name,
+        description: 'Workflow',
+        revision: 'current',
+        invocation: { model: false, user },
+      }) as RegisteredSkill;
+    const skills = [
+      skill('a', 'review'),
+      skill('b', 'duplicate'),
+      skill('c', 'duplicate'),
+      skill('d', 'plan'),
+      skill('e', 'hidden', false),
+      skill('f', 'not-selected'),
+    ];
+    const selected = {
+      ...session,
+      skills: skills.slice(0, -1).map(({ id, revision }) => ({ id, revision })),
+    };
+    const choices = availableSlashCommands(selected, true, skills);
+    expect(
+      choices.filter((choice) => choice.id.startsWith('skill-')).map((choice) => choice.insertText),
+    ).toEqual(['/review ', '/skill b ', '/skill c ', '/skill d ']);
+    expect(suggestSlashCommands('/skill du', choices).map((choice) => choice.id)).toEqual([
+      'skill-b',
+      'skill-c',
+    ]);
+    expect(parseComposerInput('/review fix source.ts', skills)).toEqual({
+      command: 'skill',
+      argument: '/review fix source.ts',
+    });
+    expect(parseComposerInput('/skill d query', skills)).toEqual({
+      command: 'skill',
+      argument: '/skill d query',
+    });
+    expect(parseComposerInput('/plan /skill d query', skills)).toEqual({
+      command: 'plan',
+      argument: '/skill d query',
+    });
+    expect(parseComposerInput('/hidden', skills).command).toBe('unknown');
+    expect(
+      availableSlashCommands(
+        { ...selected, skills: [{ id: 'a', revision: 'stale' }] },
+        true,
+        skills,
+      ).some((choice) => choice.id === 'skill-a'),
+    ).toBe(false);
+  });
   it.each([
     ['/PLAN Fix MyFile.ts', 'plan', 'Fix MyFile.ts'],
     [' /계획 모드 코드 검토\n테스트 계획 ', 'plan', '코드 검토\n테스트 계획'],
@@ -84,7 +135,7 @@ describe('composer slash commands', () => {
     const ids = (target: Session | undefined, connected = true) =>
       availableSlashCommands(target, connected).map((item) => item.id);
     expect(ids(undefined, false)).toEqual(['new', 'settings', 'help']);
-    expect(ids(undefined)).toEqual(['plan', 'goal', 'new', 'settings', 'help']);
+    expect(ids(undefined)).toEqual(['plan', 'goal', 'new', 'settings', 'skill', 'help']);
     expect(
       ids({
         ...session,

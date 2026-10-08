@@ -1,3 +1,4 @@
+import { t as localize } from './i18n';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { memo, useState, type ReactNode } from 'react';
@@ -16,7 +17,7 @@ function MarkdownLink({ href, children }: { href: string; children: ReactNode })
           event.preventDefault();
           setError('');
           void invoke('open_external', { url: href }).catch(() =>
-            setError('링크를 열지 못했습니다.'),
+            setError(localize('링크를 열지 못했습니다.')),
           );
         }}
       >
@@ -45,7 +46,10 @@ export const Markdown = memo(function Markdown({ text }: { text: string }) {
             href ? <MarkdownLink href={href}>{children}</MarkdownLink> : <span>{children}</span>,
           img: ({ src, alt }) =>
             src ? (
-              <MarkdownLink href={src}>이미지: {alt || '보기'}</MarkdownLink>
+              <MarkdownLink href={src}>
+                {localize('이미지: ')}
+                {alt || localize('보기')}
+              </MarkdownLink>
             ) : (
               <span>{alt}</span>
             ),

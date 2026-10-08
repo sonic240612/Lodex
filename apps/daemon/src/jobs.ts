@@ -17,6 +17,11 @@ export const commandJobInputSchema = z.strictObject({
   eof: z.boolean().default(false),
 });
 export const commandJobIdSchema = z.strictObject({ jobId: z.uuid() });
+export const commandJobResizeSchema = commandJobIdSchema.extend({
+  cols: z.number().int().min(20).max(500),
+  rows: z.number().int().min(5).max(200),
+});
+export const commandJobResizeActionSchema = commandJobResizeSchema.extend({ sessionId: z.uuid() });
 export const commandJobActionSchema = commandJobInputSchema.extend({ sessionId: z.uuid() });
 export const commandJobTools: ToolDefinition[] = [
   {
@@ -33,8 +38,17 @@ export const commandJobTools: ToolDefinition[] = [
     function: {
       name: 'write_command_input',
       description:
-        "Send exact text to the open stdin pipe of this conversation's interactive command. Include a newline when needed; eof=true closes stdin. Input is not a PTY. External effects use the same permission policy as the command.",
+        "Send exact text to this conversation's interactive command. For a pipe include a newline when needed; eof=true closes stdin. For a PTY, input is raw terminal data (Enter is \\r); eof sends Ctrl-D on Unix or Ctrl-Z/Enter on Windows. External effects use the same permission policy as the command.",
       parameters: z.toJSONSchema(commandJobInputSchema),
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'resize_command_terminal',
+      description:
+        "Resize this conversation's active PTY in columns and rows. Only PTY jobs support resizing. This does not restart the command.",
+      parameters: z.toJSONSchema(commandJobResizeSchema),
     },
   },
   {
@@ -60,6 +74,7 @@ export class CommandJobs {
       controller: AbortController;
       task: Promise<CommandExecution>;
       write?: (text: string, eof: boolean) => void;
+      resize?: (cols: number, rows: number) => void;
     }
   >();
   private constructor(private store: Store) {}
@@ -146,6 +161,18 @@ export class CommandJobs {
     }
     return structuredClone(job);
   }
+  async resize(sessionId: string, id: string, cols: number, rows: number) {
+    commandJobResizeSchema.parse({ jobId: id, cols, rows });
+    const job = this.get(sessionId, id),
+      live = this.live.get(id);
+    if (!job.terminal || !live?.resize)
+      throw new AppError('TERMINAL_CLOSED', '크기를 변경할 실행 중인 터미널이 없습니다.', 409);
+    live.resize(cols, rows);
+    job.terminal = { cols, rows };
+    if (job.execution) job.execution.terminal = { cols, rows };
+    await this.save();
+    return structuredClone(job);
+  }
   async stop(sessionId: string, id: string) {
     const job = this.get(sessionId, id),
       live = this.live.get(id);
@@ -168,7 +195,7 @@ export class CommandJobs {
   ): Promise<CommandExecution> {
     if (this.closing) throw new AppError('COMMAND_JOBS_CLOSED', '앱이 종료되는 중입니다.');
     const input = jobCommandSchema.parse(JSON.parse(options.argumentsJson));
-    if (!input.interactive && !input.background)
+    if (!input.interactive && !input.background && !input.pty)
       return environment === 'host'
         ? (executor as typeof executeHostCommand)(options as HostOptions)
         : (executor as typeof executeCommand)(options as DockerOptions);
@@ -186,7 +213,8 @@ export class CommandJobs {
       projectId: options.project.id,
       runId: session.run!.id,
       actor: session.run?.actor ?? 'desktop',
-      interactive: input.interactive,
+      interactive: input.interactive || input.pty,
+      ...(input.pty ? { terminal: { cols: input.cols, rows: input.rows } } : {}),
       background: input.background,
       inputOpen: false,
       inputBytes: 0,
@@ -222,12 +250,13 @@ export class CommandJobs {
       controller: AbortController;
       task: Promise<CommandExecution>;
       write?: (text: string, eof: boolean) => void;
+      resize?: (cols: number, rows: number) => void;
     } = { controller, task: undefined as unknown as Promise<CommandExecution> };
     this.live.set(job.id, live);
     const shared = {
       ...options,
       signal: controller.signal,
-      ...(input.interactive
+      ...(job.interactive
         ? {
             inputControl: (write: (text: string, eof: boolean) => void) => {
               live.write = write;
@@ -241,9 +270,20 @@ export class CommandJobs {
             },
           }
         : {}),
+      ...(input.pty
+        ? {
+            terminalControl: (resize: (cols: number, rows: number) => void) => {
+              live.resize = resize;
+              return () => {
+                delete live.resize;
+              };
+            },
+          }
+        : {}),
       record: async (execution: CommandExecution) => {
         execution.jobId = job.id;
         execution.background = job.background;
+        if (job.terminal) execution.terminal = { ...job.terminal };
         job.execution = structuredClone(execution);
         await this.save();
         await options.record(execution);
@@ -284,6 +324,7 @@ export class CommandJobs {
       .finally(async () => {
         job.inputOpen = false;
         delete live.write;
+        delete live.resize;
         this.live.delete(job.id);
         options.signal.removeEventListener('abort', abort);
         await this.save();

@@ -2772,6 +2772,13 @@ input[type='checkbox'] {
   font-size: 20px;
   font-weight: 600;
 }
+.settings-screen-header .language-select {
+  width: auto;
+  max-width: 150px;
+  margin-left: auto;
+  margin-right: 12px;
+  min-height: 36px;
+}
 .settings-screen-layout {
   display: grid;
   grid-template-columns: 210px minmax(0, 1fr);
@@ -2839,6 +2846,61 @@ input[type='checkbox'] {
 .settings-section .dialog-header .icon-button,
 .settings-section > header .icon-button {
   display: none;
+}
+.settings-form {
+  padding: 24px;
+  min-width: 0;
+}
+.settings-form > h2,
+.settings-form > h3 {
+  margin: 0 0 16px;
+  font-size: 20px;
+}
+.settings-form p {
+  margin: 10px 0;
+  color: var(--muted);
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+}
+.settings-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 16px 0;
+}
+.settings-form input:not([type='checkbox']),
+.settings-form textarea,
+.settings-form select {
+  width: 100%;
+  min-height: 40px;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+.settings-form :is(.check-row, .checkbox-field) {
+  flex-direction: row;
+  align-items: flex-start;
+}
+.settings-form input[type='checkbox'] {
+  flex-shrink: 0;
+  margin-top: 5px;
+}
+.settings-form :is(.settings-actions, .edit-actions) {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.settings-record {
+  margin: 16px 0;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.settings-record button + button {
+  margin-left: 8px;
 }
 .slash-menu {
   position: absolute;
@@ -3059,4 +3121,29 @@ input[type='checkbox'] {
 }
 .assistant-transcript .activity-target {
   text-overflow: ellipsis;
+}
+.backup-restore-preview {
+  margin-top: 20px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+}
+.backup-restore-preview p {
+  overflow-wrap: anywhere;
+}
+.backup-restore-preview table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 16px 0;
+  font-size: 14px;
+}
+.backup-restore-preview th,
+.backup-restore-preview td {
+  padding: 8px 6px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+.backup-restore-preview li {
+  margin: 8px 0;
+  line-height: 1.6;
 }

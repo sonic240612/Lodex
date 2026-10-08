@@ -22,10 +22,13 @@ async function fixture(
     omitIssSupport?: boolean;
     dropRefresh?: boolean;
     tokenDelay?: Promise<void>;
+    dynamic?: boolean;
+    badRegistration?: 'secret' | 'redirect' | 'scope' | 'dropped';
     challenge?: (base: string) => string;
   } = {},
 ) {
   const requests: { path: string; authorization: string | undefined; body: URLSearchParams }[] = [];
+  const registrations: Record<string, unknown>[] = [];
   let base = '';
   const server = createServer((req, res) => {
     let bytes = '';
@@ -79,6 +82,23 @@ async function fixture(
           token_endpoint_auth_methods_supported: ['none'],
           code_challenge_methods_supported: options.missingPkce ? ['plain'] : ['S256'],
           authorization_response_iss_parameter_supported: !options.omitIssSupport,
+          ...(options.dynamic ? { registration_endpoint: `${base}/register` } : {}),
+        });
+      } else if (path === '/register') {
+        const registered = JSON.parse(bytes) as Record<string, unknown>;
+        registrations.push(registered);
+        if (options.badRegistration === 'dropped') {
+          req.socket.destroy();
+          return;
+        }
+        json({
+          ...registered,
+          client_id: 'dynamic-public-client',
+          ...(options.badRegistration === 'secret' ? { client_secret: 'not-accepted' } : {}),
+          ...(options.badRegistration === 'redirect'
+            ? { redirect_uris: ['https://attacker.invalid/'] }
+            : {}),
+          ...(options.badRegistration === 'scope' ? { scope: 'read write admin' } : {}),
         });
       } else if (path === '/token') {
         if (options.dropRefresh && body.get('grant_type') === 'refresh_token') {
@@ -113,7 +133,7 @@ async function fixture(
         server.close(() => resolve());
       }),
   );
-  return { base, resourceUrl: `${base}/mcp`, issuer: `${base}/issuer`, requests };
+  return { base, resourceUrl: `${base}/mcp`, issuer: `${base}/issuer`, requests, registrations };
 }
 function manager(options: { now?: () => number; ttlMs?: number } = {}) {
   const records = new Map<string, unknown>();
@@ -148,6 +168,71 @@ async function start(instance: McpOAuthManager, resourceUrl: string) {
   return { preview, login, authorization, callback };
 }
 describe('MCP OAuth public-client PKCE', () => {
+  it('registers only after endpoint approval and persists the dynamic client for refresh', async () => {
+    const f = await fixture({ dynamic: true });
+    let now = Date.now();
+    const { instance, saved } = manager({ now: () => now });
+    const selected = { resourceUrl: f.resourceUrl, clientId: '' };
+    const preview = await instance.prepare(selected);
+    expect(preview.registrationEndpoint).toBe(f.base + '/register');
+    expect(f.registrations).toHaveLength(0);
+    await expect(
+      instance.begin({ preparationId: preview.id, approvedOrigins: [] }),
+    ).rejects.toMatchObject({ code: 'MCP_OAUTH_APPROVAL' });
+    expect(f.registrations).toHaveLength(0);
+    const login = await instance.begin({
+      preparationId: preview.id,
+      approvedOrigins: preview.origins,
+    });
+    const authorization = new URL(login.authorizationUrl);
+    expect(authorization.searchParams.get('client_id')).toBe('dynamic-public-client');
+    expect(f.registrations[0]?.redirect_uris).toEqual([login.redirectUri]);
+    expect(f.registrations[0]?.token_endpoint_auth_method).toBe('none');
+    const callback = new URL(login.redirectUri);
+    callback.search = new URLSearchParams({
+      code: 'fixture-code',
+      state: authorization.searchParams.get('state')!,
+      iss: preview.issuer,
+    }).toString();
+    expect((await fetch(callback)).status).toBe(200);
+    expect(saved[0]?.clientId).toBe('');
+    expect(saved[0]?.registeredClientId).toBe('dynamic-public-client');
+    await instance.close();
+    now += 3_600_000;
+    const reopened = manager({ now: () => now });
+    reopened.records.set(oauthTokenKey(selected), structuredClone(saved[0]));
+    expect(await reopened.instance.accessToken(selected)).toBe('access-2');
+    expect(
+      f.requests.filter((r) => r.path === '/token').map((r) => r.body.get('client_id')),
+    ).toEqual(['dynamic-public-client', 'dynamic-public-client']);
+    expect(f.registrations).toHaveLength(1);
+    await reopened.instance.disconnect(selected);
+    expect(await reopened.instance.accessToken(selected)).toBeNull();
+  });
+  it.each(['secret', 'redirect', 'scope', 'dropped'] as const)(
+    'does not replay or accept an invalid dynamic registration: %s',
+    async (badRegistration) => {
+      const f = await fixture({ dynamic: true, badRegistration });
+      const { instance, saved } = manager();
+      const preview = await instance.prepare({ resourceUrl: f.resourceUrl, clientId: '' });
+      const input = { preparationId: preview.id, approvedOrigins: preview.origins };
+      await expect(instance.begin(input)).rejects.toMatchObject({
+        code: expect.stringMatching(/^MCP_OAUTH_/),
+      });
+      await expect(instance.begin(input)).rejects.toMatchObject({ code: 'MCP_OAUTH_EXPIRED' });
+      expect(instance.status(preview.id).status).toBe('failed');
+      expect(f.registrations).toHaveLength(1);
+      expect(f.requests.some((r) => r.path === '/token')).toBe(false);
+      expect(saved).toHaveLength(0);
+    },
+  );
+  it('requires explicit client information when registration metadata is absent', async () => {
+    const f = await fixture();
+    const { instance } = manager();
+    await expect(
+      instance.prepare({ resourceUrl: f.resourceUrl, clientId: '' }),
+    ).rejects.toMatchObject({ code: 'MCP_OAUTH_REGISTRATION' });
+  });
   it('parses only Bearer challenge fields across schemes, quoted commas and whitespace', async () => {
     const f = await fixture({
       challenge: (base) =>

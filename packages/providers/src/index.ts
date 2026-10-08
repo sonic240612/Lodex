@@ -13,8 +13,11 @@ import {
 import { decodeSse } from './sse';
 import { ThinkingSplitter } from './thinking';
 import { privateServerFetch, connectionError } from './network';
+import { OllamaProvider } from './ollama';
+export { OllamaProvider } from './ollama';
 export { decodeSse } from './sse';
 export { privateServerFetch } from './network';
+export { openRouterAccount } from './account';
 type Fetch = (input: string, init: RequestInit) => Promise<Response>;
 type RetryWait = (milliseconds: number, signal: AbortSignal) => Promise<void>;
 const modelRetryDelaysMs = [2000, 5000, 7000] as const;
@@ -177,21 +180,24 @@ export class ChatCompletionProvider implements InferenceProvider {
   private templateCapabilitiesLoaded = false;
   private templateCapabilitiesValue: ModelTemplateCapabilities | null = null;
   constructor(
-    private kind: Exclude<ProviderId, 'demo'>,
+    private kind: Exclude<ProviderId, 'demo' | 'ollama'>,
     baseUrl: string,
     private key: string | null,
     fetcher?: Fetch,
     private retryWait: RetryWait = waitForRetry,
   ) {
-    this.fetcher = fetcher ?? (kind === 'llama-server' ? privateServerFetch : fetch);
+    this.fetcher = fetcher ?? (kind === 'openrouter' ? fetch : privateServerFetch);
     this.baseUrl =
       kind === 'openrouter'
         ? 'https://openrouter.ai/api/v1'
         : localUrlSchema.parse(baseUrl).replace(/\/$/, '');
   }
-  private async fetchResponse(path: string, init: RequestInit): Promise<Response> {
+  private async fetchResponse(path: string, init: RequestInit, atRoot = false): Promise<Response> {
     try {
-      return await this.fetcher(this.baseUrl + path, init);
+      return await this.fetcher(
+        (atRoot ? this.baseUrl.replace(/\/v1$/, '') : this.baseUrl) + path,
+        init,
+      );
     } catch (error) {
       if (init.signal?.aborted && init.signal.reason?.name !== 'TimeoutError')
         throw init.signal.reason;
@@ -288,7 +294,9 @@ export class ChatCompletionProvider implements InferenceProvider {
         {
           id: model.id,
           name: typeof model.name === 'string' ? model.name : model.id,
-          contextLength: number(model.context_length),
+          contextLength:
+            number(model.context_length) ??
+            (this.kind === 'vllm' ? number(model.max_model_len) : null),
           maxCompletionTokens: number(topProvider.max_completion_tokens),
           defaultTemperature: number(defaults.temperature),
           defaultTopP: number(defaults.top_p),
@@ -382,6 +390,12 @@ export class ChatCompletionProvider implements InferenceProvider {
     templateCapabilities: ModelTemplateCapabilities | null = null,
   ) {
     const config = request.config;
+    if (this.kind === 'mlx' && request.toolChoice === 'required')
+      throw new AppError(
+        'MODEL_TOOL_CHOICE',
+        'MLX 서버는 필수 도구 선택을 지원하지 않습니다. 자동 선택을 사용하세요.',
+      );
+    const tools = this.kind === 'mlx' && request.toolChoice === 'none' ? [] : request.tools;
     if (
       request.tools?.length &&
       (templateCapabilities?.supportsTools === false ||
@@ -394,7 +408,7 @@ export class ChatCompletionProvider implements InferenceProvider {
     return {
       model: config.model,
       messages:
-        this.kind === 'llama-server'
+        this.kind !== 'openrouter'
           ? messagesForTemplate(request.messages, templateCapabilities)
           : request.messages.map((message) => ({
               role: message.role,
@@ -414,16 +428,20 @@ export class ChatCompletionProvider implements InferenceProvider {
                 : {}),
               ...(message.reasoningContent ? { reasoning: message.reasoningContent } : {}),
             })),
-      ...(request.tools?.length
+      ...(tools?.length
         ? {
-            tools: request.tools,
-            tool_choice: 'auto',
+            tools,
+            tool_choice: request.toolChoice ?? 'auto',
             ...(this.kind === 'llama-server'
               ? { parallel_tool_calls: templateCapabilities?.supportsParallelToolCalls === true }
               : {}),
           }
         : {}),
       stream,
+      ...(stream && (this.kind === 'vllm' || this.kind === 'mlx')
+        ? { stream_options: { include_usage: true } }
+        : {}),
+      ...(request.stopSequences?.length ? { stop: request.stopSequences } : {}),
       ...(config.useDefaultTemperature ? {} : { temperature: config.temperature }),
       ...(config.useDefaultTopP ? {} : { top_p: config.topP }),
       max_tokens: config.maxTokens,
@@ -476,6 +494,40 @@ export class ChatCompletionProvider implements InferenceProvider {
     return effort ? { reasoning: { effort } } : {};
   }
   async countInputTokens(request: InferenceRequest, signal: AbortSignal): Promise<number | null> {
+    if (this.kind === 'vllm') {
+      const response = await this.fetchResponse(
+        '/tokenize',
+        {
+          method: 'POST',
+          headers: this.headers(),
+          signal,
+          redirect: 'error',
+          body: JSON.stringify({
+            model: request.config.model,
+            messages: messagesForTemplate(request.messages, null),
+            add_generation_prompt: true,
+            ...(request.tools?.length ? { tools: request.tools } : {}),
+          }),
+        },
+        true,
+      );
+      if ([404, 405, 501].includes(response.status)) {
+        await response.body?.cancel();
+        return null;
+      }
+      if (!response.ok) {
+        await response.body?.cancel();
+        throw new AppError(
+          'TOKEN_COUNT_HTTP',
+          `vLLM 입력 토큰 계산 실패 (HTTP ${response.status}).`,
+          502,
+        );
+      }
+      const count = number(object(await response.json()).count);
+      if (count === null || !Number.isInteger(count))
+        throw new AppError('TOKEN_COUNT_FORMAT', 'vLLM 토큰 계산 응답이 올바르지 않습니다.', 502);
+      return count;
+    }
     if (this.kind !== 'llama-server') return null;
     const templateCapabilities = needsTemplateCapabilities(request)
       ? await this.templateCapabilities(signal)
@@ -630,6 +682,12 @@ export class ChatCompletionProvider implements InferenceProvider {
         yield { type: part.thinking ? 'reasoning_delta' : 'text_delta', text: part.text };
       }
       if (Array.isArray(delta.tool_calls)) {
+        if (request.toolChoice === 'none' && delta.tool_calls.length)
+          throw new AppError(
+            'MODEL_TOOL_CHOICE',
+            '도구가 허용되지 않은 요청에 모델이 도구 호출을 반환했습니다.',
+            502,
+          );
         for (const [position, item] of delta.tool_calls.entries()) {
           const call = object(item),
             fn = object(call.function);
@@ -727,4 +785,16 @@ export class DemoProvider implements InferenceProvider {
     }
     yield { type: 'finished', reason: 'stop' };
   }
+}
+
+export function createInferenceProvider(
+  kind: ProviderId,
+  baseUrl: string,
+  key: string | null = null,
+): InferenceProvider {
+  return kind === 'demo'
+    ? new DemoProvider()
+    : kind === 'ollama'
+      ? new OllamaProvider(baseUrl)
+      : new ChatCompletionProvider(kind, baseUrl, key);
 }

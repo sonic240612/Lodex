@@ -16,13 +16,15 @@ import {
 } from '@lodex/contracts';
 import { z } from 'zod';
 import { resolveTarget } from './index';
+import { runPty, type TerminalControl, type TerminalOptions } from './pty';
+export type { TerminalControl, TerminalOptions } from './pty';
 
 export const executionTool: ToolDefinition = {
   type: 'function',
   function: {
     name: 'run_command',
     description:
-      'Execute a shell command in the user-enabled Linux Docker container with the selected project mounted at /workspace. cwd is project-relative. Receives bounded output and an exit code; nonzero means failure. Files in the mounted project can be changed by commands. The image, network and resource limits are fixed by the user. Set interactive=true to keep stdin open for further user/tool input. Set background=true to return a job ID immediately; poll it and stop it when finished. This is a pipe, not a PTY. Background jobs still have timeout and output limits. Never assume a proposed edit has been applied; inspect current files before testing.',
+      'Execute a shell command in the user-enabled Linux Docker container with the selected project mounted at /workspace. cwd is project-relative. Receives bounded output and an exit code; nonzero means failure. Files in the mounted project can be changed by commands. The image, network and resource limits are fixed by the user. Set interactive=true to keep stdin open. Set pty=true for programs requiring an ANSI terminal, with cols/rows for its size; PTY keeps input open automatically. Set background=true to return a job ID immediately; poll it and stop it when finished. Background jobs still have timeout and output limits. Never assume a proposed edit has been applied; inspect current files before testing.',
     parameters: z.toJSONSchema(jobCommandSchema),
   },
 };
@@ -31,7 +33,7 @@ export const hostExecutionTool: ToolDefinition = {
   function: {
     name: 'run_host_command',
     description:
-      'FULL ACCESS ONLY. Execute a command directly on the user host with the user account, inherited environment, unrestricted filesystem and network. Windows uses PowerShell; macOS and Linux use /bin/sh. cwd may be project-relative or absolute. Use interactive=true for live stdin and background=true for an immediately returned job ID. Poll job status; never claim it completed before the exit code is known. Output and duration remain bounded and cancellation terminates the owned process tree.',
+      'FULL ACCESS ONLY. Execute a command directly on the user host with the user account, inherited environment, unrestricted filesystem and network. Windows uses PowerShell; macOS and Linux use /bin/sh. cwd may be project-relative or absolute. Use interactive=true for live stdin, pty=true for an ANSI/TUI terminal (cols/rows, automatically interactive), and background=true for an immediately returned job ID. Poll job status; never claim it completed before the exit code is known. Output and duration remain bounded and cancellation terminates the owned process tree.',
     parameters: z.toJSONSchema(jobCommandSchema),
   },
 };
@@ -69,6 +71,7 @@ export type DockerCli = (
   input?: string,
   progress?: (output: string, chunk?: string) => void,
   inputControl?: InputControl,
+  terminal?: TerminalOptions,
 ) => Promise<CliResult>;
 
 export function runCli(
@@ -144,7 +147,20 @@ export function runCli(
     } else child.stdin.end(input);
   });
 }
-export const dockerCli: DockerCli = (...args) => runCli('docker', ...args);
+export const dockerCli: DockerCli = (args, signal, input, progress, inputControl, terminal) =>
+  terminal
+    ? runPty({
+        executable: 'docker',
+        args,
+        cwd: process.cwd(),
+        env: dockerEnvironment(),
+        signal,
+        ...(input ? { input } : {}),
+        ...(progress ? { progress } : {}),
+        ...(inputControl ? { inputControl } : {}),
+        terminal,
+      })
+    : runCli('docker', args, signal, input, progress, inputControl);
 
 export type HostCommandRunner = (
   command: string,
@@ -153,6 +169,7 @@ export type HostCommandRunner = (
   input?: string,
   progress?: (output: string, chunk?: string) => void,
   inputControl?: InputControl,
+  terminal?: TerminalOptions,
 ) => Promise<CliResult>;
 
 export const hostCommandRunner: HostCommandRunner = (
@@ -162,101 +179,117 @@ export const hostCommandRunner: HostCommandRunner = (
   input = '',
   progress,
   inputControl,
+  terminal,
 ) =>
-  new Promise((resolveResult, reject) => {
-    signal.throwIfAborted();
-    const windows = process.platform === 'win32';
-    const child = spawn(
-      windows ? 'powershell.exe' : '/bin/sh',
-      windows
-        ? ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command]
-        : ['-lc', command],
-      {
+  terminal
+    ? runPty({
+        executable: process.platform === 'win32' ? 'powershell.exe' : '/bin/sh',
+        args:
+          process.platform === 'win32'
+            ? ['-NoLogo', '-NoProfile', '-Command', command]
+            : ['-lc', command],
         cwd,
-        windowsHide: true,
-        detached: !windows,
         env: process.env,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      },
-    );
-    let detachInput: (() => void) | undefined;
-    let output = '',
-      total = 0,
-      truncated = false,
-      settled = false;
-    let forceKill: NodeJS.Timeout | undefined;
-    const decoders = [new StringDecoder('utf8'), new StringDecoder('utf8')];
-    const terminate = () => {
-      if (!child.pid) return;
-      if (windows)
-        spawn('taskkill.exe', ['/pid', String(child.pid), '/t', '/f'], {
-          windowsHide: true,
-          stdio: 'ignore',
-        }).unref();
-      else {
-        try {
-          process.kill(-child.pid, 'SIGTERM');
-          forceKill ??= setTimeout(() => {
+        signal,
+        input,
+        ...(progress ? { progress } : {}),
+        ...(inputControl ? { inputControl } : {}),
+        terminal,
+      })
+    : new Promise((resolveResult, reject) => {
+        signal.throwIfAborted();
+        const windows = process.platform === 'win32';
+        const child = spawn(
+          windows ? 'powershell.exe' : '/bin/sh',
+          windows
+            ? ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command]
+            : ['-lc', command],
+          {
+            cwd,
+            windowsHide: true,
+            detached: !windows,
+            env: process.env,
+            stdio: ['pipe', 'pipe', 'pipe'],
+          },
+        );
+        let detachInput: (() => void) | undefined;
+        let output = '',
+          total = 0,
+          truncated = false,
+          settled = false;
+        let forceKill: NodeJS.Timeout | undefined;
+        const decoders = [new StringDecoder('utf8'), new StringDecoder('utf8')];
+        const terminate = () => {
+          if (!child.pid) return;
+          if (windows)
+            spawn('taskkill.exe', ['/pid', String(child.pid), '/t', '/f'], {
+              windowsHide: true,
+              stdio: 'ignore',
+            }).unref();
+          else {
             try {
-              process.kill(-child.pid!, 'SIGKILL');
+              process.kill(-child.pid, 'SIGTERM');
+              forceKill ??= setTimeout(() => {
+                try {
+                  process.kill(-child.pid!, 'SIGKILL');
+                } catch {
+                  /* The process group already exited. */
+                }
+              }, 1000);
+              forceKill.unref();
             } catch {
-              /* The process group already exited. */
+              child.kill();
             }
-          }, 1000);
-          forceKill.unref();
-        } catch {
-          child.kill();
-        }
-      }
-    };
-    const append = (text: string) => {
-      total += Buffer.byteLength(text);
-      output += text;
-      if (output.length > 24000) {
-        output = output.slice(0, 8000) + '\n[output truncated]\n' + output.slice(-15000);
-        truncated = true;
-      }
-      progress?.(output, text);
-      if (total > 1048576) terminate();
-    };
-    const abort = () => terminate();
-    signal.addEventListener('abort', abort, { once: true });
-    child.stdout.on('data', (chunk: Buffer) => append(decoders[0]!.write(chunk)));
-    child.stderr.on('data', (chunk: Buffer) => append(decoders[1]!.write(chunk)));
-    child.stdin.on('error', () => undefined);
-    child.stdin.once('close', () => detachInput?.());
-    child.on('error', (error) => {
-      if (settled) return;
-      settled = true;
-      detachInput?.();
-      clearTimeout(forceKill);
-      signal.removeEventListener('abort', abort);
-      reject(error);
-    });
-    child.on('close', (code) => {
-      if (settled) return;
-      settled = true;
-      detachInput?.();
-      clearTimeout(forceKill);
-      signal.removeEventListener('abort', abort);
-      append(decoders[0]!.end() + decoders[1]!.end());
-      resolveResult({
-        code: signal.aborted || total > 1048576 ? null : code,
-        output,
-        truncated: truncated || total > 1048576,
+          }
+        };
+        const append = (text: string) => {
+          total += Buffer.byteLength(text);
+          output += text;
+          if (output.length > 24000) {
+            output = output.slice(0, 8000) + '\n[output truncated]\n' + output.slice(-15000);
+            truncated = true;
+          }
+          progress?.(output, text);
+          if (total > 1048576) terminate();
+        };
+        const abort = () => terminate();
+        signal.addEventListener('abort', abort, { once: true });
+        child.stdout.on('data', (chunk: Buffer) => append(decoders[0]!.write(chunk)));
+        child.stderr.on('data', (chunk: Buffer) => append(decoders[1]!.write(chunk)));
+        child.stdin.on('error', () => undefined);
+        child.stdin.once('close', () => detachInput?.());
+        child.on('error', (error) => {
+          if (settled) return;
+          settled = true;
+          detachInput?.();
+          clearTimeout(forceKill);
+          signal.removeEventListener('abort', abort);
+          reject(error);
+        });
+        child.on('close', (code) => {
+          if (settled) return;
+          settled = true;
+          detachInput?.();
+          clearTimeout(forceKill);
+          signal.removeEventListener('abort', abort);
+          append(decoders[0]!.end() + decoders[1]!.end());
+          resolveResult({
+            code: signal.aborted || total > 1048576 ? null : code,
+            output,
+            truncated: truncated || total > 1048576,
+          });
+        });
+        if (inputControl) {
+          if (input) child.stdin.write(input);
+          detachInput = inputControl((text, eof) => {
+            if (child.stdin.destroyed || child.stdin.writableEnded)
+              throw new AppError('COMMAND_INPUT_CLOSED', '명령의 입력이 닫혔습니다.');
+            if (eof) child.stdin.end(text);
+            else child.stdin.write(text);
+          });
+        } else child.stdin.end(input);
+        if (signal.aborted) terminate();
       });
-    });
-    if (inputControl) {
-      if (input) child.stdin.write(input);
-      detachInput = inputControl((text, eof) => {
-        if (child.stdin.destroyed || child.stdin.writableEnded)
-          throw new AppError('COMMAND_INPUT_CLOSED', '명령의 입력이 닫혔습니다.');
-        if (eof) child.stdin.end(text);
-        else child.stdin.write(text);
-      });
-    } else child.stdin.end(input);
-    if (signal.aborted) terminate();
-  });
 
 function localDockerHost(host: string): boolean {
   return (
@@ -301,7 +334,7 @@ export function containerArguments(
   projectPath: string,
   config: ExecutionConfig,
   execution: CommandExecution,
-  input: z.infer<typeof runCommandSchema>,
+  input: z.infer<typeof runCommandSchema> & { pty?: boolean; cols?: number; rows?: number },
 ) {
   if (/[\r\n\0,"]/.test(projectPath))
     throw new AppError(
@@ -319,6 +352,17 @@ export function containerArguments(
     '--pull=never',
     '--init',
     '--interactive',
+    ...(input.pty
+      ? [
+          '--tty',
+          '--env',
+          'TERM=xterm-256color',
+          '--env',
+          `COLUMNS=${input.cols ?? 100}`,
+          '--env',
+          `LINES=${input.rows ?? 30}`,
+        ]
+      : []),
     '--network',
     config.network,
     '--cpus',
@@ -441,6 +485,7 @@ export async function executeCommand(options: {
   record: (execution: CommandExecution) => Promise<void>;
   captureOutput?: (chunk: string) => void;
   inputControl?: InputControl;
+  terminalControl?: TerminalControl;
   cli?: DockerCli;
 }): Promise<CommandExecution> {
   const { project, signal: parent, record, cli = dockerCli } = options;
@@ -456,6 +501,7 @@ export async function executeCommand(options: {
   const execution: CommandExecution = {
     id,
     environment: 'docker',
+    ...(input.pty ? { terminal: { cols: input.cols, rows: input.rows } } : {}),
     containerName: 'lodex-' + id,
     projectId: project.id,
     command: input.command,
@@ -470,6 +516,15 @@ export async function executeCommand(options: {
   await record(execution);
   let pending: Promise<void> = Promise.resolve(),
     lastSave = 0;
+  let outputTimer: NodeJS.Timeout | undefined;
+  const publishOutput = () => {
+    clearTimeout(outputTimer);
+    outputTimer = undefined;
+    lastSave = performance.now();
+    const copy = structuredClone(execution);
+    pending = pending.then(() => record(copy));
+    void pending.catch(() => undefined);
+  };
   let creationAttempted = false;
   const signal = AbortSignal.any([parent, AbortSignal.timeout(input.timeoutMs)]);
   try {
@@ -504,15 +559,21 @@ export async function executeCommand(options: {
       (output, chunk) => {
         if (chunk) options.captureOutput?.(chunk);
         execution.output = output;
-        if (performance.now() - lastSave > 250) {
-          lastSave = performance.now();
-          const copy = structuredClone(execution);
-          pending = pending.then(() => record(copy));
-          // The awaited chain below handles persistence failure; stop further effects promptly.
-          void pending.catch(() => undefined);
-        }
+        if (performance.now() - lastSave >= 250) publishOutput();
+        else if (!outputTimer)
+          outputTimer = setTimeout(
+            publishOutput,
+            Math.max(1, 250 - (performance.now() - lastSave)),
+          );
       },
       options.inputControl,
+      input.pty
+        ? {
+            cols: input.cols,
+            rows: input.rows,
+            ...(options.terminalControl ? { control: options.terminalControl } : {}),
+          }
+        : undefined,
     );
     execution.output = result.output;
     execution.truncated = result.truncated;
@@ -565,6 +626,7 @@ export async function executeCommand(options: {
         ? error.message
         : '명령 실행이 중단되었습니다. 실행 결과를 확인하세요.';
   } finally {
+    clearTimeout(outputTimer);
     execution.cleanupPending = creationAttempted && !(await cleanupExecution(execution, cli));
     if (execution.cleanupPending) {
       execution.status = 'interrupted';
@@ -586,6 +648,7 @@ export async function executeHostCommand(options: {
   record: (execution: CommandExecution) => Promise<void>;
   captureOutput?: (chunk: string) => void;
   inputControl?: InputControl;
+  terminalControl?: TerminalControl;
   runner?: HostCommandRunner;
 }): Promise<CommandExecution> {
   const { project, signal: parent, record, runner = hostCommandRunner } = options;
@@ -600,6 +663,7 @@ export async function executeHostCommand(options: {
     containerName: 'host-' + id,
     projectId: project.id,
     environment: 'host',
+    ...(input.pty ? { terminal: { cols: input.cols, rows: input.rows } } : {}),
     command: input.command,
     cwd,
     status: 'starting',
@@ -613,6 +677,15 @@ export async function executeHostCommand(options: {
   const signal = AbortSignal.any([parent, AbortSignal.timeout(input.timeoutMs)]);
   let pending: Promise<void> = Promise.resolve(),
     lastSave = 0;
+  let outputTimer: NodeJS.Timeout | undefined;
+  const publishOutput = () => {
+    clearTimeout(outputTimer);
+    outputTimer = undefined;
+    lastSave = performance.now();
+    const copy = structuredClone(execution);
+    pending = pending.then(() => record(copy));
+    void pending.catch(() => undefined);
+  };
   try {
     execution.status = 'running';
     await record(execution);
@@ -624,14 +697,21 @@ export async function executeHostCommand(options: {
       (output, chunk) => {
         if (chunk) options.captureOutput?.(chunk);
         execution.output = output;
-        if (performance.now() - lastSave > 250) {
-          lastSave = performance.now();
-          const copy = structuredClone(execution);
-          pending = pending.then(() => record(copy));
-          void pending.catch(() => undefined);
-        }
+        if (performance.now() - lastSave >= 250) publishOutput();
+        else if (!outputTimer)
+          outputTimer = setTimeout(
+            publishOutput,
+            Math.max(1, 250 - (performance.now() - lastSave)),
+          );
       },
       options.inputControl,
+      input.pty
+        ? {
+            cols: input.cols,
+            rows: input.rows,
+            ...(options.terminalControl ? { control: options.terminalControl } : {}),
+          }
+        : undefined,
     );
     execution.output = result.output;
     execution.truncated = result.truncated;
@@ -660,6 +740,7 @@ export async function executeHostCommand(options: {
         : '호스트 명령 실행이 중단되었습니다. 결과를 확인하세요.';
   } finally {
     execution.finishedAt = new Date().toISOString();
+    clearTimeout(outputTimer);
     await pending;
     await record(execution);
   }

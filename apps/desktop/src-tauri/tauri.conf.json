@@ -13,6 +13,7 @@
     "windows": [
       {
         "label": "main",
+        "visible": false,
         "title": "Lodex",
         "width": 1380,
         "height": 900,
@@ -26,13 +27,17 @@
       "capabilities": ["main"]
     }
   },
+  "plugins": {
+    "updater": { "pubkey": "", "endpoints": [], "windows": { "installMode": "passive" } }
+  },
   "bundle": {
     "active": true,
     "targets": "all",
     "icon": ["icons/icon.png", "icons/icon.ico", "icons/icon.icns"],
     "resources": {
       "../../../.runtime/*": "runtime/",
-      "../../daemon/dist/*.cjs": "daemon/"
+      "../../daemon/dist/*.cjs": "daemon/",
+      "../../daemon/dist/node_modules/": "daemon/node_modules/"
     },
     "shortDescription": "Local-first agent workspace",
     "category": "DeveloperTool",

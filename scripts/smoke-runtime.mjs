@@ -5,6 +5,7 @@ import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
+import { smokePty } from './smoke-pty.mjs';
 
 const resourceRoot = process.argv[2] ? resolve(process.argv[2]) : null;
 const runtime = resourceRoot
@@ -172,6 +173,7 @@ async function checkSupervisor() {
   assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
 }
 try {
+  await smokePty(runtime, dirname(script), dataDir);
   await checkSupervisor();
   let app = await boot();
   const runtimeSettings = await app.request('/v1/runtime').then((r) => r.json());
@@ -201,6 +203,46 @@ try {
   });
   assert.equal(registered.status, 200);
   const { project } = await registered.json();
+  await writeFile(join(dataDir, 'language-fixture.ts'), 'const bundledLanguage = true;\n');
+  const languageRegistration = await app.request('/v1/lsp/register', {
+    method: 'POST',
+    body: JSON.stringify({
+      config: {
+        projectId: project.id,
+        name: 'Bundled language fixture',
+        executable: runtime,
+        args: [resolve('scripts/fixtures/lsp-server.cjs')],
+        languageId: 'typescript',
+        extensions: ['.ts'],
+        hostExecutionConsent: true,
+      },
+    }),
+  });
+  assert.equal(languageRegistration.status, 200);
+  const { registration: language } = await languageRegistration.json();
+  const languageQuery = await app.request('/v1/lsp/query', {
+    method: 'POST',
+    body: JSON.stringify({
+      projectId: project.id,
+      operation: 'hover',
+      query: { serverId: language.id, path: 'language-fixture.ts', line: 1, column: 7 },
+    }),
+  });
+  const languageResult = await languageQuery.json();
+  assert.equal(languageQuery.status, 200, JSON.stringify(languageResult));
+  assert.match(languageResult.result.contents.value, /bundledLanguage/);
+  assert.equal(
+    (
+      await app.request('/v1/lsp/stop', {
+        method: 'POST',
+        body: JSON.stringify({ id: language.id, revision: language.revision }),
+      })
+    ).status,
+    200,
+  );
+  console.log(
+    'PASS: bundled LSP supervisor / stdio protocol / registered host execution / hover / shutdown.',
+  );
   const skillPath = join(dataDir, 'bundled-fixture');
   await mkdir(skillPath);
   await writeFile(
