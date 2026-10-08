@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode, type KeyboardEvent } from 'react';
 import { Icon } from './icons';
 import { SettingsBusyContext } from './SettingsSurface';
+import { GlassDialog } from './GlassMotion';
 
 export const settingsSections = [
   { id: 'connection', label: '모델 연결·생성', icon: 'cloud' },
@@ -52,7 +53,7 @@ export function SettingsScreen({
     tabs.current[next]?.focus();
   }
   return (
-    <dialog
+    <GlassDialog
       className="settings-screen"
       ref={dialog}
       aria-labelledby={`${prefix}-title`}
@@ -111,6 +112,6 @@ export function SettingsScreen({
           <SettingsBusyContext.Provider value={setBusy}>{children}</SettingsBusyContext.Provider>
         </div>
       </div>
-    </dialog>
+    </GlassDialog>
   );
 }

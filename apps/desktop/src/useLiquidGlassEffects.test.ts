@@ -1,5 +1,13 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { attachLiquidGlassEffects } from './useLiquidGlassEffects';
+
+const gestures = vi.hoisted(() => ({ attach: vi.fn(), cleanup: vi.fn() }));
+vi.mock('./glass-control-gestures', () => ({ attachGlassControlGestures: gestures.attach }));
+
+beforeEach(() => {
+  gestures.attach.mockReset().mockImplementation(() => gestures.cleanup);
+  gestures.cleanup.mockReset();
+});
 
 function fixture(initiallyReduced = false) {
   class Preference extends EventTarget {
@@ -9,11 +17,29 @@ function fixture(initiallyReduced = false) {
       this.dispatchEvent(new Event('change'));
     }
   }
-  const preferences = [new Preference(), new Preference()];
+  const preferences = {
+    motion: new Preference(),
+    transparency: new Preference(),
+    forcedColors: new Preference(),
+    contrast: new Preference(),
+  };
   const frames = new Map<number, FrameRequestCallback>();
   let nextFrame = 0;
   const view = {
-    matchMedia: (query: string) => preferences[query.includes('transparency') ? 1 : 0]!,
+    matchMedia: (query: string) => {
+      switch (query) {
+        case '(prefers-reduced-motion: reduce)':
+          return preferences.motion;
+        case '(prefers-reduced-transparency: reduce)':
+          return preferences.transparency;
+        case '(forced-colors: active)':
+          return preferences.forcedColors;
+        case '(prefers-contrast: more)':
+          return preferences.contrast;
+        default:
+          throw new Error(`Unexpected media query: ${query}`);
+      }
+    },
     requestAnimationFrame: vi.fn((callback: FrameRequestCallback) => {
       frames.set(++nextFrame, callback);
       return nextFrame;
@@ -75,28 +101,28 @@ describe('Liquid Glass pointer effects', () => {
     cleanup();
   });
 
-  it('immediately honors both accessibility preferences and fully cleans up pending work', () => {
+  it('immediately honors accessibility preferences and fully cleans up pending work', () => {
     const f = fixture();
     const cleanup = attachLiquidGlassEffects(f.root);
     f.move();
     f.flush();
     f.move();
-    f.preferences[0]!.update(true);
+    f.preferences.motion.update(true);
     expect(f.frames.size).toBe(0);
     expect(f.properties.size).toBe(0);
     f.move();
     expect(f.frames.size).toBe(0);
-    f.preferences[1]!.update(true);
-    f.preferences[0]!.update(false);
+    f.preferences.transparency.update(true);
+    f.preferences.motion.update(false);
     f.move();
     expect(f.frames.size).toBe(0);
-    f.preferences[1]!.update(false);
+    f.preferences.transparency.update(false);
     f.move();
     expect(f.frames.size).toBe(1);
     cleanup();
     expect(f.frames.size).toBe(0);
-    f.preferences[0]!.update(true);
-    f.preferences[0]!.update(false);
+    f.preferences.motion.update(true);
+    f.preferences.motion.update(false);
     f.move();
     expect(f.frames.size).toBe(0);
   });
@@ -106,9 +132,63 @@ describe('Liquid Glass pointer effects', () => {
     const cleanup = attachLiquidGlassEffects(f.root);
     f.move();
     expect(f.view.requestAnimationFrame).not.toHaveBeenCalled();
-    f.preferences.forEach((preference) => preference.update(false));
+    Object.values(f.preferences).forEach((preference) => preference.update(false));
     f.move(70, 35, 'touch');
     expect(f.view.requestAnimationFrame).not.toHaveBeenCalled();
     cleanup();
+  });
+
+  it('allows explicit full motion to override only reduced motion', () => {
+    const f = fixture();
+    f.preferences.motion.update(true);
+    const cleanup = attachLiquidGlassEffects(f.root, true);
+    f.move();
+    f.flush();
+    expect(f.properties.get('--glass-pointer-active')).toBe('1');
+    expect(gestures.attach).toHaveBeenCalledOnce();
+    for (const preference of [
+      f.preferences.transparency,
+      f.preferences.forcedColors,
+      f.preferences.contrast,
+    ]) {
+      preference.update(true);
+      expect(f.properties.size).toBe(0);
+      f.move();
+      expect(f.frames.size).toBe(0);
+      preference.update(false);
+      f.move();
+      f.flush();
+      expect(f.properties.get('--glass-pointer-active')).toBe('1');
+    }
+    cleanup();
+    expect(gestures.cleanup).toHaveBeenCalledTimes(4);
+  });
+
+  it('never starts pointer or control effects when explicitly disabled', () => {
+    const f = fixture();
+    const cleanup = attachLiquidGlassEffects(f.root, false);
+    f.move();
+    f.preferences.motion.update(true);
+    f.preferences.motion.update(false);
+    f.move();
+    expect(f.frames.size).toBe(0);
+    expect(gestures.attach).not.toHaveBeenCalled();
+    cleanup();
+  });
+
+  it('stops control springs and removes preference listeners when cleaned up', () => {
+    const f = fixture();
+    const cleanup = attachLiquidGlassEffects(f.root);
+    f.move();
+    cleanup();
+    expect(f.frames.size).toBe(0);
+    expect(gestures.cleanup).toHaveBeenCalledOnce();
+    Object.values(f.preferences).forEach((preference) => {
+      preference.update(true);
+      preference.update(false);
+    });
+    f.move();
+    expect(f.frames.size).toBe(0);
+    expect(gestures.attach).toHaveBeenCalledOnce();
   });
 });

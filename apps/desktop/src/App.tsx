@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, lazy, Suspense, type FormEvent } from 'react';
+import { AnimatePresence } from 'motion/react';
 import {
   modelConfigSchema,
   defaultPlan,
@@ -32,6 +33,10 @@ import { AssistantMessage } from './AssistantMessage';
 import { loadLastModelConfig } from './model-preference';
 import { loadDesignPreference, saveDesignPreference } from './design-preference';
 import { useLiquidGlassEffects } from './useLiquidGlassEffects';
+import { useGlassRefraction } from './useGlassRefraction';
+import { useGlassMotionPreference } from './glass-motion-preference';
+import { GlassEffectsSettings } from './GlassEffectsSettings';
+import { GlassRoot, GlassPanel, GlassPopover, useGlassPanelLayout } from './GlassMotion';
 import { submitComposerDraft } from './composer-submit';
 import { ProjectDialog } from './ProjectDialog';
 import { Markdown } from './Markdown';
@@ -147,7 +152,17 @@ export function App() {
   const [light, setLight] = useState(false);
   const [design, setDesign] = useState(loadDesignPreference);
   const appSurface = useRef<HTMLDivElement>(null);
-  useLiquidGlassEffects(appSurface, design === 'glass');
+  const glassEffects = useGlassMotionPreference();
+  const glassMotion = design === 'glass' && glassEffects.allowMotion;
+  useLiquidGlassEffects(appSurface, design === 'glass', glassEffects.allowMotion);
+  useGlassRefraction(appSurface, design === 'glass' && glassEffects.preference !== 'reduced');
+  const glassLayout = useGlassPanelLayout(
+    appSurface,
+    design === 'glass',
+    glassMotion,
+    sidebarOpen,
+    planOpen,
+  );
   useEffect(() => {
     saveDesignPreference(design);
   }, [design]);
@@ -729,112 +744,129 @@ export function App() {
     Math.max(0, Math.round((contextUsed / Math.max(1, config.contextBudgetTokens)) * 100)),
   );
   return (
-    <div
+    <GlassRoot
+      allowMotion={glassMotion}
       ref={appSurface}
       className={`app ${light ? 'light' : ''} ${sidebarOpen ? '' : 'sidebar-closed'} ${planOpen ? '' : 'plan-closed'}`}
       data-design={design}
+      data-glass-effects={glassEffects.preference}
+      data-glass-motion={glassMotion ? 'full' : 'reduced'}
     >
-      <aside className="sidebar" aria-label="대화 탐색">
-        <div className="brand">
-          <span className="brand-mark">
-            <Logo />
-          </span>
-          <strong>Lodex</strong>
-          <span className="version">0.1</span>
-          <button
-            className="icon-button collapse-sidebar"
-            aria-label="사이드바 접기"
-            onClick={() => setSidebarOpen(false)}
+      <AnimatePresence initial={false}>
+        {sidebarOpen && (
+          <GlassPanel
+            key="sidebar"
+            side="left"
+            className="sidebar"
+            label="대화 탐색"
+            style={
+              design === 'glass'
+                ? { gridColumn: 1, gridRow: 1, width: glassLayout.sidebarWidth }
+                : undefined
+            }
           >
-            <Icon name="panel" size={18} />
-          </button>
-        </div>
-        <button
-          className="new-chat"
-          onClick={() => {
-            workspace.select(null);
-            setText('');
-            composer.current?.focus();
-          }}
-        >
-          <Icon name="plus" size={18} />새 대화<span>⌘ / Ctrl N</span>
-        </button>
-        <div className="sidebar-scroll">
-          <div className="nav-caption">워크스페이스</div>
-          <button
-            className={`nav-item ${!project ? 'active' : ''}`}
-            onClick={() => {
-              workspace.selectProject(null);
-              setText('');
-              composer.current?.focus();
-            }}
-          >
-            <Icon name="chat" size={18} />
-            일반 대화
-          </button>
-          <button
-            className="nav-item"
-            onClick={() => {
-              setPlanOpen((value) => !value);
-              if (window.innerWidth <= 760) setSidebarOpen(false);
-            }}
-          >
-            <Icon name="goal" size={18} />
-            작업 계획
-          </button>
-          <div className="history-caption">
-            <span>프로젝트</span>
-            <button
-              className="icon-button"
-              aria-label="프로젝트 추가"
-              onClick={() => setProjectDialog(true)}
-            >
-              <Icon name="plus" size={16} />
-            </button>
-          </div>
-          <div className="project-list">
-            {workspace.projects.map((item) => (
+            <div className="brand">
+              <span className="brand-mark">
+                <Logo />
+              </span>
+              <strong>Lodex</strong>
+              <span className="version">0.1</span>
               <button
-                key={item.id}
-                title={item.path}
-                className={`nav-item ${project?.id === item.id ? 'active' : ''}`}
+                className="icon-button collapse-sidebar"
+                aria-label="사이드바 접기"
+                onClick={() => setSidebarOpen(false)}
+              >
+                <Icon name="panel" size={18} />
+              </button>
+            </div>
+            <button
+              className="new-chat"
+              onClick={() => {
+                workspace.select(null);
+                setText('');
+                composer.current?.focus();
+              }}
+            >
+              <Icon name="plus" size={18} />새 대화<span>⌘ / Ctrl N</span>
+            </button>
+            <div className="sidebar-scroll">
+              <div className="nav-caption">워크스페이스</div>
+              <button
+                className={`nav-item ${!project ? 'active' : ''}`}
                 onClick={() => {
-                  workspace.selectProject(item.id);
+                  workspace.selectProject(null);
                   setText('');
+                  composer.current?.focus();
                 }}
               >
-                <Icon name="folder" size={17} />
-                <span>{item.name}</span>
+                <Icon name="chat" size={18} />
+                일반 대화
               </button>
-            ))}
-            {!workspace.projects.length && (
-              <button className="project-empty" onClick={() => setProjectDialog(true)}>
-                로컬 폴더 연결
+              <button
+                className="nav-item"
+                onClick={() => {
+                  setPlanOpen((value) => !value);
+                  if (window.innerWidth <= 760) setSidebarOpen(false);
+                }}
+              >
+                <Icon name="goal" size={18} />
+                작업 계획
               </button>
-            )}
-          </div>
-          <ConversationHistory
-            key={workspace.selectedProjectId ?? 'general'}
-            sessions={visibleSessions}
-            title={project ? project.name + ' 대화' : '최근 대화'}
-            onSelect={(id) => {
-              workspace.select(id);
-              setText('');
-            }}
-            onDeleted={() => setText('')}
-            onError={setError}
-          />
-        </div>
-        <div className="sidebar-bottom">
-          <button
-            className="nav-item sidebar-settings"
-            onClick={() => setSettingsSection('connection')}
-          >
-            <Icon name="settings" size={18} />
-            설정
-          </button>
-        </div>
-      </aside>
+              <div className="history-caption">
+                <span>프로젝트</span>
+                <button
+                  className="icon-button"
+                  aria-label="프로젝트 추가"
+                  onClick={() => setProjectDialog(true)}
+                >
+                  <Icon name="plus" size={16} />
+                </button>
+              </div>
+              <div className="project-list">
+                {workspace.projects.map((item) => (
+                  <button
+                    key={item.id}
+                    title={item.path}
+                    className={`nav-item ${project?.id === item.id ? 'active' : ''}`}
+                    onClick={() => {
+                      workspace.selectProject(item.id);
+                      setText('');
+                    }}
+                  >
+                    <Icon name="folder" size={17} />
+                    <span>{item.name}</span>
+                  </button>
+                ))}
+                {!workspace.projects.length && (
+                  <button className="project-empty" onClick={() => setProjectDialog(true)}>
+                    로컬 폴더 연결
+                  </button>
+                )}
+              </div>
+              <ConversationHistory
+                key={workspace.selectedProjectId ?? 'general'}
+                sessions={visibleSessions}
+                title={project ? project.name + ' 대화' : '최근 대화'}
+                onSelect={(id) => {
+                  workspace.select(id);
+                  setText('');
+                }}
+                onDeleted={() => setText('')}
+                onError={setError}
+              />
+            </div>
+            <div className="sidebar-bottom">
+              <button
+                className="nav-item sidebar-settings"
+                onClick={() => setSettingsSection('connection')}
+              >
+                <Icon name="settings" size={18} />
+                설정
+              </button>
+            </div>
+          </GlassPanel>
+        )}
+      </AnimatePresence>
       {sidebarOpen && (
         <button
           type="button"
@@ -844,7 +876,7 @@ export function App() {
         />
       )}
 
-      <main className="main">
+      <main className="main" style={design === 'glass' ? { gridColumn: 2, gridRow: 1 } : undefined}>
         <header className="topbar">
           <div className="topbar-left">
             {
@@ -894,6 +926,14 @@ export function App() {
             >
               {design === 'glass' ? '기존 디자인' : 'Liquid Glass'}
             </button>
+            {design === 'glass' && (
+              <GlassEffectsSettings
+                preference={glassEffects.preference}
+                onChange={glassEffects.setPreference}
+                systemReducedMotion={glassEffects.systemReducedMotion}
+                allowMotion={glassEffects.allowMotion}
+              />
+            )}
             <button
               className={`icon-button ${planOpen ? 'is-active' : ''}`}
               aria-label="작업 계획 패널 열기/닫기"
@@ -1101,9 +1141,12 @@ export function App() {
               void submit(event);
             }}
           >
-            {slashOpen && (
-              <SlashMenu commands={slashSuggestions} active={activeSlash} onSelect={chooseSlash} />
-            )}
+            <SlashMenu
+              open={slashOpen}
+              commands={slashSuggestions}
+              active={activeSlash}
+              onSelect={chooseSlash}
+            />
             <textarea
               ref={composer}
               role="combobox"
@@ -1193,34 +1236,37 @@ export function App() {
                   Autopilot · {permissionLabel[permissionMode]}
                   <Icon name="down" size={12} />
                 </button>
-                {permissionMenu && (
-                  <div className="permission-menu" role="menu" aria-label="Autopilot 권한 단계">
-                    {(['ask', 'auto', 'full'] as const).map((value) => (
-                      <button
-                        type="button"
-                        role="menuitemradio"
-                        aria-checked={permissionMode === value}
-                        className={permissionMode === value ? 'selected' : ''}
-                        key={value}
-                        onClick={() => {
-                          setPermissionMenu(false);
-                          if (value === 'full' && permissionMode !== 'full')
-                            setConfirmFullAccess(true);
-                          else void changePermissionMode(value);
-                        }}
-                      >
-                        <strong>{permissionLabel[value]}</strong>
-                        <span>
-                          {value === 'ask'
-                            ? '변경과 외부 작업 전에 확인'
-                            : value === 'auto'
-                              ? '일반 작업은 자동, 위험 작업은 확인'
-                              : '호스트와 네트워크를 추가 확인 없이 사용'}
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                )}
+                <GlassPopover
+                  open={permissionMenu}
+                  className="permission-menu"
+                  role="menu"
+                  aria-label="Autopilot 권한 단계"
+                >
+                  {(['ask', 'auto', 'full'] as const).map((value) => (
+                    <button
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={permissionMode === value}
+                      className={permissionMode === value ? 'selected' : ''}
+                      key={value}
+                      onClick={() => {
+                        setPermissionMenu(false);
+                        if (value === 'full' && permissionMode !== 'full')
+                          setConfirmFullAccess(true);
+                        else void changePermissionMode(value);
+                      }}
+                    >
+                      <strong>{permissionLabel[value]}</strong>
+                      <span>
+                        {value === 'ask'
+                          ? '변경과 외부 작업 전에 확인'
+                          : value === 'auto'
+                            ? '일반 작업은 자동, 위험 작업은 확인'
+                            : '호스트와 네트워크를 추가 확인 없이 사용'}
+                      </span>
+                    </button>
+                  ))}
+                </GlassPopover>
               </div>
               {config.eco && (
                 <span className="eco-tag">
@@ -1388,127 +1434,143 @@ export function App() {
           onClick={() => setPlanOpen(false)}
         />
       )}
-      {planOpen && (
-        <aside className="plan-panel" aria-label="작업 계획과 할 일">
-          <div className="plan-header">
-            <Icon name="goal" size={19} />
-            <strong>작업 계획</strong>
-            <span className="small-badge">편집</span>
-          </div>
-          <TaskListPanel
-            key={'tasks-' + (session?.id ?? 'new')}
-            session={session}
-            ensureSession={createSession}
-            onError={setError}
-          />
-          <details
-            className="goal-section"
-            open={session?.autopilot?.status === 'running' || undefined}
+      <AnimatePresence initial={false}>
+        {planOpen && (
+          <GlassPanel
+            key="plan"
+            side="right"
+            className="plan-panel"
+            label="작업 계획과 할 일"
+            style={
+              design === 'glass'
+                ? { gridColumn: 3, gridRow: 1, width: glassLayout.planWidth }
+                : undefined
+            }
           >
-            <summary>목표 추진 · Goal</summary>
-            <PlanEditor
-              key={session?.id ?? 'new'}
+            <div className="plan-header">
+              <Icon name="goal" size={19} />
+              <strong>작업 계획</strong>
+              <span className="small-badge">편집</span>
+            </div>
+            <TaskListPanel
+              key={'tasks-' + (session?.id ?? 'new')}
               session={session}
               ensureSession={createSession}
               onError={setError}
             />
-          </details>
-          <div className="run-panel">
-            {session?.projectId && <ExecutionPanel key={session.id} session={session} />}
-            <div className="section-label">현재 실행</div>
-            <div className="run-state">
-              <span className={`status-dot ${running ? 'pulsing' : ''}`} />
-              {running ? '모델 응답 생성 중' : '대기 중'}
-            </div>
-            <dl className="metrics-list">
-              <div>
-                <dt>생성 속도</dt>
-                <dd>
-                  {latestUsage?.decodeTps ? latestUsage.decodeTps.value.toFixed(1) + ' tok/s' : '—'}
-                </dd>
+            <details
+              className="goal-section"
+              open={session?.autopilot?.status === 'running' || undefined}
+            >
+              <summary>목표 추진 · Goal</summary>
+              <PlanEditor
+                key={session?.id ?? 'new'}
+                session={session}
+                ensureSession={createSession}
+                onError={setError}
+              />
+            </details>
+            <div className="run-panel">
+              {session?.projectId && <ExecutionPanel key={session.id} session={session} />}
+              <div className="section-label">현재 실행</div>
+              <div className="run-state">
+                <span className={`status-dot ${running ? 'pulsing' : ''}`} />
+                {running ? '모델 응답 생성 중' : '대기 중'}
               </div>
-              <div>
-                <dt>프리필 속도</dt>
-                <dd>
-                  {latestUsage?.prefillTps
-                    ? latestUsage.prefillTps.value.toFixed(1) + ' tok/s'
-                    : '—'}
-                </dd>
-              </div>
-              <div>
-                <dt>첫 토큰 지연</dt>
-                <dd>
-                  {latestUsage?.ttftMs ? (latestUsage.ttftMs.value / 1000).toFixed(2) + ' s' : '—'}
-                </dd>
-              </div>
-              <div>
-                <dt>출력 토큰</dt>
-                <dd>{latestUsage?.outputTokens ?? '—'}</dd>
-              </div>
-              <div>
-                <dt>비용</dt>
-                <dd>
-                  {latestUsage?.costUsd != null
-                    ? '$' + latestUsage.costUsd.toFixed(6)
-                    : config.provider === 'openrouter' && latestUsage
-                      ? '확인 대기'
-                      : '—'}
-                </dd>
-              </div>
-            </dl>
-            <p className="subtle-note">
-              속도는 엔진 보고값, 첫 토큰 지연은 앱 측정값입니다. 제공되지 않은 수치는 추정하지
-              않습니다.
-            </p>
-          </div>
-          {session?.run?.context && (
-            <details className="context-report">
-              <summary>
-                입력 구성 · {session.run.context.inputTokens === undefined ? '추정' : '실측'}{' '}
-                {(
-                  session.run.context.inputTokens ?? session.run.context.inputEstimateTokens
-                ).toLocaleString()}{' '}
-                토큰
-              </summary>
               <dl className="metrics-list">
-                {session.run.context.inputTokens !== undefined && (
-                  <div>
-                    <dt>보수적 추정</dt>
-                    <dd>{session.run.context.inputEstimateTokens.toLocaleString()}</dd>
-                  </div>
-                )}
                 <div>
-                  <dt>앱 예산</dt>
-                  <dd>{session.run.context.contextBudgetTokens.toLocaleString()}</dd>
-                </div>
-                <div>
-                  <dt>출력 예약 / 여유</dt>
+                  <dt>생성 속도</dt>
                   <dd>
-                    {session.run.context.outputReserveTokens.toLocaleString()} /{' '}
-                    {session.run.context.safetyReserveTokens.toLocaleString()}
+                    {latestUsage?.decodeTps
+                      ? latestUsage.decodeTps.value.toFixed(1) + ' tok/s'
+                      : '—'}
                   </dd>
                 </div>
                 <div>
-                  <dt>대화 이력</dt>
-                  <dd>{session.run.context.historyMessageIds.length}개 메시지</dd>
+                  <dt>프리필 속도</dt>
+                  <dd>
+                    {latestUsage?.prefillTps
+                      ? latestUsage.prefillTps.value.toFixed(1) + ' tok/s'
+                      : '—'}
+                  </dd>
                 </div>
                 <div>
-                  <dt>미완료 응답 제외</dt>
-                  <dd>{session.run.context.excludedMessageIds.length}개</dd>
+                  <dt>첫 토큰 지연</dt>
+                  <dd>
+                    {latestUsage?.ttftMs
+                      ? (latestUsage.ttftMs.value / 1000).toFixed(2) + ' s'
+                      : '—'}
+                  </dd>
                 </div>
                 <div>
-                  <dt>저장한 계획·지침</dt>
-                  <dd>{session.run.context.planIncluded ? '포함' : '제외'}</dd>
+                  <dt>출력 토큰</dt>
+                  <dd>{latestUsage?.outputTokens ?? '—'}</dd>
+                </div>
+                <div>
+                  <dt>비용</dt>
+                  <dd>
+                    {latestUsage?.costUsd != null
+                      ? '$' + latestUsage.costUsd.toFixed(6)
+                      : config.provider === 'openrouter' && latestUsage
+                        ? '확인 대기'
+                        : '—'}
+                  </dd>
                 </div>
               </dl>
               <p className="subtle-note">
-                마지막 요청 기준입니다. UTF-8 바이트를 이용한 보수적 추정으로, 실제 토큰 수·엔진
-                한도와 다를 수 있습니다. 완료된 대화는 생략하지 않습니다.
+                속도는 엔진 보고값, 첫 토큰 지연은 앱 측정값입니다. 제공되지 않은 수치는 추정하지
+                않습니다.
               </p>
-            </details>
-          )}
-        </aside>
-      )}
+            </div>
+            {session?.run?.context && (
+              <details className="context-report">
+                <summary>
+                  입력 구성 · {session.run.context.inputTokens === undefined ? '추정' : '실측'}{' '}
+                  {(
+                    session.run.context.inputTokens ?? session.run.context.inputEstimateTokens
+                  ).toLocaleString()}{' '}
+                  토큰
+                </summary>
+                <dl className="metrics-list">
+                  {session.run.context.inputTokens !== undefined && (
+                    <div>
+                      <dt>보수적 추정</dt>
+                      <dd>{session.run.context.inputEstimateTokens.toLocaleString()}</dd>
+                    </div>
+                  )}
+                  <div>
+                    <dt>앱 예산</dt>
+                    <dd>{session.run.context.contextBudgetTokens.toLocaleString()}</dd>
+                  </div>
+                  <div>
+                    <dt>출력 예약 / 여유</dt>
+                    <dd>
+                      {session.run.context.outputReserveTokens.toLocaleString()} /{' '}
+                      {session.run.context.safetyReserveTokens.toLocaleString()}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>대화 이력</dt>
+                    <dd>{session.run.context.historyMessageIds.length}개 메시지</dd>
+                  </div>
+                  <div>
+                    <dt>미완료 응답 제외</dt>
+                    <dd>{session.run.context.excludedMessageIds.length}개</dd>
+                  </div>
+                  <div>
+                    <dt>저장한 계획·지침</dt>
+                    <dd>{session.run.context.planIncluded ? '포함' : '제외'}</dd>
+                  </div>
+                </dl>
+                <p className="subtle-note">
+                  마지막 요청 기준입니다. UTF-8 바이트를 이용한 보수적 추정으로, 실제 토큰 수·엔진
+                  한도와 다를 수 있습니다. 완료된 대화는 생략하지 않습니다.
+                </p>
+              </details>
+            )}
+          </GlassPanel>
+        )}
+      </AnimatePresence>
       {confirmFullAccess && (
         <FullAccessDialog
           onClose={() => setConfirmFullAccess(false)}
@@ -1529,119 +1591,125 @@ export function App() {
           }}
         />
       )}
-      {settings && (
-        <Settings
-          config={config}
-          hasMessages={!!session?.messages.length}
-          running={!!running}
-          onClose={() => setSettings(false)}
-          onSave={applyConfig}
-        />
-      )}
-      {settingsSection && (
-        <SettingsScreen
-          selected={settingsSection}
-          onSelect={setSettingsSection}
-          onClose={() => setSettingsSection(null)}
-        >
-          <Suspense
-            fallback={
-              <div className="settings-loading" role="status">
-                설정을 불러오는 중…
-              </div>
-            }
+      <AnimatePresence>
+        {settings && (
+          <Settings
+            key="quick-settings"
+            config={config}
+            hasMessages={!!session?.messages.length}
+            running={!!running}
+            onClose={() => setSettings(false)}
+            onSave={applyConfig}
+          />
+        )}
+      </AnimatePresence>
+      <AnimatePresence>
+        {settingsSection && (
+          <SettingsScreen
+            key="settings-screen"
+            selected={settingsSection}
+            onSelect={setSettingsSection}
+            onClose={() => setSettingsSection(null)}
           >
-            <div key={`${settingsSection}-${settingsRevision}`}>
-              {settingsSection === 'connection' && (
-                <Settings
-                  embedded
-                  config={config}
-                  hasMessages={!!session?.messages.length}
-                  running={!!running}
-                  onClose={() => setSettingsSection(null)}
-                  onSave={applyConfig}
-                />
-              )}
-              {settingsSection === 'local' && (
-                <ModelManager
-                  embedded
-                  hasSession={!!session}
-                  running={!!running}
-                  onClose={() => setSettingsSection(null)}
-                  onChoose={chooseLocalModel}
-                />
-              )}
-              {settingsSection === 'routing' && (
-                <RoutingSettings
-                  embedded
-                  base={session?.config ?? workspace.config}
-                  routing={session?.routing}
-                  hasMessages={!!session?.messages.length}
-                  running={!!running}
-                  onClose={() => setSettingsSection(null)}
-                  onSave={applyRouting}
-                />
-              )}
-              {settingsSection === 'skills' && (
-                <SkillManager
-                  embedded
-                  session={session}
-                  projectId={session?.projectId ?? workspace.selectedProjectId ?? undefined}
-                  provider={contextProvider}
-                  connected={workspace.connected}
-                  onClose={() => setSettingsSection(null)}
-                  onSave={applySkills}
-                />
-              )}
-              {settingsSection === 'mcp' && (
-                <McpManager
-                  embedded
-                  session={session}
-                  projectPath={
-                    workspace.projects.find(
-                      (project) =>
-                        project.id === (session?.projectId ?? workspace.selectedProjectId),
-                    )?.path
-                  }
-                  provider={contextProvider}
-                  connected={workspace.connected}
-                  onClose={() => setSettingsSection(null)}
-                  onSave={applyMcp}
-                  onAttach={attachMcp}
-                  onRemoveAttachment={removeMcpAttachment}
-                />
-              )}
-              {settingsSection === 'telegram' && (
-                <TelegramSettings
-                  embedded
-                  sessions={workspace.sessions}
-                  selectedId={session?.id ?? null}
-                  onClose={() => setSettingsSection(null)}
-                />
-              )}
-              {settingsSection === 'data' && (
-                <DataManager embedded onClose={() => setSettingsSection(null)} />
-              )}
-              {settingsSection === 'worktree' && (
-                <WorktreeManager
-                  session={session}
-                  embedded
-                  projects={workspace.projects}
-                  selectedId={workspace.selectedProjectId}
-                  onClose={() => setSettingsSection(null)}
-                  onOpen={(project) => {
-                    workspace.upsertProject(project);
-                    workspace.selectProject(project.id);
-                    setText('');
-                    setSettingsSection(null);
-                  }}
-                />
-              )}
-            </div>
-          </Suspense>
-        </SettingsScreen>
-      )}
-    </div>
+            <Suspense
+              fallback={
+                <div className="settings-loading" role="status">
+                  설정을 불러오는 중…
+                </div>
+              }
+            >
+              <div key={`${settingsSection}-${settingsRevision}`}>
+                {settingsSection === 'connection' && (
+                  <Settings
+                    embedded
+                    config={config}
+                    hasMessages={!!session?.messages.length}
+                    running={!!running}
+                    onClose={() => setSettingsSection(null)}
+                    onSave={applyConfig}
+                  />
+                )}
+                {settingsSection === 'local' && (
+                  <ModelManager
+                    embedded
+                    hasSession={!!session}
+                    running={!!running}
+                    onClose={() => setSettingsSection(null)}
+                    onChoose={chooseLocalModel}
+                  />
+                )}
+                {settingsSection === 'routing' && (
+                  <RoutingSettings
+                    embedded
+                    base={session?.config ?? workspace.config}
+                    routing={session?.routing}
+                    hasMessages={!!session?.messages.length}
+                    running={!!running}
+                    onClose={() => setSettingsSection(null)}
+                    onSave={applyRouting}
+                  />
+                )}
+                {settingsSection === 'skills' && (
+                  <SkillManager
+                    embedded
+                    session={session}
+                    projectId={session?.projectId ?? workspace.selectedProjectId ?? undefined}
+                    provider={contextProvider}
+                    connected={workspace.connected}
+                    onClose={() => setSettingsSection(null)}
+                    onSave={applySkills}
+                  />
+                )}
+                {settingsSection === 'mcp' && (
+                  <McpManager
+                    embedded
+                    session={session}
+                    projectPath={
+                      workspace.projects.find(
+                        (project) =>
+                          project.id === (session?.projectId ?? workspace.selectedProjectId),
+                      )?.path
+                    }
+                    provider={contextProvider}
+                    connected={workspace.connected}
+                    onClose={() => setSettingsSection(null)}
+                    onSave={applyMcp}
+                    onAttach={attachMcp}
+                    onRemoveAttachment={removeMcpAttachment}
+                  />
+                )}
+                {settingsSection === 'telegram' && (
+                  <TelegramSettings
+                    embedded
+                    sessions={workspace.sessions}
+                    selectedId={session?.id ?? null}
+                    onClose={() => setSettingsSection(null)}
+                  />
+                )}
+                {settingsSection === 'data' && (
+                  <DataManager embedded onClose={() => setSettingsSection(null)} />
+                )}
+                {settingsSection === 'worktree' && (
+                  <WorktreeManager
+                    session={session}
+                    embedded
+                    projects={workspace.projects}
+                    selectedId={workspace.selectedProjectId}
+                    onClose={() => setSettingsSection(null)}
+                    onOpen={(project) => {
+                      workspace.upsertProject(project);
+                      workspace.selectProject(project.id);
+                      setText('');
+                      setSettingsSection(null);
+                    }}
+                  />
+                )}
+              </div>
+            </Suspense>
+          </SettingsScreen>
+        )}
+      </AnimatePresence>
+    </GlassRoot>
   );
 }
 

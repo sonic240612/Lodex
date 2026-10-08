@@ -38,16 +38,18 @@
   --accent-surface: #87bdff13;
   --danger: #ffb4ab;
   --shadow: #030a1640;
-  --glass-fill: #24313da8;
-  --glass-dialog: #25313efb;
+  --glass-fill: #23324255;
+  --glass-dialog: #1e2c3bf2;
   --glass-edge: #ffffff25;
   --glass-highlight: #ffffff12;
-  --glass-glint: #d9edff14;
+  --glass-glint: #d9edff38;
   --glass-shadow: 0 12px 36px #02091429, inset 0 1px 0 #ffffff14, inset 0 -1px 0 #00000012;
   --glass-spring: cubic-bezier(0.2, 0.85, 0.25, 1.25);
   background:
     radial-gradient(ellipse at 10% 0%, #47799732, transparent 52%),
-    radial-gradient(ellipse at 90% 90%, #25578b24, transparent 55%), var(--bg);
+    radial-gradient(ellipse at 90% 90%, #25578b24, transparent 55%),
+    url('./glass-backdrop.svg') center / cover,
+    var(--bg);
 }
 .app[data-design='glass'].light {
   --bg: #edf1f5;
@@ -63,15 +65,17 @@
   --accent-surface: #337fe910;
   --danger: #b63832;
   --shadow: #31455e18;
-  --glass-fill: #ffffff80;
-  --glass-dialog: #f5f9fffb;
+  --glass-fill: #ffffff3d;
+  --glass-dialog: #f5f9fff2;
   --glass-edge: #ffffffc9;
   --glass-highlight: #ffffffa3;
   --glass-glint: #ffffffb3;
   --glass-shadow: 0 12px 36px #2d496810, inset 0 1px 0 #ffffffef, inset 0 -1px 0 #5167810a;
   background:
     radial-gradient(ellipse at 6% 0%, #b6d9eb70, transparent 52%),
-    radial-gradient(ellipse at 92% 92%, #c3d7ef75, transparent 55%), var(--bg);
+    radial-gradient(ellipse at 92% 92%, #c3d7ef75, transparent 55%),
+    url('./glass-backdrop.svg') center / cover,
+    var(--bg);
 }
 
 /* A single material layer per floating surface, with light that follows input. */
@@ -499,15 +503,13 @@
     border-color: var(--muted);
   }
 }
-@media (prefers-reduced-motion: reduce) {
-  .app[data-design='glass'] *,
-  .app[data-design='glass'] *::before,
-  .app[data-design='glass'] *::after {
-    animation: none !important;
-    transition: none !important;
-    scroll-behavior: auto !important;
-    scale: none !important;
-  }
+.app[data-design='glass'][data-glass-motion='reduced'] *,
+.app[data-design='glass'][data-glass-motion='reduced'] *::before,
+.app[data-design='glass'][data-glass-motion='reduced'] *::after {
+  animation: none !important;
+  transition: none !important;
+  scroll-behavior: auto !important;
+  scale: none !important;
 }
 @media (forced-colors: active) {
   .app[data-design='glass'] {
@@ -533,6 +535,275 @@
     ) {
     background: Canvas;
     border-color: CanvasText;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    box-shadow: none;
+  }
+}
+
+/* The lens lives behind the content. Keeping the surface itself unfiltered lets
+   nested popovers sample the page, rather than a composited ancestor. */
+.app[data-design='glass']
+  :is(
+    .topbar,
+    .composer,
+    .sidebar,
+    .plan-panel,
+    .settings-screen,
+    dialog.settings-dialog,
+    .permission-menu,
+    .slash-menu,
+    .context-popover,
+    .glass-effects-menu,
+    .glass-optics-preview-lens
+  ) {
+  isolation: isolate;
+  background: transparent;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+.app[data-design='glass']
+  :is(
+    .topbar,
+    .composer,
+    .sidebar,
+    .plan-panel,
+    .settings-screen,
+    dialog.settings-dialog,
+    .permission-menu,
+    .slash-menu,
+    .context-popover,
+    .glass-effects-menu,
+    .glass-optics-preview-lens
+  )::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  pointer-events: none;
+  background:
+    radial-gradient(
+      240px 160px at var(--glass-pointer-x, 25%) var(--glass-pointer-y, 0%),
+      var(--glass-glint),
+      transparent 75%
+    ),
+    linear-gradient(155deg, var(--glass-highlight), transparent 38%, #b4daff08 72%, #ffffff12),
+    var(--glass-material-fill, var(--glass-fill));
+  -webkit-backdrop-filter: var(--glass-refraction-filter, blur(14px)) blur(0.6px) saturate(150%);
+  backdrop-filter: var(--glass-refraction-filter, blur(14px)) blur(0.6px) saturate(150%);
+  box-shadow:
+    inset 0 1px 0 #ffffff45,
+    inset 1px 0 0 #d1edff24,
+    inset 0 -1px 0 #8cbdde20,
+    inset -1px 0 0 #ffffff18;
+}
+.app[data-design='glass']
+  :is(
+    .settings-screen,
+    dialog.settings-dialog,
+    .permission-menu,
+    .slash-menu,
+    .context-popover,
+    .glass-effects-menu
+  ) {
+  --glass-material-fill: var(--glass-dialog);
+}
+.app[data-design='glass'] .topbar {
+  position: relative;
+  z-index: 10;
+}
+.app[data-design='glass'] .composer {
+  z-index: 1;
+}
+@media (min-width: 761px) {
+  .app[data-design='glass'] .sidebar {
+    position: relative;
+  }
+}
+@media (min-width: 1180px) {
+  .app[data-design='glass'] .plan-panel {
+    position: relative;
+  }
+}
+.app[data-design='glass'].sidebar-closed .sidebar[data-motion-managed] {
+  display: flex;
+}
+.app[data-design='glass'] [data-motion-managed] {
+  animation: none !important;
+}
+.app[data-design='glass'][data-glass-motion='full'] button:not(.panel-scrim) {
+  /* Motion owns transforms; CSS only transitions paint. */
+  scale: none !important;
+  transition:
+    background-color 160ms ease,
+    border-color 160ms ease,
+    box-shadow 160ms ease,
+    color 160ms ease;
+}
+.app[data-design='glass'] :is(dialog.settings-dialog, .settings-screen)::backdrop {
+  -webkit-backdrop-filter: blur(2px);
+  backdrop-filter: blur(2px);
+}
+.app[data-design='glass'] .glass-effects-control {
+  position: relative;
+}
+.app[data-design='glass'] .glass-effects-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  width: auto;
+  padding: 5px 9px;
+  font-size: 12px;
+  color: var(--accent);
+  border: 1px solid var(--glass-edge);
+  background: var(--surface);
+}
+.app[data-design='glass'] .glass-effects-menu {
+  position: absolute;
+  top: calc(100% + 14px);
+  right: 0;
+  z-index: 50;
+  width: min(326px, calc(100vw - 36px));
+  padding: 16px;
+  border: 1px solid var(--glass-edge);
+  border-radius: 24px;
+  box-shadow:
+    var(--glass-shadow),
+    0 20px 60px var(--shadow);
+  text-align: left;
+}
+.app[data-design='glass']
+  :is(.glass-effects-menu, .permission-menu, .slash-menu, .context-popover)::before {
+  -webkit-backdrop-filter: var(--glass-refraction-filter, blur(14px)) blur(5px) saturate(150%);
+  backdrop-filter: var(--glass-refraction-filter, blur(14px)) blur(5px) saturate(150%);
+}
+.glass-effects-heading {
+  font-size: 15px;
+}
+.glass-effects-status {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.65;
+  margin: 6px 0 12px;
+}
+.glass-effects-menu [role='menu'] {
+  display: grid;
+  gap: 4px;
+}
+.glass-effects-menu [role='menuitemradio'] {
+  padding: 11px 12px;
+  border: 1px solid transparent;
+  border-radius: 14px;
+  background: transparent;
+  text-align: left;
+  color: var(--text);
+}
+.glass-effects-menu [role='menuitemradio']:is(.selected, :hover) {
+  background: var(--surface-hover);
+  border-color: var(--glass-edge);
+}
+.glass-effects-menu [role='menuitemradio'] > span {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+}
+.glass-effects-menu [role='menuitemradio'] small {
+  display: block;
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 3px;
+  line-height: 1.55;
+}
+.glass-optics-preview {
+  position: relative;
+  height: 112px;
+  margin-top: 14px;
+  overflow: hidden;
+  border-radius: 17px;
+  background: #438cae;
+}
+.glass-optics-preview-lines {
+  position: absolute;
+  inset: 0;
+  background:
+    repeating-linear-gradient(
+      90deg,
+      transparent 0 17px,
+      #e0f6ffb3 17px 19px,
+      transparent 19px 36px
+    ),
+    repeating-linear-gradient(0deg, transparent 0 17px, #e0f6ff8c 17px 19px, transparent 19px 36px),
+    linear-gradient(120deg, #174864, #3191ac 65%, #85c0c9);
+}
+.app[data-design='glass'] .glass-optics-preview-lens {
+  --glass-material-fill: #9adaff0a;
+  position: absolute;
+  display: grid;
+  place-items: center;
+  inset: 19px 44px;
+  border: 1px solid #e1f7ff8c;
+  border-radius: 25px;
+  color: #fff;
+  font-size: 15px;
+  font-weight: 600;
+  text-shadow: 0 1px 5px #0d364f80;
+  box-shadow: 0 6px 15px #00213538;
+}
+.glass-optics-caption {
+  display: block;
+  margin-top: 7px;
+  color: var(--muted);
+  font-size: 11px;
+  text-align: center;
+}
+.app[data-glass-refraction='fallback'] .glass-optics-caption::after {
+  content: ' · 이 환경에서는 반투명 효과로 표시';
+}
+.app[data-glass-effects='reduced'] .glass-optics-caption::after {
+  content: ' · 굴절 꺼짐';
+}
+@media (max-width: 760px) {
+  .app[data-design='glass'] .glass-effects-label {
+    display: none;
+  }
+  .app[data-design='glass'] .glass-effects-toggle {
+    width: 32px;
+    padding: 5px;
+  }
+  .app[data-design='glass'] .glass-effects-control {
+    position: static;
+  }
+  .app[data-design='glass'] .glass-effects-menu {
+    left: 8px;
+    right: 8px;
+    width: auto;
+  }
+  .app[data-design='glass'] .topbar-left {
+    gap: 3px;
+  }
+  .app[data-design='glass'] .model-picker {
+    gap: 4px;
+  }
+}
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more), (forced-colors: active) {
+  .app[data-design='glass']
+    :is(
+      .topbar,
+      .composer,
+      .sidebar,
+      .plan-panel,
+      .settings-screen,
+      dialog.settings-dialog,
+      .permission-menu,
+      .slash-menu,
+      .context-popover,
+      .glass-effects-menu,
+      .glass-optics-preview-lens
+    )::before {
+    background: var(--bg);
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
     box-shadow: none;

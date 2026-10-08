@@ -1,21 +1,25 @@
 import { useEffect, useRef } from 'react';
 import type { SlashCommand } from './slash-commands';
+import { GlassPopover } from './GlassMotion';
 
 export function SlashMenu({
   commands,
   active,
   onSelect,
+  open = true,
 }: {
   commands: readonly SlashCommand[];
   active: number;
   onSelect: (command: SlashCommand) => void;
+  open?: boolean;
 }) {
   const menu = useRef<HTMLDivElement>(null);
   useEffect(() => {
     menu.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' });
-  }, [active]);
+  }, [active, open]);
   return (
-    <div
+    <GlassPopover
+      open={open}
       ref={menu}
       className="slash-menu"
       id="composer-slash-menu"
@@ -42,6 +46,6 @@ export function SlashMenu({
           </span>
         </button>
       ))}
-    </div>
+    </GlassPopover>
   );
 }

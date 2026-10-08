@@ -5,6 +5,7 @@ import {
   useEffect,
   type ComponentPropsWithoutRef,
 } from 'react';
+import { GlassDialog } from './GlassMotion';
 
 export const SettingsBusyContext = createContext<((busy: boolean) => void) | null>(null);
 
@@ -30,8 +31,8 @@ export const SettingsSurface = forwardRef<
       </section>
     );
   return (
-    <dialog {...props} ref={ref} open={open} onCancel={onCancel} className={className}>
+    <GlassDialog {...props} ref={ref} open={open} onCancel={onCancel} className={className}>
       {children}
-    </dialog>
+    </GlassDialog>
   );
 });

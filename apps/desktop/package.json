@@ -9,10 +9,11 @@
     "tauri": "tauri"
   },
   "dependencies": {
-    "@lodex/mcp": "0.1.0",
     "@lodex/contracts": "0.1.0",
+    "@lodex/mcp": "0.1.0",
     "@lodex/skills": "0.1.0",
     "@tauri-apps/api": "2.11.1",
+    "motion": "14.0.0",
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "react-markdown": "10.1.0",
