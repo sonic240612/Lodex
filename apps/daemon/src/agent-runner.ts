@@ -1144,7 +1144,7 @@ export async function runAgent(options: {
         continuation.push({
           role: 'system',
           content:
-            'Generation was interrupted by a new user instruction. No tool calls from that interrupted response were executed. Continue with the new instruction; do not repeat completed work.',
+            'Generation was interrupted by an additional user instruction. No tool calls from that interrupted response were executed. Continue the original task with all earlier compatible requirements and the additional instruction. Replace or cancel work only if the user explicitly asks; resolve conflicts using the newer instruction. Do not repeat completed work.',
         });
         await includeInputs();
         await save();

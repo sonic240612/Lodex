@@ -154,6 +154,81 @@ it('interrupts streaming immediately, discards partial tool calls, and applies a
     await app.close();
   }
 });
+it('retains the original task and every earlier instruction across successive stream interruptions', async () => {
+  const ready = [deferred(), deferred()];
+  let calls = 0;
+  const app = await fixture({
+    listModels: async () => [],
+    capabilities: async () => ({ tools: true, streaming: true }),
+    async *generate(request, signal) {
+      const round = calls++;
+      const input = JSON.stringify(request.messages);
+      expect(input).toContain('Implement the report export');
+      if (round >= 1) expect(input).toContain('Preserve the existing API');
+      if (round >= 2) expect(input).toContain('Also include Korean column labels');
+      if (round < 2) {
+        yield { type: 'text_delta', text: `Working round ${round}.` };
+        ready[round]!.release();
+        await untilAborted(signal);
+      } else {
+        yield { type: 'text_delta', text: 'Continued with all three requirements.' };
+        yield { type: 'finished', reason: 'stop' };
+      }
+    },
+  });
+  try {
+    expect(
+      (
+        await app.request({
+          type: 'send_message',
+          sessionId: app.session.id,
+          expectedVersion: app.session.version,
+          content: 'Implement the report export',
+        })
+      ).status,
+    ).toBe(200);
+    let runId = '';
+    for (const [index, content] of [
+      'Preserve the existing API',
+      'Also include Korean column labels',
+    ].entries()) {
+      await ready[index]!.promise;
+      const session = await app.store.session(app.session.id);
+      runId ||= session.run!.id;
+      expect(session.run!.id).toBe(runId);
+      expect(
+        (
+          await app.request({
+            type: 'steer_run',
+            sessionId: session.id,
+            runId,
+            content,
+          })
+        ).status,
+      ).toBe(200);
+    }
+    await expect
+      .poll(async () => (await app.store.session(app.session.id)).run?.status)
+      .toBe('completed');
+    const session = await app.store.session(app.session.id);
+    expect(calls).toBe(3);
+    expect(session.run!.id).toBe(runId);
+    expect(
+      session.messages.filter((message) => message.runInput?.status === 'included'),
+    ).toHaveLength(2);
+    const next = JSON.stringify(compileContext(session, 'Continue with tests').request.messages);
+    for (const instruction of [
+      'Implement the report export',
+      'Preserve the existing API',
+      'Also include Korean column labels',
+    ]) {
+      expect(next).toContain(instruction);
+    }
+  } finally {
+    await app.close();
+  }
+});
+
 it('interrupts automatic summarization to include steering without replacing the saved transcript', async () => {
   const ready = deferred();
   let summaries = 0,

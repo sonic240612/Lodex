@@ -577,6 +577,116 @@ describe('authenticated daemon integration', () => {
     ).toContain('KEEP_149');
   });
 
+  it('repeatedly compacts growing Eco context within one run while retaining archived tool evidence', async () => {
+    let round = 0,
+      summaries = 0;
+    const provider: InferenceProvider = {
+      listModels: async () => [],
+      capabilities: async () => ({ tools: true, streaming: true }),
+      countInputTokens: async (request) =>
+        request.messages[0]?.content.includes('Automatic compaction:')
+          ? 2000
+          : request.messages.some(
+                (message) => message.role === 'tool' && message.content.includes('RAW_EVIDENCE_'),
+              )
+            ? 53000
+            : 16000,
+      async *generate(request) {
+        if (request.messages[0]?.content.includes('Automatic compaction:')) {
+          summaries++;
+          expect(request.tools).toBeUndefined();
+          yield {
+            type: 'text_delta',
+            text: `Inspected ${summaries} files; preserve the API and verify the remaining work. Full evidence is saved for recall.`,
+          };
+          yield { type: 'finished', reason: 'stop' };
+          return;
+        }
+        expect(JSON.stringify(request.messages)).toContain(
+          'Inspect both files and preserve the API',
+        );
+        expect(summaries).toBe(round);
+        if (round < 2) {
+          yield {
+            type: 'tool_call_delta',
+            index: 0,
+            id: `large-${round}`,
+            name: 'read_file',
+            arguments: JSON.stringify({ path: `large-${round}.txt`, maxLines: 200 }),
+          };
+          round++;
+          yield { type: 'finished', reason: 'tool_calls' };
+        } else {
+          yield { type: 'text_delta', text: 'Inspected both files.' };
+          yield { type: 'finished', reason: 'stop' };
+        }
+      },
+    };
+    const app = await setup(provider, undefined, undefined, true);
+    for (let index = 0; index < 2; index++) {
+      await writeFile(
+        join(app.dir, `large-${index}.txt`),
+        Array.from(
+          { length: 150 },
+          (_, line) => `RAW_EVIDENCE_${index}_${line} ${'x'.repeat(65)}`,
+        ).join('\n'),
+      );
+    }
+    const { project } = await app
+      .request('/v1/projects', {
+        method: 'POST',
+        body: JSON.stringify({ path: app.dir }),
+      })
+      .then((response) => response.json());
+    const session = await app.create(
+      {
+        provider: 'llama-server',
+        model: 'fixture',
+        eco: true,
+        contextBudgetTokens: 65536,
+        maxTokens: 1000,
+        autoMaxTokens: false,
+      },
+      project.id,
+    );
+    expect(
+      (
+        await app.command(
+          makeCommand({
+            type: 'send_message',
+            sessionId: session.id,
+            expectedVersion: session.version,
+            content: 'Inspect both files and preserve the API',
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    await expect
+      .poll(async () => (await app.store.session(session.id)).run?.status)
+      .toBe('completed');
+    const final = await app.store.session(session.id);
+    const response = final.messages.find((message) => message.id === final.run!.messageId)!;
+    expect(summaries).toBe(2);
+    expect(response.runContextCompaction).toMatchObject({
+      count: 2,
+      method: 'semantic',
+      originalInputTokens: 53000,
+      compactedInputTokens: 16000,
+    });
+    expect(
+      response.activities?.filter(
+        (entry) => entry.label === '컨텍스트 자동 LLM 압축' && entry.status === 'completed',
+      ),
+    ).toHaveLength(2);
+    for (let index = 0; index < 2; index++) {
+      const original = response.continuation?.find(
+        (message) => message.toolCallId === `large-${index}`,
+      );
+      expect(original?.content).toContain(`RAW_EVIDENCE_${index}_149`);
+      expect(original?.observationId).toMatch(/^obs_[a-f0-9]{24}$/);
+    }
+  });
+
   it('projects large tool results twice, then exposes a recallable ObservationPack handle', async () => {
     let round = 0;
     const provider: InferenceProvider = {

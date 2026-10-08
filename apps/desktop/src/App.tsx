@@ -30,6 +30,7 @@ import { Icon, Logo } from './icons';
 import { useWorkspace } from './state';
 import { ActivityCards } from './ActivityCards';
 import { loadLastModelConfig } from './model-preference';
+import { submitComposerDraft } from './composer-submit';
 import { ProjectDialog } from './ProjectDialog';
 import { Markdown } from './Markdown';
 import { ConversationHistory } from './ConversationHistory';
@@ -375,89 +376,94 @@ export function App() {
     }
     setBusy(true);
     try {
-      let target = session;
-      if (running && command === 'message') {
-        workspace.upsert(
-          (
-            await sendCommand({
-              type: 'steer_run',
-              sessionId: target!.id,
-              runId: target!.run!.id,
-              content: argument,
-            })
-          ).session,
-        );
-        setText('');
-        return;
-      }
-      if (command === 'plan' || command === 'build') {
-        if (target && target.mode !== nextMode) {
-          target = (
-            await sendCommand({
-              type: 'set_mode',
-              sessionId: target.id,
-              expectedVersion: target.version,
-              mode: nextMode,
-            })
-          ).session;
-          workspace.upsert(target);
-        } else if (!target) setNewMode(nextMode);
-        if (!argument) {
-          setText('');
+      await submitComposerDraft(text, setText, async () => {
+        composer.current?.focus();
+        let target = session;
+        if (running && command === 'message') {
+          workspace.upsert(
+            (
+              await sendCommand({
+                type: 'steer_run',
+                sessionId: target!.id,
+                runId: target!.run!.id,
+                content: argument,
+              })
+            ).session,
+          );
           return;
         }
-      }
-      if (command === 'stop') {
-        workspace.upsert(
-          (await sendCommand({ type: 'cancel_run', sessionId: target!.id, runId: target!.run!.id }))
-            .session,
-        );
-      } else if (command === 'compact' || command === 'quick') {
-        workspace.upsert(
-          (
-            await sendCommand({
-              type: command === 'quick' ? 'quick_compact_context' : 'compact_context',
-              sessionId: target!.id,
-              expectedVersion: target!.version,
-            })
-          ).session,
-        );
-      } else if (command === 'resume') {
-        workspace.upsert(
-          (
-            await sendCommand({
-              type: 'resume_goal',
-              sessionId: target!.id,
-              expectedVersion: target!.version,
-            })
-          ).session,
-        );
-      } else {
-        followLatest.current = true;
-        setShowScrollToBottom(false);
-        target ??= await createSession(workspace.config, undefined, nextMode);
-        workspace.upsert(
-          (
-            await sendCommand(
-              command === 'goal'
-                ? {
-                    type: 'start_goal',
-                    sessionId: target.id,
-                    expectedVersion: target.version,
-                    goal: argument,
-                    limits: autopilotLimitsSchema.parse({}),
-                  }
-                : {
-                    type: 'send_message',
-                    sessionId: target.id,
-                    expectedVersion: target.version,
-                    content: argument,
-                  },
-            )
-          ).session,
-        );
-      }
-      setText('');
+        if (command === 'plan' || command === 'build') {
+          if (target && target.mode !== nextMode) {
+            target = (
+              await sendCommand({
+                type: 'set_mode',
+                sessionId: target.id,
+                expectedVersion: target.version,
+                mode: nextMode,
+              })
+            ).session;
+            workspace.upsert(target);
+          } else if (!target) setNewMode(nextMode);
+          if (!argument) {
+            return;
+          }
+        }
+        if (command === 'stop') {
+          workspace.upsert(
+            (
+              await sendCommand({
+                type: 'cancel_run',
+                sessionId: target!.id,
+                runId: target!.run!.id,
+              })
+            ).session,
+          );
+        } else if (command === 'compact' || command === 'quick') {
+          workspace.upsert(
+            (
+              await sendCommand({
+                type: command === 'quick' ? 'quick_compact_context' : 'compact_context',
+                sessionId: target!.id,
+                expectedVersion: target!.version,
+              })
+            ).session,
+          );
+        } else if (command === 'resume') {
+          workspace.upsert(
+            (
+              await sendCommand({
+                type: 'resume_goal',
+                sessionId: target!.id,
+                expectedVersion: target!.version,
+              })
+            ).session,
+          );
+        } else {
+          followLatest.current = true;
+          setShowScrollToBottom(false);
+          target ??= await createSession(workspace.config, undefined, nextMode);
+          workspace.upsert(
+            (
+              await sendCommand(
+                command === 'goal'
+                  ? {
+                      type: 'start_goal',
+                      sessionId: target.id,
+                      expectedVersion: target.version,
+                      goal: argument,
+                      limits: autopilotLimitsSchema.parse({}),
+                    }
+                  : {
+                      type: 'send_message',
+                      sessionId: target.id,
+                      expectedVersion: target.version,
+                      content: argument,
+                    },
+              )
+            ).session,
+          );
+        }
+      });
     } catch (failure) {
       setError(messageError(failure));
     } finally {
@@ -1086,7 +1092,7 @@ export function App() {
               }
               placeholder={
                 running
-                  ? '추가 지시를 보내면 답변 생성을 멈추고 반영합니다.'
+                  ? '추가 지시 입력 · 이전 요청을 유지하며 반영합니다.'
                   : project
                     ? project.name + '에서 작업 요청하기 · / 명령'
                     : '메시지 보내기 · / 명령'
@@ -1236,7 +1242,7 @@ export function App() {
           <div className="composer-footer">
             <span>
               {running
-                ? '추가 지시는 답변 생성 중 바로 반영합니다. 도구 실행·승인 대기 중에는 해당 단계가 끝난 뒤 반영합니다.'
+                ? '이전 요청과 추가 지시를 함께 반영합니다. 도구 실행·승인 대기 중에는 해당 단계가 끝난 뒤 반영합니다.'
                 : project
                   ? config.provider === 'openrouter' && !config.projectCloudConsent
                     ? '프로젝트 파일 전송이 꺼져 있습니다. 설정에서 허용할 수 있습니다.'

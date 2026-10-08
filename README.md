@@ -20,7 +20,7 @@ Desktop agent harness for local LLMs and OpenRouter.
 - Read one or many project files, find them with recursive globs, and search text with optional case folding; create, move, or delete reviewed paths; apply single or multi-file edits with optional Docker validation; and undo verified text edits.
 - Run Docker commands with saved limits. Full Access enables host files, shell commands, environment variables, network access, and selected MCP calls.
 - Search the public web with `web_search` and verify sources with `web_fetch`; both use the selected permission policy and bounded output.
-- Send extra instructions during a run. Active generation or automatic summarization is interrupted and resumes with the new input; running tools and pending approvals finish their current step first.
+- Keep typing after sending, including during a run. Added instructions supplement the original task; active generation or automatic summarization restarts with the combined requirements. Running tools and pending approvals finish their current step first.
 - Send live stdin/EOF to interactive commands, monitor background jobs, and stop owned processes from chat.
 - Choose **Ask**, **Approve for me**, or **Full Access** per conversation. Plan mode remains read-only.
 - Use `/goal` for goal-driven runs, or run saved plan tasks with dependencies, completion criteria, verification commands, and budgets.
