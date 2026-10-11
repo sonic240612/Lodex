@@ -1419,7 +1419,13 @@ describe('durable worker storage', () => {
         for (const [table, column] of [['sessions','document'],['events','document'],['commands','result']]) {
           for (const row of db.prepare('SELECT ' + column + ' AS body FROM ' + table).all()) {
             const value = JSON.parse(row.body);
-            const session = table === 'sessions' ? value : value.session;
+            const session =
+              table === 'sessions'
+                ? value
+                : (value.session ??
+                  (value.session = JSON.parse(
+                    db.prepare('SELECT document FROM sessions').get().document,
+                  )));
             delete session.config.contextBudgetTokens;
             delete session.plan.instructions;
             delete session.plan.includeInContext;
@@ -1479,7 +1485,13 @@ describe('durable worker storage', () => {
         for (const [table, column] of [['sessions','document'],['events','document'],['commands','result']]) {
           for (const row of db.prepare('SELECT ' + column + ' AS body FROM ' + table).all()) {
             const value = JSON.parse(row.body);
-            const session = table === 'sessions' ? value : value.session;
+            const session =
+              table === 'sessions'
+                ? value
+                : (value.session ??
+                  (value.session = JSON.parse(
+                    db.prepare('SELECT document FROM sessions').get().document,
+                  )));
             delete session.hasProjectHistory;
             session.projectId = null;
             session.messages = [{
@@ -1820,5 +1832,109 @@ describe('durable worker storage', () => {
     ])
       await expect(store.apply(command)).rejects.toMatchObject({ code: 'BUSY' });
     expect(await store.session(session.id)).toEqual(session);
+  });
+  it('stores lightweight events without duplicating full session snapshot and reconstructs session in events()', async () => {
+    const { store, path } = await db();
+    const session = await create(store);
+    await store.apply(
+      makeCommand({
+        type: 'send_message',
+        sessionId: session.id,
+        expectedVersion: session.version,
+        content: '질문 메시지입니다.',
+      }),
+    );
+    // Directly check raw SQLite events table document
+    const rawEvents = await new Promise<{ document: string }[]>((resolve) => {
+      const worker = new Worker(
+        `
+        const { DatabaseSync } = require('node:sqlite');
+        const { workerData, parentPort } = require('node:worker_threads');
+        const db = new DatabaseSync(workerData);
+        const rows = db.prepare("SELECT document FROM events WHERE session_id != ''").all();
+        db.close();
+        parentPort.postMessage(rows);
+      `,
+        { eval: true, workerData: path },
+      );
+      worker.once('message', resolve);
+    });
+    expect(rawEvents.length).toBeGreaterThan(0);
+    for (const r of rawEvents) {
+      const parsed = JSON.parse(r.document);
+      expect(parsed.session).toBeUndefined();
+    }
+    // High level API still reconstructs the session
+    const events = await store.events(0);
+    const sessionEvent = events.find((e) => e.type === 'session_changed');
+    expect(sessionEvent).toBeDefined();
+    expect(sessionEvent?.type === 'session_changed' && sessionEvent.session.id).toBe(session.id);
+  });
+  it('configures auto_vacuum=INCREMENTAL and exposes vacuum operation', async () => {
+    const { store, path } = await db();
+    await store.vacuum();
+    const av = await new Promise<number>((resolve) => {
+      const worker = new Worker(
+        `
+        const { DatabaseSync } = require('node:sqlite');
+        const { workerData, parentPort } = require('node:worker_threads');
+        const db = new DatabaseSync(workerData);
+        const row = db.prepare('PRAGMA auto_vacuum').get();
+        db.close();
+        parentPort.postMessage(row.auto_vacuum);
+      `,
+        { eval: true, workerData: path },
+      );
+      worker.once('message', resolve);
+    });
+    expect(av).toBe(2);
+  });
+  it('prunes events beyond retention threshold', async () => {
+    const { store, path } = await db();
+    const session = await create(store);
+    await new Promise<void>((resolve) => {
+      const worker = new Worker(
+        `
+        const { DatabaseSync } = require('node:sqlite');
+        const { workerData, parentPort } = require('node:worker_threads');
+        const db = new DatabaseSync(workerData);
+        db.exec('BEGIN IMMEDIATE;');
+        for (let i = 0; i < 1250; i++) {
+          db.prepare('INSERT INTO events(session_id, document) VALUES(?, ?)').run(
+            '${session.id}',
+            JSON.stringify({ protocolVersion: 1, type: 'session_changed', sessionId: '${session.id}', createdAt: new Date().toISOString() })
+          );
+        }
+        db.exec('COMMIT;');
+        db.close();
+        parentPort.postMessage('done');
+      `,
+        { eval: true, workerData: path },
+      );
+      worker.once('message', () => resolve());
+    });
+    await store.apply(
+      makeCommand({
+        type: 'save_plan',
+        sessionId: session.id,
+        expectedVersion: session.version,
+        plan: defaultPlan(),
+      }),
+    );
+    const count = await new Promise<number>((resolve) => {
+      const worker = new Worker(
+        `
+        const { DatabaseSync } = require('node:sqlite');
+        const { workerData, parentPort } = require('node:worker_threads');
+        const db = new DatabaseSync(workerData);
+        const row = db.prepare('SELECT count(*) as c FROM events').get();
+        db.close();
+        parentPort.postMessage(row.c);
+      `,
+        { eval: true, workerData: path },
+      );
+      worker.once('message', resolve);
+    });
+    expect(count).toBeLessThanOrEqual(1005);
   });
 });

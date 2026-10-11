@@ -6,6 +6,15 @@ if (!port) throw new Error('Storage must run in a worker.');
 const engine = new StorageEngine((workerData as { path: string }).path);
 engine.recover();
 port.postMessage({ ready: true });
+let maintenanceTimer: NodeJS.Timeout | undefined;
+const compactLegacyHistory = () => {
+  try {
+    if (engine.compactLegacyHistoryBatch()) maintenanceTimer = setTimeout(compactLegacyHistory, 50);
+  } catch {
+    maintenanceTimer = setTimeout(compactLegacyHistory, 5000);
+  }
+};
+maintenanceTimer = setTimeout(compactLegacyHistory, 250);
 port.on('message', (request: { id: number; method: keyof StorageEngine; args: unknown[] }) => {
   try {
     const method = engine[request.method] as (...args: unknown[]) => unknown;
@@ -13,6 +22,7 @@ port.on('message', (request: { id: number; method: keyof StorageEngine; args: un
       typeof method !== 'function' ||
       ![
         'snapshot',
+        'compactLegacyHistoryBatch',
         'backupImportCatalog',
         'importBackup',
         'integration',
@@ -55,7 +65,10 @@ port.on('message', (request: { id: number; method: keyof StorageEngine; args: un
       throw new AppError('BAD_STORAGE_METHOD', 'Unknown storage operation.');
     const result = method.apply(engine, request.args);
     port.postMessage({ id: request.id, result });
-    if (request.method === 'close') port.close();
+    if (request.method === 'close') {
+      if (maintenanceTimer) clearTimeout(maintenanceTimer);
+      port.close();
+    }
   } catch (error) {
     port.postMessage({
       id: request.id,

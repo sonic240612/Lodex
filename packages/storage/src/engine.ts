@@ -22,6 +22,7 @@ import {
   type CommandResult,
   type ContextManifest,
   type DomainEvent,
+  type SessionEvent,
   type Session,
   type Snapshot,
   type Usage,
@@ -213,8 +214,19 @@ export class StorageEngine {
   constructor(path: string) {
     this.db = new DatabaseSync(path);
     this.db.exec(
-      'PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;',
+      'PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL; PRAGMA auto_vacuum=INCREMENTAL;',
     );
+    const av = this.db.prepare('PRAGMA auto_vacuum').get() as { auto_vacuum: number };
+    if (av.auto_vacuum === 0) {
+      try {
+        this.db.exec(
+          "UPDATE events SET document = json_remove(document, '$.session') WHERE json_extract(document, '$.session') IS NOT NULL;",
+        );
+      } catch {
+        // ignore if events table does not exist
+      }
+      this.db.exec('PRAGMA auto_vacuum = INCREMENTAL; VACUUM;');
+    }
     const row = this.db.prepare('PRAGMA user_version').get() as { user_version: number };
     if (row.user_version > 17) {
       this.db.close();
@@ -330,8 +342,20 @@ export class StorageEngine {
   }
   close(): void {
     if (!this.closed) {
+      try {
+        this.db.exec('PRAGMA incremental_vacuum; PRAGMA wal_checkpoint(TRUNCATE);');
+      } catch {
+        // ignore if busy or already closed
+      }
       this.db.close();
       this.closed = true;
+    }
+  }
+  vacuum(): void {
+    try {
+      this.db.exec('PRAGMA incremental_vacuum; PRAGMA wal_checkpoint(TRUNCATE); VACUUM;');
+    } catch {
+      // ignore
     }
   }
   private transaction<T>(fn: () => T): T {
@@ -462,16 +486,39 @@ export class StorageEngine {
     return hydrate(JSON.parse(row.document) as Session);
   }
   events(after: number, limit = 200): DomainEvent[] {
-    return (
-      this.db
-        .prepare('SELECT seq, document FROM events WHERE seq>? ORDER BY seq LIMIT ?')
-        .all(after, limit) as { seq: number; document: string }[]
-    ).map((row) => {
+    const rows = this.db
+      .prepare('SELECT seq, document FROM events WHERE seq>? ORDER BY seq LIMIT ?')
+      .all(after, limit) as { seq: number; document: string }[];
+    const sessionCache = new Map<string, Session | null>();
+    const result: DomainEvent[] = [];
+    for (const row of rows) {
       const event = JSON.parse(row.document) as DomainEvent;
-      return event.type === 'session_changed'
-        ? { ...event, session: hydrate(event.session), seq: row.seq }
-        : { ...event, seq: row.seq };
-    });
+      if (event.type === 'session_changed') {
+        const stored = (event as Partial<SessionEvent>).session;
+        if (stored) {
+          result.push({ ...event, session: hydrate(stored), seq: row.seq });
+        } else {
+          let session = sessionCache.get(event.sessionId);
+          if (session === undefined) {
+            const sRow = this.db
+              .prepare('SELECT document FROM sessions WHERE id=?')
+              .get(event.sessionId) as { document: string } | undefined;
+            session = sRow ? hydrate(JSON.parse(sRow.document) as Session) : null;
+            sessionCache.set(event.sessionId, session);
+          }
+          if (session) {
+            result.push({
+              ...event,
+              session,
+              seq: row.seq,
+            });
+          }
+        }
+      } else {
+        result.push({ ...event, seq: row.seq });
+      }
+    }
+    return result;
   }
   projects(): Project[] {
     return (
@@ -803,11 +850,30 @@ export class StorageEngine {
       this.db
         .prepare('INSERT INTO commands(id,hash,result) VALUES(?,?,?)')
         .run(command.commandId, hash, JSON.stringify(result));
+      try {
+        this.db.exec('PRAGMA incremental_vacuum;');
+      } catch {
+        // ignore
+      }
       return result;
     });
   }
   private hash(command: Command | DeleteSessions): string {
     return createHash('sha256').update(JSON.stringify(command)).digest('hex');
+  }
+  private pruneEvents(keepCount = 1000): void {
+    const row = this.db
+      .prepare('SELECT MAX(seq) AS max_seq, MIN(seq) AS min_seq FROM events')
+      .get() as { max_seq: number | null; min_seq: number | null } | undefined;
+    if (row?.max_seq != null && row?.min_seq != null && row.max_seq - row.min_seq >= keepCount + 200) {
+      const cutoff = row.max_seq - keepCount;
+      this.db.prepare('DELETE FROM events WHERE seq < ?').run(cutoff);
+      try {
+        this.db.exec('PRAGMA incremental_vacuum(50);');
+      } catch {
+        // ignore
+      }
+    }
   }
   private persist(session: Session): void {
     session.updatedAt = new Date().toISOString();
@@ -823,10 +889,10 @@ export class StorageEngine {
         protocolVersion: 1,
         type: 'session_changed',
         sessionId: session.id,
-        session,
         createdAt: session.updatedAt,
       }),
     );
+    this.pruneEvents();
   }
   beginManualCompaction(
     command: Extract<Command, { type: 'compact_context' }>,

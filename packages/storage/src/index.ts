@@ -258,6 +258,9 @@ export class Store {
   updateRun(update: RunUpdate): Promise<Session> {
     return this.call('updateRun', update);
   }
+  vacuum(): Promise<void> {
+    return this.call('vacuum');
+  }
   async close(): Promise<void> {
     await this.call('close');
     await this.worker.terminate();
