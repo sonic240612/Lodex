@@ -1152,5 +1152,11 @@
   "변경 알림 꺼짐": "Resource notifications off",
   "알림 연결 끄기": "Disconnect notifications",
   "알림 다시 연결": "Reconnect notifications",
-  "변경 알림 받기": "Receive resource updates"
+  "변경 알림 받기": "Receive resource updates",
+  "파일 탐색기에서 열기": "Open in File Explorer",
+  "Finder에서 열기": "Open in Finder",
+  "파일 관리자에서 열기": "Open in File Manager",
+  "경로 복사": "Copy Path",
+  "프로젝트 메뉴": "Project menu",
+  "폴더 열기는 데스크톱 앱에서 사용할 수 있습니다.": "Opening folder is only supported in the desktop app."
 }

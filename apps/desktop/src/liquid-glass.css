@@ -88,7 +88,8 @@
     .slash-menu,
     .context-popover,
     .glass-effects-menu,
-    .glass-optics-preview-lens
+    .glass-optics-preview-lens,
+    .project-context-menu
   ) {
   isolation: isolate;
   background: transparent;
@@ -109,7 +110,8 @@
     .slash-menu,
     .context-popover,
     .glass-effects-menu,
-    .glass-optics-preview-lens
+    .glass-optics-preview-lens,
+    .project-context-menu
   )::before {
   content: '';
   position: absolute;
@@ -144,12 +146,13 @@
     .permission-menu,
     .slash-menu,
     .context-popover,
-    .glass-effects-menu
+    .glass-effects-menu,
+    .project-context-menu
   ) {
   --glass-material-fill: var(--glass-dialog);
 }
 .app[data-design='glass']
-  :is(.permission-menu, .slash-menu, .context-popover, .glass-effects-menu)::before {
+  :is(.permission-menu, .slash-menu, .context-popover, .glass-effects-menu, .project-context-menu)::before {
   -webkit-backdrop-filter: var(--glass-refraction-filter, blur(12px)) blur(4px);
   backdrop-filter: var(--glass-refraction-filter, blur(12px)) blur(4px);
 }
@@ -607,10 +610,10 @@
   transform: translateX(16px);
   background: var(--bg);
 }
-.app[data-design='glass'] :is(.permission-menu, .slash-menu, .context-popover) {
+.app[data-design='glass'] :is(.permission-menu, .slash-menu, .context-popover, .project-context-menu) {
   border-radius: 18px;
 }
-.app[data-design='glass'] :is(.permission-menu button, .slash-option) {
+.app[data-design='glass'] :is(.permission-menu button, .slash-option, .project-context-menu button) {
   border-radius: 10px;
 }
 .app[data-design='glass'] .permission-banner {

@@ -283,6 +283,16 @@ fn open_external(app: tauri::AppHandle, url: String) -> Result<(), String> {
         .map_err(|_| "링크를 열지 못했습니다.".into())
 }
 #[tauri::command]
+fn open_project_folder(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    let p = std::path::Path::new(&path);
+    if !p.exists() {
+        return Err("프로젝트 폴더가 존재하지 않습니다.".into());
+    }
+    app.opener()
+        .open_path(path, None::<&str>)
+        .map_err(|e| format!("폴더를 열지 못했습니다: {e}"))
+}
+#[tauri::command]
 async fn pick_project_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         app.dialog()
@@ -801,6 +811,7 @@ fn main() {
             autostart_status,
             configure_autostart,
             open_external,
+            open_project_folder,
             set_openrouter_key,
             set_telegram_token,
             connect_events,

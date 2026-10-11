@@ -1587,6 +1587,43 @@ button:where(
   border-radius: 8px;
   font-size: 12px;
 }
+.project-context-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 190px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: 0 16px 48px var(--shadow);
+  backdrop-filter: blur(24px);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.project-context-menu button {
+  width: 100%;
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text);
+  background: transparent;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  border: none;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.project-context-menu button:hover {
+  background: var(--surface);
+}
+.project-context-menu button span {
+  flex: 1;
+  white-space: nowrap;
+}
 .history-caption > span:first-child {
   overflow: hidden;
   text-overflow: ellipsis;

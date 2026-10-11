@@ -584,6 +584,10 @@ export async function pickProjectFolder(): Promise<string | null> {
   if (!nativeDesktop) throw new Error(localize('폴더 선택은 데스크톱 앱에서 사용할 수 있습니다.'));
   return invoke('pick_project_folder');
 }
+export async function openProjectFolder(path: string): Promise<void> {
+  if (!nativeDesktop) throw new Error(localize('폴더 열기는 데스크톱 앱에서 사용할 수 있습니다.'));
+  await invoke('open_project_folder', { path });
+}
 export async function registeredSkills(): Promise<RegisteredSkill[]> {
   if (!nativeDesktop) throw new Error(localize('스킬 등록은 데스크톱 앱에서 사용할 수 있습니다.'));
   const result = await invoke<{ skills: RegisteredSkill[] }>('daemon_request', {

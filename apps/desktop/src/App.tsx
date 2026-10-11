@@ -28,11 +28,13 @@ import {
   defaultPermissionMode,
   type PermissionMode,
   type ElicitationValue,
+  type Project,
 } from '@lodex/contracts';
 import {
   approvalAction,
   elicitationAction,
   nativeDesktop,
+  openProjectFolder,
   saveKey,
   sendCommand,
   snapshot,
@@ -154,6 +156,13 @@ const permissionLabel: Record<PermissionMode, string> = {
   auto: '대신 승인',
   full: '전체 접근',
 };
+export function nativeFileManagerLabel(): string {
+  if (typeof navigator === 'undefined') return localize('파일 탐색기에서 열기');
+  const value = `${navigator.platform} ${navigator.userAgent}`.toLowerCase();
+  if (value.includes('mac')) return localize('Finder에서 열기');
+  if (value.includes('linux')) return localize('파일 관리자에서 열기');
+  return localize('파일 탐색기에서 열기');
+}
 
 export function App() {
   useLocale();
@@ -163,6 +172,12 @@ export function App() {
   const [settingsSection, setSettingsSection] = useState<SettingsSectionId | null>(null);
   const [settingsRevision, setSettingsRevision] = useState(0);
   const [projectDialog, setProjectDialog] = useState(false);
+  const [projectMenu, setProjectMenu] = useState<{
+    project: Project;
+    x: number;
+    y: number;
+  } | null>(null);
+  const projectMenuRef = useRef<HTMLDivElement>(null);
   const [permissionMenu, setPermissionMenu] = useState(false);
   const [confirmFullAccess, setConfirmFullAccess] = useState(false);
   const [showActivities, setShowActivities] = useState(() => {
@@ -303,6 +318,29 @@ export function App() {
     window.addEventListener('keydown', shortcut);
     return () => window.removeEventListener('keydown', shortcut);
   }, []);
+
+  useEffect(() => {
+    if (!projectMenu) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (projectMenuRef.current && !projectMenuRef.current.contains(event.target as Node)) {
+        setProjectMenu(null);
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setProjectMenu(null);
+    };
+    const onDismiss = () => setProjectMenu(null);
+    window.addEventListener('pointerdown', onPointerDown, true);
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('scroll', onDismiss, true);
+    window.addEventListener('resize', onDismiss);
+    return () => {
+      window.removeEventListener('pointerdown', onPointerDown, true);
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('scroll', onDismiss, true);
+      window.removeEventListener('resize', onDismiss);
+    };
+  }, [projectMenu]);
 
   useEffect(() => {
     let disposed = false,
@@ -877,6 +915,14 @@ export function App() {
                     className={`nav-item ${project?.id === item.id ? 'active' : ''}`}
                     onClick={() => {
                       workspace.selectProject(item.id);
+                    }}
+                    onContextMenu={(event) => {
+                      event.preventDefault();
+                      setProjectMenu({
+                        project: item,
+                        x: event.clientX,
+                        y: event.clientY,
+                      });
                     }}
                   >
                     <Icon name="folder" size={17} />
@@ -1805,6 +1851,48 @@ export function App() {
           </SettingsScreen>
         )}
       </AnimatePresence>
+      {projectMenu && (
+        <div
+          ref={projectMenuRef}
+          className="project-context-menu"
+          role="menu"
+          aria-label={localize('프로젝트 메뉴')}
+          style={{
+            left: `${Math.max(8, Math.min(projectMenu.x, window.innerWidth - 220))}px`,
+            top: `${Math.max(8, Math.min(projectMenu.y, window.innerHeight - 120))}px`,
+          }}
+          onContextMenu={(event) => event.preventDefault()}
+        >
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              const target = projectMenu.project;
+              setProjectMenu(null);
+              void openProjectFolder(target.path).catch((err) => {
+                setError(messageError(err));
+              });
+            }}
+          >
+            <Icon name="external" size={15} />
+            <span>{nativeFileManagerLabel()}</span>
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              const path = projectMenu.project.path;
+              setProjectMenu(null);
+              if (typeof navigator !== 'undefined' && navigator.clipboard) {
+                void navigator.clipboard.writeText(path).catch(() => {});
+              }
+            }}
+          >
+            <Icon name="copy" size={15} />
+            <span>{localize('경로 복사')}</span>
+          </button>
+        </div>
+      )}
     </GlassRoot>
   );
 }
