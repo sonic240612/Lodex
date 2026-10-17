@@ -458,11 +458,6 @@ export class ChatCompletionProvider implements InferenceProvider {
       ...(this.kind === 'openrouter'
         ? {
             usage: { include: true },
-            provider: {
-              require_parameters: true,
-              data_collection: 'deny',
-              allow_fallbacks: false,
-            },
           }
         : {}),
     };

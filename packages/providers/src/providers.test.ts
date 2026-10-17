@@ -380,11 +380,7 @@ describe('provider adapters', () => {
     const [url, init] = fetcher.mock.calls[0]!;
     expect(url).toBe('https://openrouter.ai/api/v1/chat/completions');
     const body = JSON.parse(String(init?.body));
-    expect(body.provider).toEqual({
-      require_parameters: true,
-      data_collection: 'deny',
-      allow_fallbacks: false,
-    });
+    expect(body).not.toHaveProperty('provider');
     expect(body.usage).toEqual({ include: true });
     expect(body).not.toHaveProperty('stream_options');
     expect(body).not.toHaveProperty('parallel_tool_calls');
